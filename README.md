@@ -45,6 +45,18 @@ python benchmarks/run_synthetic.py --stage stage0
 python benchmarks/run_synthetic.py --stage cpu-smoke
 ```
 
+Benchmark JSON uses schema version 2 and includes:
+
+- `python_reference` correctness rows;
+- `torch_fp16_baseline` and `torch_int8_baseline` rows;
+- `bitmax_native` or `bitmax_cuda` rows with speedups vs the torch-style
+  baselines;
+- packed-document memory compression vs dense fp16/fp32 storage.
+
+If PyTorch is installed, the baseline rows use PyTorch. Otherwise they use a
+NumPy implementation of the same dense MaxSim formulas and mark
+`baseline_backend` as `numpy_torch_equivalent`.
+
 CUDA and larger VAST runs are gated by the earlier JSON results. Benchmark tables
 in this README should only contain measured numbers from `benchmark-results/`.
 
@@ -54,4 +66,3 @@ VAST helpers live under `ops/vast/` and are also exposed as `bitmax-vast` after
 installation. They enforce a ledger-based cleanup rule: destroy only instances
 recorded in `.vast/bitmax-instances.jsonl` whose live label still starts with
 `bitmax-v0-`.
-

@@ -10,6 +10,11 @@ import numpy as np
 
 import bitmax
 
+try:
+    import torch as _torch
+except ImportError:  # pragma: no cover - depends on optional local install
+    _torch = None
+
 
 def run_stage(stage: str, *, output_path: Path | str | None = None, gate_path: Path | str | None = None) -> dict[str, Any]:
     output = Path(output_path) if output_path is not None else Path("benchmark-results") / f"{stage}.json"
@@ -47,14 +52,54 @@ def run_stage(stage: str, *, output_path: Path | str | None = None, gate_path: P
         packed = bitmax.pack_signs(docs, offsets)
         reference_scores, reference_latency = _time_call(lambda: _python_reference_maxsim(query, packed), repeat=repeat)
         native_device = "cuda" if stage == "cuda-smoke" else "auto"
+        baseline_device = "cuda" if stage == "cuda-smoke" else "cpu"
+        fp16_runner, fp16_metadata = _dense_baseline_runner(query, packed, storage_dtype=np.float16, device=baseline_device)
+        int8_runner, int8_metadata = _dense_baseline_runner(query, packed, storage_dtype=np.int8, device=baseline_device)
+        fp16_scores, fp16_latency = _time_call(fp16_runner, repeat=repeat)
+        int8_scores, int8_latency = _time_call(int8_runner, repeat=repeat)
         native_name = "bitmax_cuda" if native_device == "cuda" else "bitmax_native"
         native_scores, native_latency = _time_call(lambda: bitmax.maxsim(query, packed, device=native_device), repeat=repeat)
 
-        rows.append(_row(stage, spec, "python_reference", reference_latency, reference_scores, reference_scores))
-        rows.append(_row(stage, spec, native_name, native_latency, native_scores, reference_scores))
+        fp16_row = _row(
+            stage,
+            spec,
+            "torch_fp16_baseline",
+            fp16_latency,
+            fp16_scores,
+            reference_scores,
+            doc_storage_bytes=_dense_doc_bytes(spec, 2),
+            metadata=fp16_metadata,
+        )
+        int8_row = _row(
+            stage,
+            spec,
+            "torch_int8_baseline",
+            int8_latency,
+            int8_scores,
+            reference_scores,
+            doc_storage_bytes=_dense_doc_bytes(spec, 1),
+            metadata=int8_metadata,
+        )
+        rows.append(_row(stage, spec, "python_reference", reference_latency, reference_scores, reference_scores, doc_storage_bytes=_packed_doc_bytes(spec)))
+        rows.append(fp16_row)
+        rows.append(int8_row)
+        rows.append(
+            _row(
+                stage,
+                spec,
+                native_name,
+                native_latency,
+                native_scores,
+                reference_scores,
+                doc_storage_bytes=_packed_doc_bytes(spec),
+                baseline_rows=[fp16_row, int8_row],
+            )
+        )
 
     result = {
+        "schema_version": 2,
         "stage": stage,
+        "baselines": ["python_reference", "torch_fp16_baseline", "torch_int8_baseline"],
         "gate_passed": _gate_passed(rows),
         "results": rows,
     }
@@ -116,6 +161,71 @@ def _python_reference_maxsim(query, packed: bitmax.PackedDocs):
     return scores
 
 
+def _dense_baseline_runner(query, packed: bitmax.PackedDocs, *, storage_dtype, device: str):
+    formula = "dense_fp16_maxsim" if storage_dtype == np.float16 else "dense_int8_doc_maxsim"
+    torch_device = _resolve_torch_device(device)
+    backend = "torch" if torch_device is not None else "numpy_torch_equivalent"
+    metadata = {
+        "baseline_backend": backend,
+        "baseline_device": str(torch_device) if torch_device is not None else "cpu",
+        "requested_baseline_device": device,
+        "formula": formula,
+    }
+    if torch_device is not None:
+        return lambda: _torch_dense_baseline_maxsim(query, packed, storage_dtype=storage_dtype, device=torch_device), metadata
+    return lambda: _numpy_dense_baseline_maxsim(query, packed, storage_dtype=storage_dtype), metadata
+
+
+def _resolve_torch_device(requested: str):
+    if _torch is None:
+        return None
+    if requested == "cuda":
+        if _torch.cuda.is_available():
+            if _torch_cuda_supports_current_device():
+                return _torch.device("cuda")
+        return None
+    return _torch.device("cpu")
+
+
+def _torch_cuda_supports_current_device() -> bool:
+    try:
+        major, minor = _torch.cuda.get_device_capability()
+        current_arch = f"sm_{major}{minor}"
+        supported_arches = set(_torch.cuda.get_arch_list())
+    except Exception:
+        return False
+    return not supported_arches or current_arch in supported_arches
+
+
+def _numpy_dense_baseline_maxsim(query, packed: bitmax.PackedDocs, *, storage_dtype) -> np.ndarray:
+    query_float = np.asarray(query, dtype=storage_dtype).astype(np.float32)
+    signs = _unpack_signs(packed.data, packed.dim).astype(storage_dtype).astype(np.float32)
+    scores = np.empty(packed.num_docs, dtype=np.float32)
+    scale = 1.0 if packed.scale is None else float(packed.scale)
+    for doc_idx in range(packed.num_docs):
+        start = int(packed.doc_offsets[doc_idx])
+        end = int(packed.doc_offsets[doc_idx + 1])
+        doc = signs[start:end]
+        scores[doc_idx] = np.max(query_float @ doc.T, axis=1).sum(dtype=np.float32) * scale
+    return scores
+
+
+def _torch_dense_baseline_maxsim(query, packed: bitmax.PackedDocs, *, storage_dtype, device) -> np.ndarray:
+    torch_dtype = _torch.float16 if storage_dtype == np.float16 else _torch.int8
+    query_tensor = _torch.as_tensor(np.asarray(query), dtype=torch_dtype, device=device)
+    signs_tensor = _torch.as_tensor(_unpack_signs(packed.data, packed.dim), dtype=torch_dtype, device=device)
+    scores = []
+    scale = 1.0 if packed.scale is None else float(packed.scale)
+    for doc_idx in range(packed.num_docs):
+        start = int(packed.doc_offsets[doc_idx])
+        end = int(packed.doc_offsets[doc_idx + 1])
+        dots = query_tensor.to(_torch.float32) @ signs_tensor[start:end].to(_torch.float32).T
+        scores.append(dots.max(dim=1).values.sum() * scale)
+    if str(device) == "cuda":
+        _torch.cuda.synchronize()
+    return _torch.stack(scores).detach().cpu().numpy().astype(np.float32, copy=False)
+
+
 def _unpack_signs(data: np.ndarray, dim: int) -> np.ndarray:
     signs = np.empty((data.shape[0], dim), dtype=np.float32)
     for bit_idx in range(dim):
@@ -124,16 +234,27 @@ def _unpack_signs(data: np.ndarray, dim: int) -> np.ndarray:
     return signs
 
 
-def _row(stage: str, spec: dict[str, Any], implementation: str, latency_ms: float, scores, reference_scores):
+def _row(
+    stage: str,
+    spec: dict[str, Any],
+    implementation: str,
+    latency_ms: float,
+    scores,
+    reference_scores,
+    *,
+    doc_storage_bytes: int,
+    baseline_rows: list[dict[str, Any]] | None = None,
+    metadata: dict[str, Any] | None = None,
+):
     delta = float(np.max(np.abs(np.asarray(scores, dtype=np.float32) - np.asarray(reference_scores, dtype=np.float32))))
-    tolerance = 1e-5 if spec["dtype"] == "int8" else 1e-3
+    tolerance = _correctness_tolerance(spec, implementation)
     docs = int(spec["docs"])
     doc_tokens = int(spec["doc_tokens"])
     dim = int(spec["dim"])
-    bytes_read = docs * doc_tokens * (dim // 8)
-    return {
+    row = {
         "stage": stage,
         "implementation": implementation,
+        "gate_blocking": implementation == "python_reference" or implementation.startswith("bitmax_"),
         "dtype": spec["dtype"],
         "dim": dim,
         "query_tokens": int(spec["query_tokens"]),
@@ -141,15 +262,42 @@ def _row(stage: str, spec: dict[str, Any], implementation: str, latency_ms: floa
         "docs": docs,
         "latency_ms": float(latency_ms),
         "docs_per_second": float(docs / max(latency_ms / 1_000.0, 1e-12)),
-        "bytes_read": int(bytes_read),
+        "bytes_read": int(doc_storage_bytes),
+        "doc_storage_bytes": int(doc_storage_bytes),
         "correctness_delta": delta,
         "correctness_tolerance": tolerance,
         "score_checksum": float(np.sum(scores, dtype=np.float64)),
     }
+    if implementation.startswith("bitmax_") and baseline_rows is not None:
+        baseline_latency = {row["implementation"]: row["latency_ms"] for row in baseline_rows}
+        row["baseline_latency_ms"] = baseline_latency
+        row["speedup_vs_torch_fp16"] = baseline_latency["torch_fp16_baseline"] / max(float(latency_ms), 1e-12)
+        row["speedup_vs_torch_int8"] = baseline_latency["torch_int8_baseline"] / max(float(latency_ms), 1e-12)
+        row["doc_memory_compression_vs_fp16"] = _dense_doc_bytes(spec, 2) / max(int(doc_storage_bytes), 1)
+        row["doc_memory_compression_vs_fp32"] = _dense_doc_bytes(spec, 4) / max(int(doc_storage_bytes), 1)
+    if metadata is not None:
+        row.update(metadata)
+    return row
+
+
+def _packed_doc_bytes(spec: dict[str, Any]) -> int:
+    return int(spec["docs"]) * int(spec["doc_tokens"]) * (int(spec["dim"]) // 8)
+
+
+def _dense_doc_bytes(spec: dict[str, Any], bytes_per_value: int) -> int:
+    return int(spec["docs"]) * int(spec["doc_tokens"]) * int(spec["dim"]) * bytes_per_value
+
+
+def _correctness_tolerance(spec: dict[str, Any], implementation: str) -> float:
+    if implementation == "torch_fp16_baseline":
+        return 5e-1
+    if spec["dtype"] == "int8":
+        return 1e-5
+    return 1e-3
 
 
 def _gate_passed(rows: list[dict[str, Any]]) -> bool:
-    return all(row["correctness_delta"] <= row["correctness_tolerance"] for row in rows)
+    return all(row["correctness_delta"] <= row["correctness_tolerance"] for row in rows if row["gate_blocking"])
 
 
 def main() -> None:

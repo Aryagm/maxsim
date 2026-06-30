@@ -15,3 +15,30 @@ python benchmarks/run_synthetic.py --stage vast-large \
 Each JSON row includes implementation, shape, latency, docs/sec, bytes read,
 score checksum, and correctness delta against the Python reference.
 
+## Schema v2
+
+Top-level fields:
+
+- `schema_version`: currently `2`.
+- `stage`: benchmark stage name.
+- `baselines`: expected baseline implementation names.
+- `gate_passed`: true when all gate-blocking rows are within tolerance.
+- `results`: per-implementation timing and correctness rows.
+
+Rows with `gate_blocking: true` decide whether the stage can unlock the next
+stage. PyTorch-style baseline rows are measurement rows, so they report
+correctness deltas but do not block gates.
+
+Native rows include:
+
+- `speedup_vs_torch_fp16`
+- `speedup_vs_torch_int8`
+- `doc_memory_compression_vs_fp16`
+- `doc_memory_compression_vs_fp32`
+- `baseline_latency_ms`
+
+The `torch_fp16_baseline` and `torch_int8_baseline` rows include:
+
+- `baseline_backend`: `torch` when PyTorch is installed, otherwise
+  `numpy_torch_equivalent`.
+- `formula`: `dense_fp16_maxsim` or `dense_int8_doc_maxsim`.
