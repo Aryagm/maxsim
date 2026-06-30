@@ -126,6 +126,36 @@ def test_cuda_resident_reused_buffers_match_reference_after_resize():
         np.testing.assert_array_equal(resident_top_indices, reference_top_indices)
 
 
+@pytest.mark.cuda
+def test_cuda_resident_dim128_uses_specialized_scoring_variant():
+    pytest.importorskip("bitmax._bitmax_cuda")
+    rng = np.random.default_rng(20260702)
+    docs = rng.normal(size=(18, 128)).astype(np.float32)
+    offsets = np.array([0, 5, 11, 18], dtype=np.int64)
+    query = rng.normal(size=(2, 4, 128)).astype(np.float32)
+    packed = bitmax.pack_signs(docs, offsets)
+    cuda_packed = bitmax.to_device(packed, "cuda")
+
+    assert cuda_packed.data.maxsim_kernel_variant == "dim128_unrolled"
+
+    host_scores = bitmax.maxsim(query, packed, device="cuda")
+    resident_scores = bitmax.maxsim(query, cuda_packed)
+    np.testing.assert_allclose(resident_scores, host_scores, rtol=0, atol=1e-5)
+
+    reference_top_indices = np.stack(
+        [np.lexsort((np.arange(row.shape[0], dtype=np.int64), -row))[:2].astype(np.int64) for row in resident_scores],
+        axis=0,
+    )
+    reference_top_scores = np.take_along_axis(resident_scores, reference_top_indices, axis=1)
+    top_scores, top_indices = bitmax.topk_maxsim(query, cuda_packed, k=2)
+    np.testing.assert_allclose(top_scores, reference_top_scores, rtol=0, atol=1e-5)
+    np.testing.assert_array_equal(top_indices, reference_top_indices)
+
+    large_docs = rng.normal(size=(129, 128)).astype(np.float32)
+    large_packed = bitmax.to_device(bitmax.pack_signs(large_docs), "cuda")
+    assert large_packed.data.maxsim_kernel_variant == "generic"
+
+
 def test_cuda_device_request_fails_clearly_without_cuda_build():
     try:
         import_module("bitmax._bitmax_cuda")

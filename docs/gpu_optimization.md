@@ -161,3 +161,52 @@ Next GPU optimization hypotheses:
    query data from global memory.
 3. Start accuracy work with global, per-token, and asymmetric scale restoration
    on the same retrieval-quality benchmark slices, then measure the latency cost.
+
+## 2026-06-30: Gated Dim-128 CUDA Scoring Specialization
+
+Change: CUDA-resident `PackedDocs` now routes small `dim=128` document sets
+through a specialized unrolled scoring kernel. The specialized kernel preserves
+the generic kernel's per-dimension accumulation order, unlike a query-byte LUT
+prototype that was faster in some cases but introduced small float-order deltas.
+The specialization is gated to `num_docs <= 128`; larger reranking shapes stay on
+the generic kernel because always-on unrolling regressed those cases.
+
+Root cause addressed:
+
+- The generic CUDA scorer loops over runtime `dim / 8` bytes and per-byte bits
+  for every document token.
+- For `dim=128`, the byte and bit loop bounds are fixed, so the compiler can
+  unroll the binary dot-product body.
+- Measurement showed that the unrolled body helps 64-document, long-document
+  retrieval batches but hurts high-document-count reranking unless gated.
+
+Measured on the same VAST RTX 4090 host, comparing `main` at `281ed2a` against
+the dim-128 specialization branch:
+
+| benchmark | operation | kernel after | before | after | speedup | correctness |
+| --- | --- | --- | ---: | ---: | ---: | --- |
+| small_repeated_64, batch8/q8/docs64/doc16/dim128 | maxsim | dim128_unrolled | 0.044 ms | 0.039 ms | 1.11x | checksum unchanged |
+| small_repeated_64, batch8/q8/docs64/doc16/dim128/k10 | top-k | dim128_unrolled | 0.062 ms | 0.056 ms | 1.10x | exact |
+| docvqa_like_64, batch64/q23/docs64/doc750/dim128 | maxsim | dim128_unrolled | 2.22 ms | 1.15 ms | 1.92x | checksum unchanged |
+| docvqa_like_64, batch64/q23/docs64/doc750/dim128/k10 | top-k | dim128_unrolled | 2.19 ms | 1.17 ms | 1.88x | exact |
+| rerank_512, batch32/q32/docs512/doc128/dim128 | maxsim | generic | 2.11 ms | 2.11 ms | 1.00x | checksum unchanged |
+| rerank_512, batch32/q32/docs512/doc128/dim128/k10 | top-k | generic | 2.13 ms | 2.13 ms | 1.00x | exact |
+| rerank_4096, batch16/q32/docs4096/doc32/dim128 | maxsim | generic | 3.39 ms | 3.38 ms | 1.00x | checksum unchanged |
+| rerank_4096, batch16/q32/docs4096/doc32/dim128/k10 | top-k | generic | 3.42 ms | 3.43 ms | 1.00x | exact |
+| dim256_control_1024, batch16/q32/docs1024/doc64/dim256 | maxsim | generic | 2.32 ms | 2.33 ms | 1.00x | checksum unchanged |
+
+The benchmark artifact is
+`benchmark-results/cuda-dim128-unrolled-4090.json`. The key research result is
+that shape-aware routing matters: an ungated dim-128 unrolled kernel improved
+DocVQA-like shapes but slowed 512/4096-document reranking, so v0.1 keeps the
+fast path only where current measurements support it.
+
+Next GPU optimization hypotheses:
+
+1. Try a query-byte LUT again only behind a shape gate and with explicit
+   score-delta reporting, because it may help high-token documents but changes
+   float accumulation order.
+2. Add a separate dim-256 specialization and benchmark it with the same
+   same-host baseline/candidate method before enabling it.
+3. Start accuracy work with global, per-token, and asymmetric scale restoration
+   on retrieval-quality benchmark slices, tracking both quality and kernel cost.

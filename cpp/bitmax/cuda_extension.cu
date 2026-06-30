@@ -81,6 +81,72 @@ __global__ void maxsim_batched_kernel(
   }
 }
 
+__device__ __forceinline__ float dot_dim128_unrolled(const float* query_row, const std::uint8_t* packed_row) {
+  float dot = 0.0F;
+#pragma unroll
+  for (int byte_idx = 0; byte_idx < 16; ++byte_idx) {
+    const std::uint8_t byte = packed_row[byte_idx];
+#pragma unroll
+    for (int bit = 0; bit < 8; ++bit) {
+      const int dim_idx = byte_idx * 8 + bit;
+      const float sign = ((byte >> bit) & 1U) ? 1.0F : -1.0F;
+      dot += sign * query_row[dim_idx];
+    }
+  }
+  return dot;
+}
+
+__global__ void maxsim_batched_dim128_unrolled_kernel(
+    const float* query,
+    const std::uint8_t* packed,
+    const std::int64_t* offsets,
+    float* output,
+    int batch,
+    int query_tokens,
+    int num_docs,
+    float scale) {
+  const int doc_idx = blockIdx.x;
+  const int batch_idx = blockIdx.y;
+  const int tid = threadIdx.x;
+  __shared__ float reductions[kBlockThreads];
+
+  if (doc_idx >= num_docs || batch_idx >= batch) {
+    return;
+  }
+
+  const std::int64_t start = offsets[doc_idx];
+  const std::int64_t end = offsets[doc_idx + 1];
+  float doc_score = 0.0F;
+
+  for (int q = 0; q < query_tokens; ++q) {
+    float local_best = -3.402823466e+38F;
+    const float* query_row = query + (static_cast<std::int64_t>(batch_idx) * query_tokens + q) * 128;
+    for (std::int64_t token = start + tid; token < end; token += blockDim.x) {
+      const std::uint8_t* packed_row = packed + token * 16;
+      const float dot = dot_dim128_unrolled(query_row, packed_row);
+      local_best = dot > local_best ? dot : local_best;
+    }
+
+    reductions[tid] = local_best;
+    __syncthreads();
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+      if (tid < stride) {
+        const float other = reductions[tid + stride];
+        reductions[tid] = other > reductions[tid] ? other : reductions[tid];
+      }
+      __syncthreads();
+    }
+    if (tid == 0 && start != end) {
+      doc_score += reductions[0];
+    }
+    __syncthreads();
+  }
+
+  if (tid == 0) {
+    output[static_cast<std::int64_t>(batch_idx) * num_docs + doc_idx] = doc_score * scale;
+  }
+}
+
 __global__ void topk_kernel(
     const float* scores,
     float* top_scores,
@@ -264,9 +330,7 @@ class CudaPackedDocs {
 
     check_cuda(cudaMemcpy(d_query_, query.data(), query_bytes, cudaMemcpyHostToDevice), "copy query to device");
 
-    dim3 grid(num_docs_, batch);
-    maxsim_batched_kernel<<<grid, kBlockThreads>>>(d_query_, d_packed_, d_offsets_, d_scores_, batch, query_tokens, dim_, num_docs_, scale);
-    check_cuda(cudaGetLastError(), "launch resident batched maxsim kernel");
+    launch_maxsim(d_query_, d_scores_, batch, query_tokens, scale, "resident batched maxsim");
     check_cuda(cudaDeviceSynchronize(), "synchronize resident batched maxsim kernel");
 
     py::array_t<float> output({batch, num_docs_});
@@ -302,9 +366,7 @@ class CudaPackedDocs {
 
     check_cuda(cudaMemcpy(d_query_, query.data(), query_bytes, cudaMemcpyHostToDevice), "copy query to device");
 
-    dim3 grid(num_docs_, batch);
-    maxsim_batched_kernel<<<grid, kBlockThreads>>>(d_query_, d_packed_, d_offsets_, d_scores_, batch, query_tokens, dim_, num_docs_, scale);
-    check_cuda(cudaGetLastError(), "launch topk maxsim kernel");
+    launch_maxsim(d_query_, d_scores_, batch, query_tokens, scale, "topk maxsim");
     topk_kernel<<<batch, kTopkThreads>>>(d_scores_, d_top_scores_, d_top_indices_, batch, num_docs_, k);
     check_cuda(cudaGetLastError(), "launch topk selection kernel");
     check_cuda(cudaDeviceSynchronize(), "synchronize topk kernels");
@@ -319,6 +381,9 @@ class CudaPackedDocs {
   int dim() const { return dim_; }
   int num_docs() const { return num_docs_; }
   std::size_t packed_size() const { return packed_size_; }
+  const char* maxsim_kernel_variant() const {
+    return use_dim128_unrolled() ? "dim128_unrolled" : "generic";
+  }
 
  private:
   template <typename T>
@@ -331,6 +396,22 @@ class CudaPackedDocs {
     cudaFree(*ptr);
     *ptr = next;
     *capacity = bytes;
+  }
+
+  void launch_maxsim(float* d_query, float* d_output, int batch, int query_tokens, float scale, const char* label) {
+    dim3 grid(num_docs_, batch);
+    if (use_dim128_unrolled()) {
+      maxsim_batched_dim128_unrolled_kernel<<<grid, kBlockThreads>>>(d_query, d_packed_, d_offsets_, d_output, batch, query_tokens, num_docs_, scale);
+      check_cuda(cudaGetLastError(), (std::string("launch ") + label + " dim128 unrolled kernel").c_str());
+      return;
+    }
+
+    maxsim_batched_kernel<<<grid, kBlockThreads>>>(d_query, d_packed_, d_offsets_, d_output, batch, query_tokens, dim_, num_docs_, scale);
+    check_cuda(cudaGetLastError(), (std::string("launch ") + label + " generic kernel").c_str());
+  }
+
+  bool use_dim128_unrolled() const {
+    return dim_ == 128 && num_docs_ <= 128;
   }
 
   std::uint8_t* d_packed_ = nullptr;
@@ -468,7 +549,8 @@ PYBIND11_MODULE(_bitmax_cuda, m) {
       .def("topk_batch", &CudaPackedDocs::topk_batch, py::arg("query"), py::arg("k"), py::arg("scale") = 1.0F)
       .def_property_readonly("dim", &CudaPackedDocs::dim)
       .def_property_readonly("num_docs", &CudaPackedDocs::num_docs)
-      .def_property_readonly("packed_size", &CudaPackedDocs::packed_size);
+      .def_property_readonly("packed_size", &CudaPackedDocs::packed_size)
+      .def_property_readonly("maxsim_kernel_variant", &CudaPackedDocs::maxsim_kernel_variant);
   m.def("maxsim_cuda", &maxsim_cuda, py::arg("query"), py::arg("packed"), py::arg("offsets"), py::arg("dim"), py::arg("scale") = 1.0F);
   m.def("maxsim_cuda_batch", &maxsim_cuda_batch, py::arg("query"), py::arg("packed"), py::arg("offsets"), py::arg("dim"), py::arg("scale") = 1.0F);
 }
