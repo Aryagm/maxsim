@@ -62,6 +62,24 @@ CUDA and larger VAST runs are gated by the earlier JSON results:
 Benchmark tables in this README should only contain measured numbers from
 `benchmark-results/`.
 
+Retrieval-level benchmarks consume multi-vector embedding `.npz` files and qrels
+without building an index:
+
+```bash
+python benchmarks/run_retrieval.py --stage fixture-smoke
+python benchmarks/build_vidore_embeddings.py \
+  --dataset vidore/docvqa_test_subsampled \
+  --limit 16 \
+  --model vidore/colqwen2-v1.0-hf \
+  --output benchmark-results/vidore-docvqa-colqwen2.npz
+python benchmarks/run_retrieval.py \
+  --stage embeddings-smoke \
+  --input benchmark-results/vidore-docvqa-colqwen2.npz
+```
+
+Those rows report recall/MRR/NDCG, top-k agreement with dense fp16 MaxSim,
+latency, speedup, and document-memory compression.
+
 ## VAST
 
 VAST helpers live under `ops/vast/` and are also exposed as `bitmax-vast` after

@@ -50,3 +50,55 @@ MaxSim over the uniform synthetic document layout and include:
 - `requested_baseline_device`: the requested benchmark device.
 - `formula`: `dense_fp16_vectorized_maxsim` or
   `dense_int8_vectorized_doc_maxsim`.
+
+## Retrieval Benchmarks
+
+The retrieval benchmark measures the online reranking path over multi-vector
+embeddings and qrels. It still does not build an index or database. The input is
+an `.npz` file with:
+
+- `doc_embeddings`: `[total_doc_tokens, dim]` float array.
+- `doc_offsets`: `[num_docs + 1]` int64 offsets into `doc_embeddings`.
+- `query_embeddings`: `[num_queries, query_tokens, dim]`, or flattened
+  `[total_query_tokens, dim]` with `query_offsets`.
+- `qrels`: dense `[num_queries, num_docs]` relevance matrix, or
+  `relevant_doc_ids`: one positive doc index per query.
+- Optional `dataset_name`, `query_ids`, and `doc_ids`.
+
+Run the local retrieval smoke first:
+
+```bash
+python benchmarks/run_retrieval.py \
+  --stage fixture-smoke \
+  --output benchmark-results/retrieval-fixture.json
+```
+
+Run a real embedding file on CPU before renting a GPU:
+
+```bash
+python benchmarks/build_vidore_embeddings.py \
+  --dataset vidore/docvqa_test_subsampled \
+  --split test \
+  --limit 16 \
+  --model vidore/colqwen2-v1.0-hf \
+  --output benchmark-results/vidore-docvqa-colqwen2.npz
+python benchmarks/run_retrieval.py \
+  --stage embeddings-smoke \
+  --input benchmark-results/vidore-docvqa-colqwen2.npz \
+  --output benchmark-results/retrieval-embeddings-smoke.json
+```
+
+Then run the same embedding file on CUDA only after the CPU gate passes:
+
+```bash
+python benchmarks/run_retrieval.py \
+  --stage embeddings-cuda-smoke \
+  --input benchmark-results/vidore-docvqa-colqwen2.npz \
+  --gate benchmark-results/retrieval-embeddings-smoke.json \
+  --output benchmark-results/retrieval-embeddings-cuda-smoke.json
+```
+
+Retrieval rows report latency, queries/sec, recall, MRR, NDCG, top-k agreement
+with dense fp16 MaxSim, speedup for the bitmax row, and document-memory
+compression. Dense fp16 uses the original document embeddings; bitmax packs the
+same document embeddings to one-bit signs and scores with `bitmax.maxsim`.

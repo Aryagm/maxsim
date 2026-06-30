@@ -12,12 +12,15 @@ dependencies = ["numpy>=1.24"]
 
 [project.scripts]
 bitmax-bench = "benchmarks.run_synthetic:main"
+bitmax-retrieval-bench = "benchmarks.run_retrieval:main"
+bitmax-vidore-embeddings = "benchmarks.build_vidore_embeddings:main"
 bitmax-vast = "ops.vast.vast_workflow:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
 torch = ["torch>=2.0"]
 vast = ["vastai>=0.3.0"]
+vision-retrieval = ["accelerate>=0.30", "datasets>=2.19", "pillow>=10", "torch>=2.0", "transformers>=4.57"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
