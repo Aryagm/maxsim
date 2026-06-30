@@ -18,6 +18,27 @@ python benchmarks/run_synthetic.py --stage vast-large \
 Each JSON row includes implementation, shape, latency, docs/sec, bytes read,
 score checksum, and correctness delta against the Python reference.
 
+## Blog-Style Quantization Baseline
+
+Use this benchmark to reproduce the blogpost-style late-interaction scoring
+shape before changing kernels or formats. It compares fp32 query/docs,
+int8 query/docs, int8 query with binary docs, and binary query/docs.
+
+```bash
+python -m benchmarks.blog_baseline \
+  --stage smoke \
+  --output benchmark-results/blog-baseline-smoke.json
+python -m benchmarks.blog_baseline \
+  --stage blog-shape \
+  --repeat 1 \
+  --output benchmark-results/blog-baseline-blog-shape.json
+```
+
+Rows report `latency_ms`, `doc_storage_bytes_per_doc`,
+`speedup_vs_fp32`, and `max_abs_delta_vs_reference`. The `blog-shape`
+stage uses the blogpost scoring dimensions: 33 query tokens, 1000
+documents, 786 document tokens per document, and 128 dimensions.
+
 ## Schema v2
 
 Top-level fields:
@@ -104,5 +125,6 @@ compression. Dense fp16 uses the original document embeddings; bitmax packs the
 same document embeddings to one-bit signs and scores with `bitmax.maxsim`.
 Pass `--scale global` or `--scale doc` to test global or per-document scale
 restoration. `doc` scale can improve ranking when magnitude differences between
-documents carry useful signal, but it currently applies the vector scale outside
-the fused CUDA top-k path.
+documents carry useful signal. CUDA-resident packed docs upload stored doc-scale
+vectors and apply them inside resident `maxsim` and fused `topk_maxsim`; CPU and
+host-packed CUDA paths apply vector scales after native scoring.
