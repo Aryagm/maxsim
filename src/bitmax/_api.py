@@ -18,7 +18,7 @@ except ImportError:  # pragma: no cover - exercised only in CUDA builds
 
 @dataclass(frozen=True)
 class PackedDocs:
-    data: np.ndarray
+    data: object
     doc_offsets: np.ndarray
     dim: int
     num_docs: int
@@ -27,8 +27,8 @@ class PackedDocs:
 
 
 def pack_signs(doc_embeddings, doc_offsets=None, *, dim=None, scale=None, device="cpu") -> PackedDocs:
-    if device != "cpu":
-        raise NotImplementedError("device='cuda' packing is not implemented in v0.1")
+    if device not in ("cpu", "cuda"):
+        raise ValueError("device must be 'cpu' or 'cuda'")
 
     docs = _as_numpy(doc_embeddings)
     if docs.ndim != 2:
@@ -56,7 +56,7 @@ def pack_signs(doc_embeddings, doc_offsets=None, *, dim=None, scale=None, device
     else:
         stored_scale = float(scale)
 
-    return PackedDocs(
+    packed_docs = PackedDocs(
         data=packed,
         doc_offsets=offsets,
         dim=actual_dim,
@@ -64,14 +64,42 @@ def pack_signs(doc_embeddings, doc_offsets=None, *, dim=None, scale=None, device
         scale=stored_scale,
         device="cpu",
     )
+    return packed_docs if device == "cpu" else to_device(packed_docs, "cuda")
+
+
+def to_device(packed: PackedDocs, device: Literal["cpu", "cuda"] = "cuda") -> PackedDocs:
+    if device not in ("cpu", "cuda"):
+        raise ValueError("device must be 'cpu' or 'cuda'")
+    _validate_packed(packed)
+    if device == packed.device:
+        return packed
+    if device == "cpu":
+        raise NotImplementedError("copying CUDA PackedDocs back to CPU is not implemented")
+    if _bitmax_cuda is None or not hasattr(_bitmax_cuda, "CudaPackedDocs"):
+        raise NotImplementedError("CUDA PackedDocs are not available in this build")
+
+    packed_data = np.ascontiguousarray(packed.data, dtype=np.uint8)
+    offsets = np.ascontiguousarray(packed.doc_offsets, dtype=np.int64)
+    handle = _bitmax_cuda.CudaPackedDocs(packed_data, offsets, packed.dim)
+    return PackedDocs(
+        data=handle,
+        doc_offsets=offsets.copy(),
+        dim=packed.dim,
+        num_docs=packed.num_docs,
+        scale=packed.scale,
+        device="cuda",
+    )
 
 
 def maxsim(query_tokens, packed: PackedDocs, *, scale=None, device="auto"):
     if device not in ("auto", "cpu", "cuda"):
         raise ValueError("device must be 'auto', 'cpu', or 'cuda'")
-    if device == "cuda" and _bitmax_cuda is None:
+    effective_device = "cuda" if device == "auto" and isinstance(packed, PackedDocs) and packed.device == "cuda" else device
+    if effective_device == "cuda" and packed.device == "cpu" and _bitmax_cuda is None:
         raise NotImplementedError("CUDA maxsim is not available in this build")
     _validate_packed(packed)
+    if packed.device == "cuda" and effective_device in ("auto", "cpu"):
+        raise NotImplementedError("CPU scoring for CUDA PackedDocs is not implemented")
 
     query = _as_numpy(query_tokens)
     if query.ndim == 2:
@@ -89,7 +117,11 @@ def maxsim(query_tokens, packed: PackedDocs, *, scale=None, device="auto"):
     result = np.empty((query_float.shape[0], packed.num_docs), dtype=np.float32)
     multiplier = _resolve_scale(scale, packed)
 
-    if device == "cuda":
+    if effective_device == "cuda" and packed.device == "cuda":
+        batch_result = packed.data.maxsim_batch(np.ascontiguousarray(query_float, dtype=np.float32), float(multiplier))
+        return batch_result[0] if squeeze else batch_result
+
+    if effective_device == "cuda":
         packed_data = np.ascontiguousarray(packed.data, dtype=np.uint8)
         offsets = np.ascontiguousarray(packed.doc_offsets, dtype=np.int64)
         batch_kernel = getattr(_bitmax_cuda, "maxsim_cuda_batch", None)
@@ -190,10 +222,16 @@ def _normalize_offsets(doc_offsets, num_tokens: int) -> np.ndarray:
 def _validate_packed(packed: PackedDocs) -> None:
     if not isinstance(packed, PackedDocs):
         raise TypeError("packed must be a PackedDocs instance")
-    if packed.device != "cpu":
-        raise NotImplementedError("CUDA PackedDocs are not available in this build")
     if packed.dim % 8 != 0:
         raise ValueError("packed.dim must be divisible by 8")
+    if packed.device == "cuda":
+        if not hasattr(packed.data, "maxsim_batch"):
+            raise ValueError("CUDA PackedDocs data must expose maxsim_batch")
+        if packed.doc_offsets.ndim != 1 or packed.doc_offsets.shape[0] != packed.num_docs + 1:
+            raise ValueError("packed.doc_offsets must have shape [num_docs + 1]")
+        return
+    if packed.device != "cpu":
+        raise ValueError("packed.device must be 'cpu' or 'cuda'")
     if packed.data.ndim != 2 or packed.data.shape[1] != packed.dim // 8:
         raise ValueError("packed.data must have shape [num_doc_tokens, dim / 8]")
     if packed.doc_offsets.ndim != 1 or packed.doc_offsets.shape[0] != packed.num_docs + 1:

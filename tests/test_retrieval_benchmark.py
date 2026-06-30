@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from benchmarks.run_retrieval import run_stage
-from benchmarks.run_retrieval import RetrievalEmbeddings, _bitmax_scores
+from benchmarks.run_retrieval import RetrievalEmbeddings, _bitmax_scores, _prepare_bitmax_packed
 
 
 def _write_tiny_embedding_file(path):
@@ -136,3 +136,18 @@ def test_cuda_retrieval_scores_pad_ragged_queries_for_single_batch_call(monkeypa
     assert len(calls) == 1
     assert calls[0][2] == "cuda"
     np.testing.assert_array_equal(scores, np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32))
+
+
+def test_cuda_retrieval_prepares_resident_packed_docs_once(monkeypatch):
+    packed = __import__("bitmax").pack_signs(np.ones((2, 8), dtype=np.float32))
+    calls = []
+
+    def fake_to_device(packed_arg, device):
+        calls.append((packed_arg, device))
+        return "cuda-packed"
+
+    monkeypatch.setattr("benchmarks.run_retrieval.bitmax.to_device", fake_to_device)
+
+    assert _prepare_bitmax_packed(packed, "cuda") == "cuda-packed"
+    assert calls == [(packed, "cuda")]
+    assert _prepare_bitmax_packed(packed, "auto") is packed

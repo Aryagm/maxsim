@@ -61,9 +61,10 @@ def run_stage(
         repeat=actual_repeat,
     )
     packed = bitmax.pack_signs(dataset.doc_embeddings, dataset.doc_offsets, scale=scale)
+    scoring_packed = _prepare_bitmax_packed(packed, native_device)
     bitmax_name = "bitmax_cuda" if native_device == "cuda" else "bitmax_native"
     bitmax_scores, bitmax_latency = _time_call(
-        lambda: _bitmax_scores(dataset, packed, device=native_device),
+        lambda: _bitmax_scores(dataset, scoring_packed, device=native_device),
         repeat=actual_repeat,
     )
 
@@ -369,6 +370,10 @@ def _bitmax_scores(dataset: RetrievalEmbeddings, packed: bitmax.PackedDocs, *, d
         return bitmax.maxsim(_padded_query_batch(dataset.query_embeddings), packed, device=device).astype(np.float32, copy=False)
     rows = [bitmax.maxsim(query, packed, device=device) for query in dataset.query_embeddings]
     return np.stack(rows, axis=0).astype(np.float32, copy=False)
+
+
+def _prepare_bitmax_packed(packed: bitmax.PackedDocs, device: str):
+    return bitmax.to_device(packed, "cuda") if device == "cuda" else packed
 
 
 def _padded_query_batch(query_embeddings: tuple[np.ndarray, ...]) -> np.ndarray:

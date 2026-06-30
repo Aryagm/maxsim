@@ -145,6 +145,71 @@ def test_cuda_batched_queries_dispatch_once_when_batch_kernel_is_available(monke
     np.testing.assert_allclose(scores, np.array([[36.0, -36.0], [-36.0, 36.0]], dtype=np.float32))
 
 
+def test_to_device_uploads_cpu_packed_docs_to_cuda_handle(monkeypatch):
+    import bitmax._api as api
+
+    docs = np.array(
+        [
+            [1, -1, 1, -1, 1, -1, 1, -1],
+            [-1, 1, -1, 1, -1, 1, -1, 1],
+        ],
+        dtype=np.float32,
+    )
+    packed = bitmax.pack_signs(docs, scale="global")
+    calls = []
+
+    class FakeCuda:
+        class CudaPackedDocs:
+            def __init__(self, data, offsets, dim):
+                calls.append((data.copy(), offsets.copy(), dim))
+
+    monkeypatch.setattr(api, "_bitmax_cuda", FakeCuda())
+
+    cuda_packed = bitmax.to_device(packed, "cuda")
+
+    assert cuda_packed.device == "cuda"
+    assert cuda_packed.dim == packed.dim
+    assert cuda_packed.num_docs == packed.num_docs
+    assert cuda_packed.scale == packed.scale
+    np.testing.assert_array_equal(cuda_packed.doc_offsets, packed.doc_offsets)
+    assert len(calls) == 1
+    np.testing.assert_array_equal(calls[0][0], packed.data)
+    np.testing.assert_array_equal(calls[0][1], packed.doc_offsets)
+    assert calls[0][2] == packed.dim
+
+
+def test_maxsim_auto_uses_cuda_resident_packed_docs_without_host_packed_copy():
+    query = np.array(
+        [
+            [[1, 2, 3, 4, 5, 6, 7, 8]],
+            [[-1, -2, -3, -4, -5, -6, -7, -8]],
+        ],
+        dtype=np.float32,
+    )
+    calls = []
+
+    class FakeCudaPacked:
+        def maxsim_batch(self, query_arg, scale_arg):
+            calls.append((query_arg.copy(), scale_arg))
+            return np.array([[36.0, -36.0], [-36.0, 36.0]], dtype=np.float32)
+
+    cuda_packed = bitmax.PackedDocs(
+        data=FakeCudaPacked(),
+        doc_offsets=np.array([0, 1, 2], dtype=np.int64),
+        dim=8,
+        num_docs=2,
+        scale=2.0,
+        device="cuda",
+    )
+
+    scores = bitmax.maxsim(query, cuda_packed)
+
+    assert len(calls) == 1
+    assert calls[0][0].shape == (2, 1, 8)
+    assert calls[0][1] == 2.0
+    np.testing.assert_allclose(scores, np.array([[36.0, -36.0], [-36.0, 36.0]], dtype=np.float32))
+
+
 def test_topk_maxsim_sorts_by_score_descending_then_lower_doc_id():
     docs = np.array(
         [
