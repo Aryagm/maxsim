@@ -365,8 +365,24 @@ def _torch_dense_fp16_scores(dataset: RetrievalEmbeddings, device) -> np.ndarray
 
 
 def _bitmax_scores(dataset: RetrievalEmbeddings, packed: bitmax.PackedDocs, *, device: str) -> np.ndarray:
+    if device == "cuda":
+        return bitmax.maxsim(_padded_query_batch(dataset.query_embeddings), packed, device=device).astype(np.float32, copy=False)
     rows = [bitmax.maxsim(query, packed, device=device) for query in dataset.query_embeddings]
     return np.stack(rows, axis=0).astype(np.float32, copy=False)
+
+
+def _padded_query_batch(query_embeddings: tuple[np.ndarray, ...]) -> np.ndarray:
+    if not query_embeddings:
+        raise ValueError("at least one query embedding is required")
+    batch = len(query_embeddings)
+    max_tokens = max(int(query.shape[0]) for query in query_embeddings)
+    dim = int(query_embeddings[0].shape[1])
+    padded = np.zeros((batch, max_tokens, dim), dtype=np.float32)
+    for query_idx, query in enumerate(query_embeddings):
+        if query.ndim != 2 or int(query.shape[1]) != dim:
+            raise ValueError("each query embedding must have shape [query_tokens, dim]")
+        padded[query_idx, : query.shape[0], :] = query.astype(np.float32, copy=False)
+    return padded
 
 
 def _uniform_doc_tokens(doc_offsets: np.ndarray) -> int | None:

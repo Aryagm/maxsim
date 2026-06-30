@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 from benchmarks.run_retrieval import run_stage
+from benchmarks.run_retrieval import RetrievalEmbeddings, _bitmax_scores
 
 
 def _write_tiny_embedding_file(path):
@@ -98,3 +99,40 @@ def test_retrieval_stage_rejects_missing_qrels(tmp_path):
     with pytest.raises(ValueError, match="qrels"):
         run_stage("embeddings-smoke", input_path=input_path, output_path=tmp_path / "retrieval.json")
 
+
+def test_cuda_retrieval_scores_pad_ragged_queries_for_single_batch_call(monkeypatch):
+    docs = np.array(
+        [
+            [1, -1, 1, -1, 1, -1, 1, -1],
+            [-1, 1, -1, 1, -1, 1, -1, 1],
+        ],
+        dtype=np.float32,
+    )
+    dataset = RetrievalEmbeddings(
+        name="ragged",
+        query_embeddings=(
+            np.ones((1, 8), dtype=np.float32),
+            np.full((3, 8), 2.0, dtype=np.float32),
+        ),
+        doc_embeddings=docs,
+        doc_offsets=np.array([0, 1, 2], dtype=np.int64),
+        qrels=np.eye(2, dtype=np.float32),
+        query_ids=("q0", "q1"),
+        doc_ids=("d0", "d1"),
+    )
+    packed = __import__("bitmax").pack_signs(dataset.doc_embeddings, dataset.doc_offsets)
+    calls = []
+
+    def fake_maxsim(query, packed_arg, *, device):
+        calls.append((query.copy(), packed_arg, device))
+        assert query.shape == (2, 3, 8)
+        np.testing.assert_array_equal(query[0, 1:], np.zeros((2, 8), dtype=np.float32))
+        return np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
+
+    monkeypatch.setattr("benchmarks.run_retrieval.bitmax.maxsim", fake_maxsim)
+
+    scores = _bitmax_scores(dataset, packed, device="cuda")
+
+    assert len(calls) == 1
+    assert calls[0][2] == "cuda"
+    np.testing.assert_array_equal(scores, np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32))

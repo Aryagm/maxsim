@@ -92,6 +92,17 @@ def maxsim(query_tokens, packed: PackedDocs, *, scale=None, device="auto"):
     if device == "cuda":
         packed_data = np.ascontiguousarray(packed.data, dtype=np.uint8)
         offsets = np.ascontiguousarray(packed.doc_offsets, dtype=np.int64)
+        batch_kernel = getattr(_bitmax_cuda, "maxsim_cuda_batch", None)
+        if batch_kernel is not None:
+            batch_result = batch_kernel(
+                np.ascontiguousarray(query_float, dtype=np.float32),
+                packed_data,
+                offsets,
+                packed.dim,
+                float(multiplier),
+            )
+            return batch_result[0] if squeeze else batch_result
+
         for batch_idx, query in enumerate(query_float):
             result[batch_idx] = _bitmax_cuda.maxsim_cuda(
                 np.ascontiguousarray(query, dtype=np.float32),

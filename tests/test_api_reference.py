@@ -109,6 +109,42 @@ def test_maxsim_supports_batched_queries_and_global_scale():
     )
 
 
+def test_cuda_batched_queries_dispatch_once_when_batch_kernel_is_available(monkeypatch):
+    import bitmax._api as api
+
+    docs = np.array(
+        [
+            [1, -1, 1, -1, 1, -1, 1, -1],
+            [-1, 1, -1, 1, -1, 1, -1, 1],
+        ],
+        dtype=np.float32,
+    )
+    query = np.array(
+        [
+            [[1, 2, 3, 4, 5, 6, 7, 8]],
+            [[-1, -2, -3, -4, -5, -6, -7, -8]],
+        ],
+        dtype=np.float32,
+    )
+    packed = bitmax.pack_signs(docs)
+    calls = []
+
+    class FakeCuda:
+        @staticmethod
+        def maxsim_cuda_batch(query_arg, packed_arg, offsets_arg, dim_arg, scale_arg):
+            calls.append((query_arg.shape, packed_arg.shape, offsets_arg.tolist(), dim_arg, scale_arg))
+            assert query_arg.flags.c_contiguous
+            return np.array([[36.0, -36.0], [-36.0, 36.0]], dtype=np.float32)
+
+    monkeypatch.setattr(api, "_bitmax_cuda", FakeCuda())
+
+    scores = bitmax.maxsim(query, packed, device="cuda")
+
+    assert len(calls) == 1
+    assert calls[0] == ((2, 1, 8), (2, 1), [0, 1, 2], 8, 1.0)
+    np.testing.assert_allclose(scores, np.array([[36.0, -36.0], [-36.0, 36.0]], dtype=np.float32))
+
+
 def test_topk_maxsim_sorts_by_score_descending_then_lower_doc_id():
     docs = np.array(
         [
@@ -133,4 +169,3 @@ def test_pack_signs_rejects_dimensions_not_divisible_by_eight(bad_dim):
 
     with pytest.raises(ValueError, match="dim must be divisible by 8"):
         bitmax.pack_signs(docs)
-

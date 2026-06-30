@@ -24,6 +24,33 @@ def test_cuda_maxsim_matches_cpu_reference_for_small_fixture():
     np.testing.assert_allclose(cuda_scores, cpu_scores, rtol=0, atol=1e-5)
 
 
+@pytest.mark.cuda
+def test_cuda_batched_maxsim_matches_cpu_reference_for_ragged_docs():
+    pytest.importorskip("bitmax._bitmax_cuda")
+    docs = np.array(
+        [
+            [1, -2, 3, -4, 5, -6, 7, -8],
+            [-1, 2, -3, 4, -5, 6, -7, 8],
+            [1, 2, -3, -4, 5, 6, -7, -8],
+        ],
+        dtype=np.float32,
+    )
+    offsets = np.array([0, 2, 3], dtype=np.int64)
+    query = np.array(
+        [
+            [[3, -1, 2, -4, 5, -6, 7, -8], [0, 0, 0, 0, 0, 0, 0, 0]],
+            [[-2, 4, -6, 8, -1, 3, -5, 7], [2, -4, 6, -8, 1, -3, 5, -7]],
+        ],
+        dtype=np.float32,
+    )
+    packed = bitmax.pack_signs(docs, offsets)
+
+    cpu_scores = bitmax.maxsim(query, packed, device="cpu")
+    cuda_scores = bitmax.maxsim(query, packed, device="cuda")
+
+    np.testing.assert_allclose(cuda_scores, cpu_scores, rtol=0, atol=1e-5)
+
+
 def test_cuda_device_request_fails_clearly_without_cuda_build():
     try:
         import_module("bitmax._bitmax_cuda")
