@@ -1,0 +1,2 @@
+"""Benchmark entrypoints for bitmax."""
+

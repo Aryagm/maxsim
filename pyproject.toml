@@ -1,0 +1,31 @@
+[build-system]
+requires = ["scikit-build-core>=0.10", "pybind11>=2.13", "numpy>=2.0"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "bitmax"
+version = "0.1.0"
+description = "Exact asymmetric binary MaxSim kernels for compressed multi-vector scoring."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = ["numpy>=1.24"]
+
+[project.scripts]
+bitmax-bench = "benchmarks.run_synthetic:main"
+bitmax-vast = "ops.vast.vast_workflow:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+torch = ["torch>=2.0"]
+vast = ["vastai>=0.3.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+  "benchmark_smoke: short benchmark smoke tests for staged timing signal",
+  "cuda: tests that require a CUDA-capable build and GPU",
+]
+
+[tool.scikit-build]
+cmake.source-dir = "."
+wheel.packages = ["src/bitmax", "benchmarks", "ops"]
