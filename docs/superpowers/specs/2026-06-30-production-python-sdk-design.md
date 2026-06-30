@@ -22,6 +22,21 @@ The user-facing pitch:
 > Use ColBERT/ColPali/ColQwen-style multi-vector retrieval with 8-32x smaller
 > document embeddings and fast local or GPU MaxSim search/reranking.
 
+## CUDA-First Scope
+
+This phase is strictly CUDA-first for proof, benchmarks, and release claims.
+CPU paths can exist for cheap API correctness tests and developer convenience,
+but they are not the product proof. MLX, Metal, WebGPU, ONNX Runtime, and other
+local accelerator kernels are explicitly deferred.
+
+All performance claims must come from CUDA runs against CUDA baselines:
+
+- dense fp16 MaxSim on CUDA;
+- torch-style dense top-k/reranking on CUDA when practical;
+- `bitmax` binary, `binary_q40`, and int4 on CUDA;
+- measured storage bytes, latency, speedup, recall@1, recall@10, MRR@10, and
+  NDCG@10 on the same embedding slices.
+
 ## Target Users
 
 - Engineers building local/private document search over PDFs, screenshots,
@@ -86,7 +101,9 @@ Supported modes:
 
 ### Reranker
 
-Add `bitmax.Reranker`, a runtime scoring object.
+Add `bitmax.Reranker`, a runtime scoring object. The SDK should support
+`device="cpu"` for correctness and small local experimentation, but README and
+benchmark examples should use `device="cuda"` as the production path.
 
 ```python
 reranker = bitmax.Reranker.from_corpus(corpus, device="cuda")
@@ -158,7 +175,7 @@ Add `examples/local_multivector_search.py`.
 The demo consumes an existing retrieval embedding `.npz` file, such as the
 ViDoRe/ColQwen2 benchmark artifact, and prints a compact comparison table:
 
-- dense fp16 baseline document storage and latency.
+- dense fp16 CUDA baseline document storage and latency.
 - `binary` storage, latency, speedup, recall@1, recall@10, MRR@10, NDCG@10.
 - `binary_q40` storage, latency, speedup, recall@1, recall@10, MRR@10,
   NDCG@10.
@@ -191,10 +208,16 @@ Local tests:
 - Demo smoke test runs on a tiny `.npz` fixture and emits JSON with size,
   latency, and ranking metrics.
 
+Local tests are correctness-only. They do not establish performance claims.
+
 CUDA tests:
 
 - `Reranker.load(..., device="cuda")` works for binary and int4 on a CUDA build.
 - CUDA SDK search/rerank scores match CPU SDK results on small fixtures.
+- The SDK demo runs against the VAST limit-256 embedding artifact on CUDA and
+  emits rows comparing dense fp16 CUDA, binary CUDA, q40 centroid CUDA, and int4
+  CUDA.
+- The demo artifact is the source of README benchmark claims for this SDK phase.
 
 ## Documentation
 
@@ -213,6 +236,7 @@ Update:
 - No first-stage ANN index.
 - No production candidate-only CUDA kernel yet; candidate filtering can be
   implemented in Python after full-corpus scoring for the first SDK release.
+- No MLX, Metal, WebGPU, or local accelerator kernels in this phase.
 
 ## Release Bar
 
@@ -220,6 +244,7 @@ The SDK is ready to call an alpha when:
 
 - The public SDK tests pass locally.
 - CUDA SDK tests pass on the persistent VAST worker.
-- The local search demo produces a JSON artifact and a readable table.
+- The CUDA local search demo produces a JSON artifact and a readable table on
+  the persistent VAST worker.
 - README shows a complete end-to-end SDK example.
 - Existing low-level APIs and benchmarks remain compatible.
