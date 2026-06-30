@@ -1,0 +1,49 @@
+{
+  "benchmark": "cuda_resident_docs",
+  "gpu": "RTX_4090",
+  "rows": [
+    {
+      "batch": 64,
+      "correctness_delta": 0.0,
+      "dense_fp16_doc_bytes": 12288000,
+      "dim": 128,
+      "doc_tokens": 750,
+      "docs": 64,
+      "host_packed_latency_ms": 2.67334800446406,
+      "name": "docvqa_like_64",
+      "packed_doc_bytes": 768000,
+      "query_tokens": 23,
+      "resident_packed_latency_ms": 2.2511749994009733,
+      "speedup_vs_host_packed": 1.1875345120550045
+    },
+    {
+      "batch": 32,
+      "correctness_delta": 0.0,
+      "dense_fp16_doc_bytes": 16777216,
+      "dim": 128,
+      "doc_tokens": 128,
+      "docs": 512,
+      "host_packed_latency_ms": 2.940651000244543,
+      "name": "rerank_512",
+      "packed_doc_bytes": 1048576,
+      "query_tokens": 32,
+      "resident_packed_latency_ms": 2.207093988545239,
+      "speedup_vs_host_packed": 1.3323632865235673
+    },
+    {
+      "batch": 16,
+      "correctness_delta": 0.0,
+      "dense_fp16_doc_bytes": 33554432,
+      "dim": 256,
+      "doc_tokens": 64,
+      "docs": 1024,
+      "host_packed_latency_ms": 2.97631201101467,
+      "name": "rerank_1024_dim256",
+      "packed_doc_bytes": 2097152,
+      "query_tokens": 32,
+      "resident_packed_latency_ms": 2.428526000585407,
+      "speedup_vs_host_packed": 1.2255631647745244
+    }
+  ],
+  "schema_version": 1
+}

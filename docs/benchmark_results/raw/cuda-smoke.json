@@ -1,0 +1,36 @@
+{
+  "gate_passed": true,
+  "results": [
+    {
+      "bytes_read": 16384,
+      "correctness_delta": 0.0,
+      "correctness_tolerance": 0.001,
+      "dim": 128,
+      "doc_tokens": 16,
+      "docs": 64,
+      "docs_per_second": 53934.43113026144,
+      "dtype": "float32",
+      "implementation": "python_reference",
+      "latency_ms": 1.1866260319948196,
+      "query_tokens": 8,
+      "score_checksum": 10106.337509155273,
+      "stage": "cuda-smoke"
+    },
+    {
+      "bytes_read": 16384,
+      "correctness_delta": 4.57763671875e-05,
+      "correctness_tolerance": 0.001,
+      "dim": 128,
+      "doc_tokens": 16,
+      "docs": 64,
+      "docs_per_second": 335843.59468764893,
+      "dtype": "float32",
+      "implementation": "bitmax_cuda",
+      "latency_ms": 0.19056489691138268,
+      "query_tokens": 8,
+      "score_checksum": 10106.337287902832,
+      "stage": "cuda-smoke"
+    }
+  ],
+  "stage": "cuda-smoke"
+}

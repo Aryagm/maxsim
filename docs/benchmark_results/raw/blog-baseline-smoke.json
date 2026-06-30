@@ -1,0 +1,72 @@
+{
+  "benchmark": "blog_baseline",
+  "results": [
+    {
+      "dim": 16,
+      "doc_storage_bytes_per_doc": 256,
+      "doc_tokens": 4,
+      "docs": 4,
+      "formula": "sum(max(q_fp32 @ d_fp32.T))",
+      "implementation": "fp32_query_fp32_docs",
+      "latency_ms": 0.01087499549612403,
+      "max_abs_delta_vs_reference": 0.0,
+      "name": "smoke_2q_4d_4t_16dim",
+      "query_tokens": 2,
+      "score_checksum": 163.762601852417,
+      "speedup_vs_fp32": 1.0
+    },
+    {
+      "dim": 16,
+      "doc_storage_bytes_per_doc": 64,
+      "doc_tokens": 4,
+      "docs": 4,
+      "formula": "sum(max(q_int8 @ d_int8.T))",
+      "implementation": "int8_query_int8_docs",
+      "latency_ms": 0.0076669966802001,
+      "max_abs_delta_vs_reference": 6.42204475402832,
+      "name": "smoke_2q_4d_4t_16dim",
+      "query_tokens": 2,
+      "score_checksum": 167.0,
+      "speedup_vs_fp32": 1.4184166173188175
+    },
+    {
+      "dim": 16,
+      "doc_storage_bytes_per_doc": 8,
+      "doc_tokens": 4,
+      "docs": 4,
+      "formula": "sum(max(q_int8 @ sign(doc).T))",
+      "implementation": "int8_query_binary_docs",
+      "latency_ms": 0.005665991920977831,
+      "max_abs_delta_vs_reference": 35.11748504638672,
+      "name": "smoke_2q_4d_4t_16dim",
+      "query_tokens": 2,
+      "score_checksum": 50.0,
+      "speedup_vs_fp32": 1.9193453940271827
+    },
+    {
+      "dim": 16,
+      "doc_storage_bytes_per_doc": 8,
+      "doc_tokens": 4,
+      "docs": 4,
+      "formula": "sum(max(sign(query) @ sign(doc).T))",
+      "implementation": "binary_query_binary_docs",
+      "latency_ms": 0.0036669662222266197,
+      "max_abs_delta_vs_reference": 39.74492645263672,
+      "name": "smoke_2q_4d_4t_16dim",
+      "query_tokens": 2,
+      "score_checksum": 34.0,
+      "speedup_vs_fp32": 2.965665576684974
+    }
+  ],
+  "schema_version": 1,
+  "specs": [
+    {
+      "dim": 16,
+      "doc_tokens": 4,
+      "docs": 4,
+      "name": "smoke_2q_4d_4t_16dim",
+      "query_tokens": 2
+    }
+  ],
+  "stage": "smoke"
+}

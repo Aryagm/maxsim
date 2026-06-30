@@ -1,0 +1,73 @@
+{
+  "baselines": [
+    "dense_fp16_baseline"
+  ],
+  "benchmark": "retrieval",
+  "dataset": {
+    "dim": 8,
+    "doc_tokens": 3,
+    "docs": 3,
+    "name": "doc-scale-targeted",
+    "qrels_nonzero": 1,
+    "queries": 1
+  },
+  "gate_passed": true,
+  "repeat": 3,
+  "results": [
+    {
+      "baseline_device": "cpu",
+      "bytes_read": 48,
+      "dim": 8,
+      "doc_storage_bytes": 48,
+      "docs": 3,
+      "effective_top_k": 3,
+      "formula": "dense_fp16_maxsim",
+      "gate_blocking": true,
+      "implementation": "dense_fp16_baseline",
+      "latency_ms": 0.009749957825988531,
+      "mrr_at_10": 1.0,
+      "ndcg_at_10": 1.0,
+      "quality_delta_vs_dense_ndcg_at_10": 0.0,
+      "queries_per_second": 102564.54621111264,
+      "query_count": 1,
+      "recall_at_1": 1.0,
+      "recall_at_10": 1.0,
+      "score_checksum": 80.0,
+      "stage": "embeddings-smoke",
+      "top_k": 10,
+      "topk_agreement_vs_dense_at_10": 1.0
+    },
+    {
+      "baseline_latency_ms": {
+        "dense_fp16_baseline": 0.009749957825988531
+      },
+      "bytes_read": 3,
+      "dim": 8,
+      "doc_memory_compression_vs_fp16": 16.0,
+      "doc_memory_compression_vs_fp32": 32.0,
+      "doc_storage_bytes": 3,
+      "docs": 3,
+      "effective_top_k": 3,
+      "gate_blocking": true,
+      "implementation": "bitmax_native",
+      "latency_ms": 0.007707974873483181,
+      "mrr_at_10": 1.0,
+      "ndcg_at_10": 1.0,
+      "quality_delta_vs_dense_ndcg_at_10": 0.0,
+      "queries_per_second": 129735.76281886696,
+      "query_count": 1,
+      "recall_at_1": 1.0,
+      "recall_at_10": 1.0,
+      "requested_device": "auto",
+      "scale": "doc",
+      "score_checksum": 80.0,
+      "speedup_vs_dense_fp16": 1.2649182160064039,
+      "stage": "embeddings-smoke",
+      "top_k": 10,
+      "topk_agreement_vs_dense_at_10": 1.0
+    }
+  ],
+  "schema_version": 1,
+  "stage": "embeddings-smoke",
+  "top_k": 10
+}
