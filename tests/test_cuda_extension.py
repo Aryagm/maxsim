@@ -97,6 +97,35 @@ def test_cuda_resident_topk_matches_cpu_topk_and_tie_breaking():
     np.testing.assert_array_equal(cuda_indices, cpu_indices)
 
 
+@pytest.mark.cuda
+def test_cuda_resident_reused_buffers_match_reference_after_resize():
+    pytest.importorskip("bitmax._bitmax_cuda")
+    rng = np.random.default_rng(20260701)
+    docs = rng.normal(size=(30, 128)).astype(np.float32)
+    offsets = np.array([0, 4, 11, 19, 30], dtype=np.int64)
+    packed = bitmax.pack_signs(docs, offsets)
+    cuda_packed = bitmax.to_device(packed, "cuda")
+    queries = [
+        rng.normal(size=(1, 3, 128)).astype(np.float32),
+        rng.normal(size=(3, 7, 128)).astype(np.float32),
+        rng.normal(size=(1, 3, 128)).astype(np.float32),
+    ]
+
+    for query in queries:
+        reference_scores = bitmax.maxsim(query, cuda_packed)
+        resident_scores = bitmax.maxsim(query, cuda_packed)
+        np.testing.assert_allclose(resident_scores, reference_scores, rtol=0, atol=1e-5)
+
+        reference_top_indices = np.stack(
+            [np.lexsort((np.arange(row.shape[0], dtype=np.int64), -row))[:2].astype(np.int64) for row in reference_scores],
+            axis=0,
+        )
+        reference_top_scores = np.take_along_axis(reference_scores, reference_top_indices, axis=1)
+        resident_top_scores, resident_top_indices = bitmax.topk_maxsim(query, cuda_packed, k=2)
+        np.testing.assert_allclose(resident_top_scores, reference_top_scores, rtol=0, atol=1e-5)
+        np.testing.assert_array_equal(resident_top_indices, reference_top_indices)
+
+
 def test_cuda_device_request_fails_clearly_without_cuda_build():
     try:
         import_module("bitmax._bitmax_cuda")

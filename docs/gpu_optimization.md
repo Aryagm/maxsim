@@ -119,3 +119,45 @@ Next GPU optimization hypotheses:
    aggressively inside each `(query, document)` block.
 3. Start accuracy work with global, per-token, and asymmetric scale restoration
    on the same retrieval-quality benchmark slices, then measure the latency cost.
+
+## 2026-06-30: Reused CUDA-Resident Work Buffers
+
+Change: `CudaPackedDocs` now keeps reusable device work buffers for query
+values, full scores, top-k scores, and top-k indices. Buffers grow to the largest
+shape seen by the handle and are reused by later `maxsim_batch` and `topk_batch`
+calls.
+
+Root cause addressed:
+
+- The CUDA-resident document handle still allocated and freed query/output work
+  buffers on every call.
+- Repeated retrieval batches are the normal online workload, so steady-state
+  calls should not pay repeated `cudaMalloc`/`cudaFree` overhead.
+
+Measured on the same VAST RTX 4090 host, comparing `main` at `ddbb544` against
+the buffer-reuse branch:
+
+| benchmark | operation | before | after | speedup | correctness |
+| --- | --- | ---: | ---: | ---: | --- |
+| small_repeated_64, batch8/q8/docs64/doc16/dim128 | maxsim | 0.048 ms | 0.041 ms | 1.17x | checksum unchanged |
+| small_repeated_64, batch8/q8/docs64/doc16/dim128/k10 | top-k | 0.070 ms | 0.058 ms | 1.21x | exact |
+| docvqa_like_64, batch64/q23/docs64/doc750/dim128 | maxsim | 2.20 ms | 2.01 ms | 1.09x | checksum unchanged |
+| docvqa_like_64, batch64/q23/docs64/doc750/dim128/k10 | top-k | 2.16 ms | 2.03 ms | 1.07x | exact |
+| rerank_512, batch32/q32/docs512/doc128/dim128 | maxsim | 2.26 ms | 2.11 ms | 1.07x | checksum unchanged |
+| rerank_512, batch32/q32/docs512/doc128/dim128/k10 | top-k | 2.27 ms | 2.13 ms | 1.06x | exact |
+| rerank_4096, batch16/q32/docs4096/doc32/dim128 | maxsim | 3.40 ms | 3.38 ms | 1.01x | checksum unchanged |
+| rerank_4096, batch16/q32/docs4096/doc32/dim128/k10 | top-k | 3.45 ms | 3.41 ms | 1.01x | exact |
+
+The benchmark artifact is
+`benchmark-results/cuda-buffer-reuse-4090.json`. The result is a real but
+bounded win: it helps allocation-sensitive and medium retrieval shapes, while
+large reranking is now dominated by the MaxSim scoring kernel itself.
+
+Next GPU optimization hypotheses:
+
+1. Specialize `dim=128` and `dim=256` kernels to reduce inner-loop overhead in
+   the scoring-dominated cases.
+2. Cache or transform query values per block so each document block rereads less
+   query data from global memory.
+3. Start accuracy work with global, per-token, and asymmetric scale restoration
+   on the same retrieval-quality benchmark slices, then measure the latency cost.

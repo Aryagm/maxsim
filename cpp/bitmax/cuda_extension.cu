@@ -238,11 +238,15 @@ class CudaPackedDocs {
   ~CudaPackedDocs() {
     cudaFree(d_packed_);
     cudaFree(d_offsets_);
+    cudaFree(d_query_);
+    cudaFree(d_scores_);
+    cudaFree(d_top_scores_);
+    cudaFree(d_top_indices_);
   }
 
   py::array_t<float> maxsim_batch(
       py::array_t<float, py::array::c_style | py::array::forcecast> query,
-      float scale) const {
+      float scale) {
     if (query.ndim() != 3) {
       throw std::invalid_argument("query must have shape [batch, query_tokens, dim]");
     }
@@ -255,35 +259,25 @@ class CudaPackedDocs {
     const std::size_t query_bytes = static_cast<std::size_t>(query.size()) * sizeof(float);
     const std::size_t output_bytes = static_cast<std::size_t>(batch) * static_cast<std::size_t>(num_docs_) * sizeof(float);
 
-    float* d_query = nullptr;
-    float* d_output = nullptr;
-    check_cuda(cudaMalloc(&d_query, query_bytes), "cudaMalloc query");
-    check_cuda(cudaMalloc(&d_output, output_bytes), "cudaMalloc output");
-    try {
-      check_cuda(cudaMemcpy(d_query, query.data(), query_bytes, cudaMemcpyHostToDevice), "copy query to device");
+    ensure_device_capacity(&d_query_, &query_capacity_, query_bytes, "cudaMalloc resident query cache");
+    ensure_device_capacity(&d_scores_, &scores_capacity_, output_bytes, "cudaMalloc resident score cache");
 
-      dim3 grid(num_docs_, batch);
-      maxsim_batched_kernel<<<grid, kBlockThreads>>>(d_query, d_packed_, d_offsets_, d_output, batch, query_tokens, dim_, num_docs_, scale);
-      check_cuda(cudaGetLastError(), "launch resident batched maxsim kernel");
-      check_cuda(cudaDeviceSynchronize(), "synchronize resident batched maxsim kernel");
+    check_cuda(cudaMemcpy(d_query_, query.data(), query_bytes, cudaMemcpyHostToDevice), "copy query to device");
 
-      py::array_t<float> output({batch, num_docs_});
-      check_cuda(cudaMemcpy(output.mutable_data(), d_output, output_bytes, cudaMemcpyDeviceToHost), "copy output to host");
+    dim3 grid(num_docs_, batch);
+    maxsim_batched_kernel<<<grid, kBlockThreads>>>(d_query_, d_packed_, d_offsets_, d_scores_, batch, query_tokens, dim_, num_docs_, scale);
+    check_cuda(cudaGetLastError(), "launch resident batched maxsim kernel");
+    check_cuda(cudaDeviceSynchronize(), "synchronize resident batched maxsim kernel");
 
-      cudaFree(d_query);
-      cudaFree(d_output);
-      return output;
-    } catch (...) {
-      cudaFree(d_query);
-      cudaFree(d_output);
-      throw;
-    }
+    py::array_t<float> output({batch, num_docs_});
+    check_cuda(cudaMemcpy(output.mutable_data(), d_scores_, output_bytes, cudaMemcpyDeviceToHost), "copy output to host");
+    return output;
   }
 
   py::tuple topk_batch(
       py::array_t<float, py::array::c_style | py::array::forcecast> query,
       int k,
-      float scale) const {
+      float scale) {
     if (k < 1 || k > num_docs_) {
       throw std::invalid_argument("k must be between 1 and num_docs");
     }
@@ -301,41 +295,25 @@ class CudaPackedDocs {
     const std::size_t top_scores_bytes = static_cast<std::size_t>(batch) * static_cast<std::size_t>(k) * sizeof(float);
     const std::size_t top_indices_bytes = static_cast<std::size_t>(batch) * static_cast<std::size_t>(k) * sizeof(std::int64_t);
 
-    float* d_query = nullptr;
-    float* d_scores = nullptr;
-    float* d_top_scores = nullptr;
-    std::int64_t* d_top_indices = nullptr;
-    check_cuda(cudaMalloc(&d_query, query_bytes), "cudaMalloc query");
-    check_cuda(cudaMalloc(&d_scores, scores_bytes), "cudaMalloc full scores");
-    check_cuda(cudaMalloc(&d_top_scores, top_scores_bytes), "cudaMalloc top scores");
-    check_cuda(cudaMalloc(&d_top_indices, top_indices_bytes), "cudaMalloc top indices");
-    try {
-      check_cuda(cudaMemcpy(d_query, query.data(), query_bytes, cudaMemcpyHostToDevice), "copy query to device");
+    ensure_device_capacity(&d_query_, &query_capacity_, query_bytes, "cudaMalloc resident query cache");
+    ensure_device_capacity(&d_scores_, &scores_capacity_, scores_bytes, "cudaMalloc resident full score cache");
+    ensure_device_capacity(&d_top_scores_, &top_scores_capacity_, top_scores_bytes, "cudaMalloc resident top score cache");
+    ensure_device_capacity(&d_top_indices_, &top_indices_capacity_, top_indices_bytes, "cudaMalloc resident top index cache");
 
-      dim3 grid(num_docs_, batch);
-      maxsim_batched_kernel<<<grid, kBlockThreads>>>(d_query, d_packed_, d_offsets_, d_scores, batch, query_tokens, dim_, num_docs_, scale);
-      check_cuda(cudaGetLastError(), "launch topk maxsim kernel");
-      topk_kernel<<<batch, kTopkThreads>>>(d_scores, d_top_scores, d_top_indices, batch, num_docs_, k);
-      check_cuda(cudaGetLastError(), "launch topk selection kernel");
-      check_cuda(cudaDeviceSynchronize(), "synchronize topk kernels");
+    check_cuda(cudaMemcpy(d_query_, query.data(), query_bytes, cudaMemcpyHostToDevice), "copy query to device");
 
-      py::array_t<float> output_scores({batch, k});
-      py::array_t<std::int64_t> output_indices({batch, k});
-      check_cuda(cudaMemcpy(output_scores.mutable_data(), d_top_scores, top_scores_bytes, cudaMemcpyDeviceToHost), "copy top scores to host");
-      check_cuda(cudaMemcpy(output_indices.mutable_data(), d_top_indices, top_indices_bytes, cudaMemcpyDeviceToHost), "copy top indices to host");
+    dim3 grid(num_docs_, batch);
+    maxsim_batched_kernel<<<grid, kBlockThreads>>>(d_query_, d_packed_, d_offsets_, d_scores_, batch, query_tokens, dim_, num_docs_, scale);
+    check_cuda(cudaGetLastError(), "launch topk maxsim kernel");
+    topk_kernel<<<batch, kTopkThreads>>>(d_scores_, d_top_scores_, d_top_indices_, batch, num_docs_, k);
+    check_cuda(cudaGetLastError(), "launch topk selection kernel");
+    check_cuda(cudaDeviceSynchronize(), "synchronize topk kernels");
 
-      cudaFree(d_query);
-      cudaFree(d_scores);
-      cudaFree(d_top_scores);
-      cudaFree(d_top_indices);
-      return py::make_tuple(output_scores, output_indices);
-    } catch (...) {
-      cudaFree(d_query);
-      cudaFree(d_scores);
-      cudaFree(d_top_scores);
-      cudaFree(d_top_indices);
-      throw;
-    }
+    py::array_t<float> output_scores({batch, k});
+    py::array_t<std::int64_t> output_indices({batch, k});
+    check_cuda(cudaMemcpy(output_scores.mutable_data(), d_top_scores_, top_scores_bytes, cudaMemcpyDeviceToHost), "copy top scores to host");
+    check_cuda(cudaMemcpy(output_indices.mutable_data(), d_top_indices_, top_indices_bytes, cudaMemcpyDeviceToHost), "copy top indices to host");
+    return py::make_tuple(output_scores, output_indices);
   }
 
   int dim() const { return dim_; }
@@ -343,12 +321,32 @@ class CudaPackedDocs {
   std::size_t packed_size() const { return packed_size_; }
 
  private:
+  template <typename T>
+  void ensure_device_capacity(T** ptr, std::size_t* capacity, std::size_t bytes, const char* action) {
+    if (bytes <= *capacity) {
+      return;
+    }
+    T* next = nullptr;
+    check_cuda(cudaMalloc(reinterpret_cast<void**>(&next), bytes), action);
+    cudaFree(*ptr);
+    *ptr = next;
+    *capacity = bytes;
+  }
+
   std::uint8_t* d_packed_ = nullptr;
   std::int64_t* d_offsets_ = nullptr;
+  float* d_query_ = nullptr;
+  float* d_scores_ = nullptr;
+  float* d_top_scores_ = nullptr;
+  std::int64_t* d_top_indices_ = nullptr;
   int dim_ = 0;
   int num_docs_ = 0;
   std::size_t packed_size_ = 0;
   std::size_t offsets_size_ = 0;
+  std::size_t query_capacity_ = 0;
+  std::size_t scores_capacity_ = 0;
+  std::size_t top_scores_capacity_ = 0;
+  std::size_t top_indices_capacity_ = 0;
 };
 
 py::array_t<float> maxsim_cuda(
