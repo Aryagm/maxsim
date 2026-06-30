@@ -9,6 +9,12 @@ from typing import Any
 import numpy as np
 
 import bitmax
+from bitmax.experimental import (
+    fit_dim_centroid_calibration,
+    pack_dim_centroid_signs,
+    topk_dim_centroid_maxsim,
+    transform_query_dim_centroids,
+)
 
 try:
     import torch
@@ -121,6 +127,15 @@ def _run_blog_shape() -> dict[str, Any]:
     fp16_values, fp16_indices, fp16_best, fp16_median = _dense_torch_topk(query, doc_embeddings, docs, doc_tokens, k, torch.float16, repeat=repeat)
     binary_values, binary_indices, binary_best, binary_median = _bitmax_topk(query_int8, doc_embeddings, offsets, k, repeat=repeat)
     doc_values, doc_indices, doc_best, doc_median = _bitmax_topk(query_int8, doc_embeddings, offsets, k, scale="doc", repeat=repeat)
+    (
+        centroid_values,
+        centroid_indices,
+        centroid_host_best,
+        centroid_host_median,
+        centroid_fused_best,
+        centroid_fused_median,
+        centroid_storage,
+    ) = _bitmax_centroid_topk(query_int8, doc_embeddings, offsets, k, repeat=repeat)
 
     return {
         "schema_version": 1,
@@ -166,6 +181,27 @@ def _run_blog_shape() -> dict[str, Any]:
                 "topk_agreement_vs_fp32": _topk_agreement(fp32_indices, doc_indices, k),
                 "max_abs_topk_score_delta_vs_fp32": float(np.max(np.abs(fp32_values - doc_values))),
             },
+            {
+                "implementation": "bitmax_cuda_int8_query_binary_docs_centroid_host_transform_topk",
+                "latency_best_ms": centroid_host_best,
+                "latency_median_ms": centroid_host_median,
+                "doc_storage_bytes_per_doc": centroid_storage,
+                "speedup_vs_torch_fp32_median": fp32_median / centroid_host_median,
+                "speedup_vs_blog_int8_binary_latency_3_71ms": 3.71 / centroid_host_median,
+                "topk_agreement_vs_fp32": _topk_agreement(fp32_indices, centroid_indices, k),
+                "max_abs_topk_score_delta_vs_fp32": float(np.max(np.abs(fp32_values - centroid_values))),
+            },
+            {
+                "implementation": "bitmax_cuda_int8_query_binary_docs_centroid_fused_topk",
+                "latency_best_ms": centroid_fused_best,
+                "latency_median_ms": centroid_fused_median,
+                "doc_storage_bytes_per_doc": centroid_storage,
+                "speedup_vs_torch_fp32_median": fp32_median / centroid_fused_median,
+                "speedup_vs_blog_int8_binary_latency_3_71ms": 3.71 / centroid_fused_median,
+                "speedup_vs_centroid_host_transform_median": centroid_host_median / centroid_fused_median,
+                "topk_agreement_vs_fp32": _topk_agreement(fp32_indices, centroid_indices, k),
+                "max_abs_topk_score_delta_vs_fp32": float(np.max(np.abs(fp32_values - centroid_values))),
+            },
         ],
     }
 
@@ -186,6 +222,48 @@ def _bitmax_topk(query: np.ndarray, docs: np.ndarray, offsets: np.ndarray, k: in
     packed = bitmax.to_device(bitmax.pack_signs(docs, offsets, scale=scale), "cuda")
     result, best, median = _time_call(lambda: bitmax.topk_maxsim(query, packed, k), repeat=repeat, warmup=10)
     return np.asarray(result[0]), np.asarray(result[1]), best, median
+
+
+def _bitmax_centroid_topk(query: np.ndarray, docs: np.ndarray, offsets: np.ndarray, k: int, *, repeat: int):
+    calibration = fit_dim_centroid_calibration(docs)
+    packed, calibration = pack_dim_centroid_signs(docs, offsets, calibration=calibration)
+    cuda_packed = bitmax.to_device(packed, "cuda")
+
+    def host_transform():
+        transformed = transform_query_dim_centroids(query, calibration)
+        scores, indices = bitmax.topk_maxsim(transformed, cuda_packed, k)
+        return _restore_centroid_top_scores(scores, query, calibration), indices
+
+    host_result, host_best, host_median = _time_call(host_transform, repeat=repeat, warmup=10)
+    fused_result, fused_best, fused_median = _time_call(
+        lambda: topk_dim_centroid_maxsim(query, cuda_packed, calibration, k),
+        repeat=repeat,
+        warmup=10,
+    )
+    np.testing.assert_allclose(np.asarray(fused_result[0]), np.asarray(host_result[0]), rtol=0, atol=1e-4)
+    np.testing.assert_array_equal(np.asarray(fused_result[1]), np.asarray(host_result[1]))
+    doc_count = int(offsets.shape[0] - 1)
+    storage_per_doc = (docs.shape[0] * docs.shape[1] // 8 + calibration.metadata_bytes) / float(doc_count)
+    return (
+        np.asarray(fused_result[0]),
+        np.asarray(fused_result[1]),
+        host_best,
+        host_median,
+        fused_best,
+        fused_median,
+        storage_per_doc,
+    )
+
+
+def _restore_centroid_top_scores(scores: np.ndarray, query: np.ndarray, calibration) -> np.ndarray:
+    score_values = np.asarray(scores, dtype=np.float32)
+    query_float = np.asarray(query, dtype=np.float32)
+    centroid_sum = calibration.positive_centroids + calibration.negative_centroids
+    if query_float.ndim == 2:
+        constant = np.float32(0.5 * np.sum(query_float * centroid_sum[np.newaxis, :], dtype=np.float64))
+        return np.asarray(score_values * 0.5 + constant, dtype=np.float32)
+    constants = 0.5 * np.sum(query_float * centroid_sum[np.newaxis, np.newaxis, :], axis=(1, 2), dtype=np.float64)
+    return np.asarray(score_values * 0.5 + constants[:, np.newaxis].astype(np.float32), dtype=np.float32)
 
 
 def _time_call(fn, *, repeat: int, warmup: int = 5):

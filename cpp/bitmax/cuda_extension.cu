@@ -122,6 +122,18 @@ __global__ void build_query_lut_dim128_kernel(
   }
 }
 
+__global__ void weight_query_dims_kernel(
+    float* query,
+    const float* weights,
+    std::int64_t total,
+    int dim) {
+  for (std::int64_t idx = static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+       idx < total;
+       idx += static_cast<std::int64_t>(blockDim.x) * gridDim.x) {
+    query[idx] *= weights[idx % dim];
+  }
+}
+
 __device__ __forceinline__ float dot_dim128_lut(const float* query_lut_row, const std::uint8_t* packed_row) {
   float dot = 0.0F;
 #pragma unroll
@@ -508,6 +520,7 @@ class CudaPackedDocs {
     cudaFree(d_offsets_);
     cudaFree(d_scale_);
     cudaFree(d_query_);
+    cudaFree(d_centroid_weights_);
     cudaFree(d_query_lut_);
     cudaFree(d_scores_);
     cudaFree(d_top_scores_);
@@ -597,6 +610,59 @@ class CudaPackedDocs {
     py::array_t<std::int64_t> output_indices({batch, k});
     check_cuda(cudaMemcpy(output_scores.mutable_data(), d_top_scores_, top_scores_bytes, cudaMemcpyDeviceToHost), "copy top scores to host");
     check_cuda(cudaMemcpy(output_indices.mutable_data(), d_top_indices_, top_indices_bytes, cudaMemcpyDeviceToHost), "copy top indices to host");
+    return py::make_tuple(output_scores, output_indices);
+  }
+
+  py::tuple topk_centroid_batch(
+      py::array_t<float, py::array::c_style | py::array::forcecast> query,
+      py::array_t<float, py::array::c_style | py::array::forcecast> weights,
+      int k,
+      float scale,
+      bool use_scale_vector = false) {
+    if (k < 1 || k > num_docs_) {
+      throw std::invalid_argument("k must be between 1 and num_docs");
+    }
+    if (query.ndim() != 3) {
+      throw std::invalid_argument("query must have shape [batch, query_tokens, dim]");
+    }
+    if (query.shape(2) != dim_) {
+      throw std::invalid_argument("query shape does not match dim");
+    }
+    if (weights.ndim() != 1 || weights.shape(0) != dim_) {
+      throw std::invalid_argument("weights must have shape [dim]");
+    }
+
+    const int batch = static_cast<int>(query.shape(0));
+    const int query_tokens = static_cast<int>(query.shape(1));
+    const std::size_t query_values = static_cast<std::size_t>(query.size());
+    const std::size_t query_bytes = query_values * sizeof(float);
+    const std::size_t weights_bytes = static_cast<std::size_t>(dim_) * sizeof(float);
+    const std::size_t scores_bytes = static_cast<std::size_t>(batch) * static_cast<std::size_t>(num_docs_) * sizeof(float);
+    const std::size_t top_scores_bytes = static_cast<std::size_t>(batch) * static_cast<std::size_t>(k) * sizeof(float);
+    const std::size_t top_indices_bytes = static_cast<std::size_t>(batch) * static_cast<std::size_t>(k) * sizeof(std::int64_t);
+
+    ensure_device_capacity(&d_query_, &query_capacity_, query_bytes, "cudaMalloc resident centroid query cache");
+    ensure_device_capacity(&d_centroid_weights_, &centroid_weights_capacity_, weights_bytes, "cudaMalloc resident centroid weights");
+    ensure_device_capacity(&d_scores_, &scores_capacity_, scores_bytes, "cudaMalloc resident centroid score cache");
+    ensure_device_capacity(&d_top_scores_, &top_scores_capacity_, top_scores_bytes, "cudaMalloc resident centroid top score cache");
+    ensure_device_capacity(&d_top_indices_, &top_indices_capacity_, top_indices_bytes, "cudaMalloc resident centroid top index cache");
+
+    check_cuda(cudaMemcpy(d_query_, query.data(), query_bytes, cudaMemcpyHostToDevice), "copy centroid query to device");
+    check_cuda(cudaMemcpy(d_centroid_weights_, weights.data(), weights_bytes, cudaMemcpyHostToDevice), "copy centroid weights to device");
+
+    const int weight_blocks = static_cast<int>((query_values + 255U) / 256U);
+    weight_query_dims_kernel<<<weight_blocks, 256>>>(d_query_, d_centroid_weights_, static_cast<std::int64_t>(query_values), dim_);
+    check_cuda(cudaGetLastError(), "launch centroid query weighting kernel");
+
+    launch_maxsim(d_query_, d_scores_, batch, query_tokens, scale, scale_vector_ptr(use_scale_vector), "centroid topk maxsim");
+    topk_kernel<<<batch, kTopkThreads>>>(d_scores_, d_top_scores_, d_top_indices_, batch, num_docs_, k);
+    check_cuda(cudaGetLastError(), "launch centroid topk selection kernel");
+    check_cuda(cudaDeviceSynchronize(), "synchronize centroid topk kernels");
+
+    py::array_t<float> output_scores({batch, k});
+    py::array_t<std::int64_t> output_indices({batch, k});
+    check_cuda(cudaMemcpy(output_scores.mutable_data(), d_top_scores_, top_scores_bytes, cudaMemcpyDeviceToHost), "copy centroid top scores to host");
+    check_cuda(cudaMemcpy(output_indices.mutable_data(), d_top_indices_, top_indices_bytes, cudaMemcpyDeviceToHost), "copy centroid top indices to host");
     return py::make_tuple(output_scores, output_indices);
   }
 
@@ -771,6 +837,7 @@ class CudaPackedDocs {
   std::int64_t* d_offsets_ = nullptr;
   float* d_scale_ = nullptr;
   float* d_query_ = nullptr;
+  float* d_centroid_weights_ = nullptr;
   float* d_query_lut_ = nullptr;
   float* d_scores_ = nullptr;
   float* d_top_scores_ = nullptr;
@@ -782,6 +849,7 @@ class CudaPackedDocs {
   std::size_t offsets_size_ = 0;
   std::size_t scale_capacity_ = 0;
   std::size_t query_capacity_ = 0;
+  std::size_t centroid_weights_capacity_ = 0;
   std::size_t query_lut_capacity_ = 0;
   std::size_t scores_capacity_ = 0;
   std::size_t top_scores_capacity_ = 0;
@@ -909,6 +977,7 @@ PYBIND11_MODULE(_bitmax_cuda, m) {
       .def("clear_scale_vector", &CudaPackedDocs::clear_scale_vector)
       .def("maxsim_batch", &CudaPackedDocs::maxsim_batch, py::arg("query"), py::arg("scale") = 1.0F, py::arg("use_scale_vector") = false)
       .def("topk_batch", &CudaPackedDocs::topk_batch, py::arg("query"), py::arg("k"), py::arg("scale") = 1.0F, py::arg("use_scale_vector") = false)
+      .def("topk_centroid_batch", &CudaPackedDocs::topk_centroid_batch, py::arg("query"), py::arg("weights"), py::arg("k"), py::arg("scale") = 1.0F, py::arg("use_scale_vector") = false)
       .def("topk_lut_batch", &CudaPackedDocs::topk_lut_batch, py::arg("query"), py::arg("k"), py::arg("scale") = 1.0F, py::arg("use_scale_vector") = false)
       .def("streaming_topk_batch", &CudaPackedDocs::streaming_topk_batch, py::arg("query"), py::arg("k"), py::arg("scale") = 1.0F, py::arg("use_scale_vector") = false)
       .def_property_readonly("dim", &CudaPackedDocs::dim)

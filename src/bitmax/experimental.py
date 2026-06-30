@@ -130,6 +130,36 @@ def topk_dim_centroid_maxsim(
     device="auto",
     restore_scores: bool = True,
 ):
+    effective_device = "cuda" if device == "auto" and packed.device == "cuda" else device
+    if effective_device == "cuda" and packed.device == "cuda" and hasattr(packed.data, "topk_centroid_batch"):
+        if k < 1:
+            raise ValueError("k must be >= 1")
+        if k > packed.num_docs:
+            raise ValueError("k cannot exceed packed.num_docs")
+        _validate_dim_centroid_calibration(calibration, packed.dim)
+        query = _as_numpy(query_tokens).astype(np.float32, copy=False)
+        if query.ndim == 2:
+            batches = query[np.newaxis, :, :]
+            squeeze = True
+        elif query.ndim == 3:
+            batches = query
+            squeeze = False
+        else:
+            raise ValueError("query_tokens must have shape [query_tokens, dim] or [batch, query_tokens, dim]")
+        if batches.shape[2] != calibration.dim:
+            raise ValueError(f"query dim={batches.shape[2]} does not match calibration dim={calibration.dim}")
+        weights = np.ascontiguousarray(calibration.positive_centroids - calibration.negative_centroids, dtype=np.float32)
+        scores, indices = packed.data.topk_centroid_batch(
+            np.ascontiguousarray(batches, dtype=np.float32),
+            weights,
+            int(k),
+            1.0,
+            False,
+        )
+        if restore_scores:
+            scores = _restore_dim_centroid_scores(scores, query_tokens, calibration)
+        return (scores[0], indices[0]) if squeeze else (scores, indices)
+
     transformed_query = transform_query_dim_centroids(query_tokens, calibration)
     scores, indices = topk_maxsim(transformed_query, packed, k, device=device)
     if restore_scores:
