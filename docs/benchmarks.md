@@ -102,3 +102,7 @@ Retrieval rows report latency, queries/sec, recall, MRR, NDCG, top-k agreement
 with dense fp16 MaxSim, speedup for the bitmax row, and document-memory
 compression. Dense fp16 uses the original document embeddings; bitmax packs the
 same document embeddings to one-bit signs and scores with `bitmax.maxsim`.
+Pass `--scale global` or `--scale doc` to test global or per-document scale
+restoration. `doc` scale can improve ranking when magnitude differences between
+documents carry useful signal, but it currently applies the vector scale outside
+the fused CUDA top-k path.

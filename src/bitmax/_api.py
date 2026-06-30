@@ -22,7 +22,7 @@ class PackedDocs:
     doc_offsets: np.ndarray
     dim: int
     num_docs: int
-    scale: float | None = None
+    scale: object = None
     device: Literal["cpu", "cuda"] = "cpu"
 
 
@@ -48,13 +48,15 @@ def pack_signs(doc_embeddings, doc_offsets=None, *, dim=None, scale=None, device
     for bit_idx in range(actual_dim):
         packed[:, bit_idx // 8] |= positive[:, bit_idx].astype(np.uint8) << (bit_idx % 8)
 
-    stored_scale: float | None
+    stored_scale: object
     if scale == "global":
         stored_scale = float(np.mean(np.abs(docs), dtype=np.float64))
+    elif isinstance(scale, str) and scale in {"doc", "per_doc"}:
+        stored_scale = _doc_mean_abs_scale(docs, offsets)
     elif scale is None:
         stored_scale = None
     else:
-        stored_scale = float(scale)
+        stored_scale = _normalize_explicit_scale(scale, int(offsets.shape[0] - 1))
 
     packed_docs = PackedDocs(
         data=packed,
@@ -86,7 +88,7 @@ def to_device(packed: PackedDocs, device: Literal["cpu", "cuda"] = "cuda") -> Pa
         doc_offsets=offsets.copy(),
         dim=packed.dim,
         num_docs=packed.num_docs,
-        scale=packed.scale,
+        scale=packed.scale.copy() if isinstance(packed.scale, np.ndarray) else packed.scale,
         device="cuda",
     )
 
@@ -115,10 +117,12 @@ def maxsim(query_tokens, packed: PackedDocs, *, scale=None, device="auto"):
 
     query_float = batches.astype(np.float32, copy=False)
     result = np.empty((query_float.shape[0], packed.num_docs), dtype=np.float32)
-    multiplier = _resolve_scale(scale, packed)
+    resolved_scale = _resolve_scale(scale, packed)
+    kernel_scale = _kernel_scale(resolved_scale)
 
     if effective_device == "cuda" and packed.device == "cuda":
-        batch_result = packed.data.maxsim_batch(np.ascontiguousarray(query_float, dtype=np.float32), float(multiplier))
+        batch_result = packed.data.maxsim_batch(np.ascontiguousarray(query_float, dtype=np.float32), float(kernel_scale))
+        batch_result = _apply_vector_scale(batch_result, resolved_scale)
         return batch_result[0] if squeeze else batch_result
 
     if effective_device == "cuda":
@@ -131,8 +135,9 @@ def maxsim(query_tokens, packed: PackedDocs, *, scale=None, device="auto"):
                 packed_data,
                 offsets,
                 packed.dim,
-                float(multiplier),
+                float(kernel_scale),
             )
+            batch_result = _apply_vector_scale(batch_result, resolved_scale)
             return batch_result[0] if squeeze else batch_result
 
         for batch_idx, query in enumerate(query_float):
@@ -141,8 +146,9 @@ def maxsim(query_tokens, packed: PackedDocs, *, scale=None, device="auto"):
                 packed_data,
                 offsets,
                 packed.dim,
-                float(multiplier),
+                float(kernel_scale),
             )
+        result = _apply_vector_scale(result, resolved_scale)
         return result[0] if squeeze else result
 
     if _bitmax_cpp is not None:
@@ -154,8 +160,9 @@ def maxsim(query_tokens, packed: PackedDocs, *, scale=None, device="auto"):
                 packed_data,
                 offsets,
                 packed.dim,
-                float(multiplier),
+                float(kernel_scale),
             )
+        result = _apply_vector_scale(result, resolved_scale)
         return result[0] if squeeze else result
 
     signs = _unpack_signs(packed.data, packed.dim)
@@ -168,8 +175,9 @@ def maxsim(query_tokens, packed: PackedDocs, *, scale=None, device="auto"):
                 result[batch_idx, doc_idx] = 0.0
                 continue
             score = np.max(query @ doc.T, axis=1).sum(dtype=np.float32)
-            result[batch_idx, doc_idx] = np.float32(score * multiplier)
+            result[batch_idx, doc_idx] = np.float32(score * kernel_scale)
 
+    result = _apply_vector_scale(result, resolved_scale)
     return result[0] if squeeze else result
 
 
@@ -180,7 +188,8 @@ def topk_maxsim(query_tokens, packed: PackedDocs, k: int, *, scale=None, device=
         raise ValueError("k cannot exceed packed.num_docs")
     _validate_packed(packed)
     effective_device = "cuda" if device == "auto" and packed.device == "cuda" else device
-    if effective_device == "cuda" and packed.device == "cuda" and hasattr(packed.data, "topk_batch"):
+    resolved_scale = _resolve_scale(scale, packed)
+    if effective_device == "cuda" and packed.device == "cuda" and hasattr(packed.data, "topk_batch") and not _scale_is_vector(resolved_scale):
         query = _as_numpy(query_tokens)
         if query.ndim == 2:
             batches = query[np.newaxis, :, :]
@@ -192,8 +201,7 @@ def topk_maxsim(query_tokens, packed: PackedDocs, k: int, *, scale=None, device=
             raise ValueError("query_tokens must have shape [query_tokens, dim] or [batch, query_tokens, dim]")
         if batches.shape[2] != packed.dim:
             raise ValueError(f"query dim={batches.shape[2]} does not match packed dim={packed.dim}")
-        multiplier = _resolve_scale(scale, packed)
-        scores, indices = packed.data.topk_batch(np.ascontiguousarray(batches, dtype=np.float32), int(k), float(multiplier))
+        scores, indices = packed.data.topk_batch(np.ascontiguousarray(batches, dtype=np.float32), int(k), float(_kernel_scale(resolved_scale)))
         return (scores[0], indices[0]) if squeeze else (scores, indices)
 
     scores = maxsim(query_tokens, packed, scale=scale, device=device)
@@ -241,6 +249,7 @@ def _validate_packed(packed: PackedDocs) -> None:
         raise TypeError("packed must be a PackedDocs instance")
     if packed.dim % 8 != 0:
         raise ValueError("packed.dim must be divisible by 8")
+    _validate_scale_value(packed.scale, packed.num_docs)
     if packed.device == "cuda":
         if not hasattr(packed.data, "maxsim_batch") and not hasattr(packed.data, "topk_batch"):
             raise ValueError("CUDA PackedDocs data must expose maxsim_batch or topk_batch")
@@ -263,14 +272,65 @@ def _unpack_signs(data: np.ndarray, dim: int) -> np.ndarray:
     return signs
 
 
-def _resolve_scale(scale, packed: PackedDocs) -> float:
+def _doc_mean_abs_scale(docs: np.ndarray, offsets: np.ndarray) -> np.ndarray:
+    scales = np.zeros(offsets.shape[0] - 1, dtype=np.float32)
+    abs_docs = np.abs(docs).astype(np.float32, copy=False)
+    for doc_idx, (start, end) in enumerate(zip(offsets[:-1], offsets[1:])):
+        if int(start) != int(end):
+            scales[doc_idx] = np.float32(np.mean(abs_docs[int(start) : int(end)], dtype=np.float64))
+    return scales
+
+
+def _normalize_explicit_scale(scale, num_docs: int):
+    values = _as_numpy(scale)
+    if values.ndim == 0:
+        return float(values)
+    normalized = np.ascontiguousarray(values, dtype=np.float32)
+    if normalized.ndim != 1 or normalized.shape[0] != num_docs:
+        raise ValueError("scale vector must have shape [num_docs]")
+    return normalized
+
+
+def _validate_scale_value(scale, num_docs: int) -> None:
     if scale is None:
-        return 1.0 if packed.scale is None else float(packed.scale)
-    if scale == "global":
+        return
+    if isinstance(scale, np.ndarray):
+        if scale.ndim != 1 or scale.shape[0] != num_docs:
+            raise ValueError("packed.scale vector must have shape [num_docs]")
+        return
+    float(scale)
+
+
+def _resolve_scale(scale, packed: PackedDocs):
+    if scale is None:
+        return 1.0 if packed.scale is None else packed.scale
+    if isinstance(scale, str) and scale == "global":
         if packed.scale is None:
             raise ValueError("scale='global' requires a PackedDocs object with stored scale")
+        if _scale_is_vector(packed.scale):
+            raise ValueError("scale='global' requires a scalar stored scale")
         return float(packed.scale)
-    return float(scale)
+    if isinstance(scale, str) and scale in {"doc", "per_doc"}:
+        if not _scale_is_vector(packed.scale):
+            raise ValueError("scale='doc' requires a PackedDocs object with stored per-document scale")
+        return packed.scale
+    if isinstance(scale, str):
+        raise ValueError("scale must be None, 'global', 'doc', a scalar, or a [num_docs] vector")
+    return _normalize_explicit_scale(scale, packed.num_docs)
+
+
+def _scale_is_vector(scale) -> bool:
+    return isinstance(scale, np.ndarray)
+
+
+def _kernel_scale(scale) -> float:
+    return 1.0 if _scale_is_vector(scale) else float(scale)
+
+
+def _apply_vector_scale(scores: np.ndarray, scale) -> np.ndarray:
+    if not _scale_is_vector(scale):
+        return scores
+    return np.asarray(scores, dtype=np.float32) * scale.astype(np.float32, copy=False)
 
 
 def _topk_indices_1d(scores: np.ndarray, k: int) -> np.ndarray:

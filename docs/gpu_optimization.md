@@ -210,3 +210,54 @@ Next GPU optimization hypotheses:
    same-host baseline/candidate method before enabling it.
 3. Start accuracy work with global, per-token, and asymmetric scale restoration
    on retrieval-quality benchmark slices, tracking both quality and kernel cost.
+
+## 2026-06-30: Per-Document Scale Restoration Probe
+
+Change: `pack_signs(..., scale="doc")` stores one `mean(abs(doc_tokens))` scale
+per document. `maxsim` applies that vector after native scoring, and
+`topk_maxsim` ranks after scale restoration. This is an optional accuracy mode;
+the default remains unscaled signs.
+
+Root cause addressed:
+
+- Binary signs discard magnitude. A single global scale changes score magnitude
+  but cannot change ranking within a query.
+- Per-document scale can restore some document-level magnitude signal while
+  keeping the packed sign representation unchanged.
+
+Measured locally on a targeted retrieval fixture where two documents have
+identical signs but different magnitudes:
+
+| scale | recall@1 | NDCG@10 | note |
+| --- | ---: | ---: | --- |
+| none | 0.00 | 0.631 | lower doc id wins an unscaled tie |
+| doc | 1.00 | 1.000 | scale restores dense ranking |
+
+Measured on a VAST RTX 4090 with ViDoRe DocVQA + ColQwen2, 64 queries/docs:
+
+| scale | latency | recall@1 | recall@10 | MRR@10 | NDCG@10 | speedup vs dense fp16 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| none | 1.89 ms | 0.609 | 0.875 | 0.695 | 0.737 | 134.1x |
+| global | 1.89 ms | 0.609 | 0.875 | 0.695 | 0.737 | 129.8x |
+| doc | 1.89 ms | 0.625 | 0.844 | 0.705 | 0.738 | 130.8x |
+
+Artifacts:
+
+- `benchmark-results/retrieval-doc-scale-targeted-none.json`
+- `benchmark-results/retrieval-doc-scale-targeted-doc.json`
+- `benchmark-results/retrieval-vidore-limit64-cuda-scale-comparison.json`
+
+The result is mixed: per-document scale improved recall@1, MRR, and NDCG
+slightly on the 64-query slice, but reduced recall@10. It should remain an
+opt-in accuracy knob until broader slices show a stable win. CUDA resident
+fused top-k currently falls back to full-score host top-k for vector scales;
+that is the next kernel task if this mode proves useful.
+
+Next GPU optimization hypotheses:
+
+1. Move per-document scale into `CudaPackedDocs` and fused CUDA top-k so vector
+   scales do not require host-side post-processing.
+2. Evaluate per-token or per-dimension scale variants on larger ViDoRe slices,
+   using recall@1, recall@10, MRR, and NDCG as separate gates.
+3. Keep unscaled signs as the default until a scale mode improves the broad
+   quality profile without a large latency penalty.

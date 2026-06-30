@@ -87,6 +87,30 @@ def test_embedding_stage_scores_npz_retrieval_fixture(tmp_path):
     assert rows["bitmax_native"]["quality_delta_vs_dense_ndcg_at_10"] == pytest.approx(0.0)
 
 
+@pytest.mark.benchmark_smoke
+def test_embedding_stage_doc_scale_can_restore_dense_ranking(tmp_path):
+    input_path = tmp_path / "doc-scale-retrieval.npz"
+    signs = np.array([1, -1, 1, -1, 1, -1, 1, -1], dtype=np.float32)
+    np.savez(
+        input_path,
+        doc_embeddings=np.stack([signs, signs * 10.0, -signs], axis=0).astype(np.float32),
+        doc_offsets=np.array([0, 1, 2, 3], dtype=np.int64),
+        query_embeddings=signs.reshape(1, 1, 8).astype(np.float32),
+        qrels=np.array([[0, 1, 0]], dtype=np.float32),
+        dataset_name=np.array("doc-scale"),
+    )
+
+    unscaled = run_stage("embeddings-smoke", input_path=input_path, output_path=tmp_path / "unscaled.json")
+    scaled = run_stage("embeddings-smoke", input_path=input_path, output_path=tmp_path / "scaled.json", scale="doc")
+    unscaled_row = next(row for row in unscaled["results"] if row["implementation"] == "bitmax_native")
+    scaled_row = next(row for row in scaled["results"] if row["implementation"] == "bitmax_native")
+
+    assert unscaled_row["recall_at_1"] == pytest.approx(0.0)
+    assert scaled_row["recall_at_1"] == pytest.approx(1.0)
+    assert scaled_row["scale"] == "doc"
+    assert scaled_row["topk_agreement_vs_dense_at_10"] == pytest.approx(1.0)
+
+
 def test_retrieval_stage_rejects_missing_qrels(tmp_path):
     input_path = tmp_path / "missing-qrels.npz"
     np.savez(

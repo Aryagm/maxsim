@@ -532,7 +532,7 @@ def main() -> None:
     parser.add_argument("--gate", type=Path, default=None)
     parser.add_argument("--top-k", type=int, default=10)
     parser.add_argument("--repeat", type=int, default=None)
-    parser.add_argument("--scale", default=None, help="Optional bitmax scale value, or 'global'.")
+    parser.add_argument("--scale", default=None, help="Optional bitmax scale value, 'global', or 'doc'.")
     args = parser.parse_args()
 
     scale = None if args.scale in {None, "none"} else args.scale

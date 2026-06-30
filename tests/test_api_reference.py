@@ -109,6 +109,47 @@ def test_maxsim_supports_batched_queries_and_global_scale():
     )
 
 
+def test_pack_signs_doc_scale_stores_one_scale_per_document_and_scores_with_it():
+    docs = np.array(
+        [
+            [2.0, -2.0, 2.0, -2.0, 2.0, -2.0, 2.0, -2.0],
+            [8.0, -8.0, 8.0, -8.0, 8.0, -8.0, 8.0, -8.0],
+            [1.0, 1.0, -1.0, -1.0, 1.0, 1.0, -1.0, -1.0],
+        ],
+        dtype=np.float32,
+    )
+    offsets = np.array([0, 1, 3], dtype=np.int64)
+    query = np.array([[1, -1, 1, -1, 1, -1, 1, -1]], dtype=np.float32)
+
+    packed = bitmax.pack_signs(docs, offsets, scale="doc")
+    scores = bitmax.maxsim(query, packed)
+
+    expected_scale = np.array([2.0, 4.5], dtype=np.float32)
+    signs = np.where(docs >= 0, 1.0, -1.0)
+    expected_scores = reference_maxsim(query, signs, offsets) * expected_scale
+    assert isinstance(packed.scale, np.ndarray)
+    np.testing.assert_allclose(packed.scale, expected_scale, rtol=0, atol=1e-6)
+    np.testing.assert_allclose(scores, expected_scores, rtol=0, atol=1e-5)
+
+
+def test_topk_maxsim_sorts_after_doc_scale_restoration():
+    docs = np.array(
+        [
+            [1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0],
+            [10.0, -10.0, 10.0, -10.0, 10.0, -10.0, 10.0, -10.0],
+            [1.0, 1.0, -1.0, -1.0, 1.0, 1.0, -1.0, -1.0],
+        ],
+        dtype=np.float32,
+    )
+    query = np.array([[1, -1, 1, -1, 1, -1, 1, -1]], dtype=np.float32)
+    packed = bitmax.pack_signs(docs, scale="doc")
+
+    scores, indices = bitmax.topk_maxsim(query, packed, k=2)
+
+    np.testing.assert_array_equal(indices, np.array([1, 0], dtype=np.int64))
+    np.testing.assert_allclose(scores, np.array([80.0, 8.0], dtype=np.float32), rtol=0, atol=1e-5)
+
+
 def test_cuda_batched_queries_dispatch_once_when_batch_kernel_is_available(monkeypatch):
     import bitmax._api as api
 
@@ -176,6 +217,31 @@ def test_to_device_uploads_cpu_packed_docs_to_cuda_handle(monkeypatch):
     np.testing.assert_array_equal(calls[0][0], packed.data)
     np.testing.assert_array_equal(calls[0][1], packed.doc_offsets)
     assert calls[0][2] == packed.dim
+
+
+def test_to_device_preserves_doc_scale_vector_for_later_host_side_restoration(monkeypatch):
+    import bitmax._api as api
+
+    docs = np.array(
+        [
+            [2, -2, 2, -2, 2, -2, 2, -2],
+            [4, -4, 4, -4, 4, -4, 4, -4],
+        ],
+        dtype=np.float32,
+    )
+    packed = bitmax.pack_signs(docs, scale="doc")
+
+    class FakeCuda:
+        class CudaPackedDocs:
+            def __init__(self, data, offsets, dim):
+                pass
+
+    monkeypatch.setattr(api, "_bitmax_cuda", FakeCuda())
+
+    cuda_packed = bitmax.to_device(packed, "cuda")
+
+    assert isinstance(cuda_packed.scale, np.ndarray)
+    np.testing.assert_array_equal(cuda_packed.scale, packed.scale)
 
 
 def test_maxsim_auto_uses_cuda_resident_packed_docs_without_host_packed_copy():

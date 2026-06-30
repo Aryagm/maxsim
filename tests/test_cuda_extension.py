@@ -156,6 +156,26 @@ def test_cuda_resident_dim128_uses_specialized_scoring_variant():
     assert large_packed.data.maxsim_kernel_variant == "generic"
 
 
+@pytest.mark.cuda
+def test_cuda_resident_doc_scale_matches_cpu_scores_and_topk():
+    pytest.importorskip("bitmax._bitmax_cuda")
+    signs = np.array([1, -1, 1, -1, 1, -1, 1, -1], dtype=np.float32)
+    docs = np.stack([signs, signs * 10.0, -signs], axis=0).astype(np.float32)
+    query = signs.reshape(1, 1, 8).astype(np.float32)
+    packed = bitmax.pack_signs(docs, scale="doc")
+    cuda_packed = bitmax.to_device(packed, "cuda")
+
+    cpu_scores = bitmax.maxsim(query, packed, device="cpu")
+    cuda_scores = bitmax.maxsim(query, cuda_packed)
+    cpu_top_scores, cpu_top_indices = bitmax.topk_maxsim(query, packed, k=2)
+    cuda_top_scores, cuda_top_indices = bitmax.topk_maxsim(query, cuda_packed, k=2)
+
+    np.testing.assert_allclose(cuda_scores, cpu_scores, rtol=0, atol=1e-5)
+    np.testing.assert_allclose(cuda_top_scores, cpu_top_scores, rtol=0, atol=1e-5)
+    np.testing.assert_array_equal(cuda_top_indices, cpu_top_indices)
+    np.testing.assert_array_equal(cuda_top_indices, np.array([[1, 0]], dtype=np.int64))
+
+
 def test_cuda_device_request_fails_clearly_without_cuda_build():
     try:
         import_module("bitmax._bitmax_cuda")
