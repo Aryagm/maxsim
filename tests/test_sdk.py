@@ -87,3 +87,89 @@ def test_reranker_rejects_unknown_candidate_id():
 
     with pytest.raises(KeyError, match="missing"):
         reranker.rerank(np.ones((1, 8), dtype=np.float32), candidate_ids=["missing"], k=1)
+
+
+def test_corpus_rejects_invalid_doc_ids_offsets_and_mode():
+    docs, offsets = _tiny_multivector_docs()
+
+    with pytest.raises(ValueError, match="unique"):
+        bitmax.Corpus.from_embeddings(["dup", "dup", "mixed"], docs, offsets, mode="binary")
+    with pytest.raises(ValueError, match="one more entry"):
+        bitmax.Corpus.from_embeddings(["one", "two"], docs, offsets, mode="binary")
+    with pytest.raises(ValueError, match="mode"):
+        bitmax.Corpus.from_embeddings(["positive", "negative", "mixed"], docs, offsets, mode="bad")
+
+
+def test_binary_q40_mode_searches_through_sdk():
+    docs, offsets = _tiny_multivector_docs()
+    corpus = bitmax.Corpus.from_embeddings(["positive", "negative", "mixed"], docs, offsets, mode="binary_q40")
+    reranker = bitmax.Reranker.from_corpus(corpus)
+
+    results = reranker.search(np.ones((1, 8), dtype=np.float32), k=2)
+
+    assert corpus.mode == "binary_q40"
+    assert corpus.storage_bytes > 3
+    assert len(results) == 2
+    assert results[0].doc_id == "positive"
+
+
+def test_int4_mode_searches_through_sdk():
+    docs, offsets = _tiny_multivector_docs()
+    corpus = bitmax.Corpus.from_embeddings(["positive", "negative", "mixed"], docs, offsets, mode="int4")
+    reranker = bitmax.Reranker.from_corpus(corpus)
+
+    results = reranker.search(np.ones((1, 8), dtype=np.float32), k=2)
+
+    assert corpus.mode == "int4"
+    assert corpus.storage_bytes == 3 * 8 // 2 + 4
+    assert results[0].doc_id == "positive"
+
+
+def test_corpus_save_load_roundtrips_binary_q40_scores_and_metadata(tmp_path):
+    docs, offsets = _tiny_multivector_docs()
+    corpus = bitmax.Corpus.from_embeddings(
+        ["positive", "negative", "mixed"],
+        docs,
+        offsets,
+        mode="binary_q40",
+        metadata={"source": "tiny"},
+    )
+    query = np.ones((1, 8), dtype=np.float32)
+    expected = bitmax.Reranker.from_corpus(corpus).search(query, k=3)
+
+    corpus.save(tmp_path / "tiny.bitmax.npz")
+    loaded = bitmax.Corpus.load(tmp_path / "tiny.bitmax.npz")
+    actual = bitmax.Reranker.from_corpus(loaded).search(query, k=3)
+
+    assert loaded.doc_ids == corpus.doc_ids
+    assert loaded.mode == "binary_q40"
+    assert loaded.metadata == {"source": "tiny"}
+    assert [result.doc_id for result in actual] == [result.doc_id for result in expected]
+    np.testing.assert_allclose([result.score for result in actual], [result.score for result in expected], rtol=0, atol=1e-5)
+
+
+def test_reranker_load_constructs_runtime_from_saved_corpus(tmp_path):
+    docs, offsets = _tiny_multivector_docs()
+    corpus = bitmax.Corpus.from_embeddings(["positive", "negative", "mixed"], docs, offsets, mode="binary")
+    corpus.save(tmp_path / "tiny.bitmax.npz")
+
+    reranker = bitmax.Reranker.load(tmp_path / "tiny.bitmax.npz")
+    results = reranker.search(np.ones((1, 8), dtype=np.float32), k=1)
+
+    assert results[0].doc_id == "positive"
+
+
+def test_corpus_save_load_roundtrips_int4_scores(tmp_path):
+    docs, offsets = _tiny_multivector_docs()
+    corpus = bitmax.Corpus.from_embeddings(["positive", "negative", "mixed"], docs, offsets, mode="int4")
+    query = np.ones((1, 8), dtype=np.float32)
+    expected = bitmax.Reranker.from_corpus(corpus).search(query, k=3)
+
+    corpus.save(tmp_path / "tiny-int4.bitmax.npz")
+    loaded = bitmax.Corpus.load(tmp_path / "tiny-int4.bitmax.npz")
+    actual = bitmax.Reranker.from_corpus(loaded).search(query, k=3)
+
+    assert loaded.mode == "int4"
+    assert loaded.storage_bytes == corpus.storage_bytes
+    assert [result.doc_id for result in actual] == [result.doc_id for result in expected]
+    np.testing.assert_allclose([result.score for result in actual], [result.score for result in expected], rtol=0, atol=1e-5)
