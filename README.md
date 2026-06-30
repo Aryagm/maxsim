@@ -84,6 +84,18 @@ Experimental Pareto variants can be measured with `--variants all`. Those rows
 include ternary documents, per-token scale, grouped scale, and calibrated
 threshold references; they are benchmark probes, not stable public kernels.
 
+CUDA top-k kernel experiments are available on CUDA workers:
+
+```bash
+python -m benchmarks.run_cuda_topk --stage lut-sweep
+python -m benchmarks.run_cuda_topk --stage blog-shape
+```
+
+On a project-owned VAST RTX 4090, the dim128 int8-query LUT path measured
+`0.463 ms` median latency on the blog-style 33 x 1000 x 786 x 128 top-k shape
+with 12,576 bytes/doc, versus `0.723 ms` for torch fp32 dense top-k on the same
+worker.
+
 ## VAST
 
 VAST helpers live under `ops/vast/` and are also exposed as `bitmax-vast` after

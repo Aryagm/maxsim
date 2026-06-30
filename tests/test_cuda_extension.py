@@ -179,6 +179,47 @@ def test_cuda_resident_doc_scale_matches_cpu_scores_and_topk():
     np.testing.assert_array_equal(cuda_top_indices, np.array([[1, 0]], dtype=np.int64))
 
 
+@pytest.mark.cuda
+def test_cuda_streaming_topk_matches_resident_topk_and_tie_breaking():
+    pytest.importorskip("bitmax._bitmax_cuda")
+    rng = np.random.default_rng(20260703)
+    docs = rng.normal(size=(20, 128)).astype(np.float32)
+    docs[0] = 1.0
+    docs[1] = 1.0
+    offsets = np.array([0, 2, 7, 13, 20], dtype=np.int64)
+    query = rng.normal(size=(3, 5, 128)).astype(np.float32)
+    query[0, 0] = 1.0
+    packed = bitmax.pack_signs(docs, offsets)
+    cuda_packed = bitmax.to_device(packed, "cuda")
+
+    reference_scores, reference_indices = bitmax.topk_maxsim(query, cuda_packed, k=3)
+    streaming_scores, streaming_indices = cuda_packed.data.streaming_topk_batch(query, 3, 1.0, False)
+
+    np.testing.assert_allclose(streaming_scores, reference_scores, rtol=0, atol=1e-5)
+    np.testing.assert_array_equal(streaming_indices, reference_indices)
+
+
+@pytest.mark.cuda
+def test_cuda_dim128_lut_topk_matches_resident_topk_for_int8_queries():
+    pytest.importorskip("bitmax._bitmax_cuda")
+    rng = np.random.default_rng(20260704)
+    docs = rng.normal(size=(1600, 128)).astype(np.float32)
+    offsets = np.arange(0, 1601, 10, dtype=np.int64)
+    query = rng.integers(-8, 9, size=(4, 7, 128), dtype=np.int8)
+    packed = bitmax.pack_signs(docs, offsets)
+    cuda_packed = bitmax.to_device(packed, "cuda")
+    query_float = query.astype(np.float32)
+
+    reference_scores, reference_indices = cuda_packed.data.topk_batch(query_float, 5, 1.0, False)
+    lut_scores, lut_indices = cuda_packed.data.topk_lut_batch(query_float, 5, 1.0, False)
+    api_scores, api_indices = bitmax.topk_maxsim(query, cuda_packed, k=5)
+
+    np.testing.assert_allclose(lut_scores, reference_scores, rtol=0, atol=0)
+    np.testing.assert_array_equal(lut_indices, reference_indices)
+    np.testing.assert_allclose(api_scores, reference_scores, rtol=0, atol=0)
+    np.testing.assert_array_equal(api_indices, reference_indices)
+
+
 def test_cuda_device_request_fails_clearly_without_cuda_build():
     try:
         import_module("bitmax._bitmax_cuda")

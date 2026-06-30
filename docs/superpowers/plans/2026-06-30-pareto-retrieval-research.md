@@ -97,7 +97,7 @@ git commit -m "bench: add blog-style quantization baseline"
 - Modify: `tests/test_cuda_extension.py`
 - Modify: `docs/gpu_optimization.md`
 
-- [ ] **Step 1: Write failing CUDA correctness test**
+- [x] **Step 1: Write failing CUDA correctness test**
 
 Add a CUDA-marked test that compares `cuda_packed.data.streaming_topk_batch(query, k, 1.0, False)` with `bitmax.topk_maxsim(query, cuda_packed, k)` for ragged docs, including deterministic lower-doc-id tie-breaking.
 
@@ -107,26 +107,27 @@ Run remotely: `python -m pytest -q -m cuda tests/test_cuda_extension.py::test_cu
 
 Expected: FAIL with missing `streaming_topk_batch`.
 
-- [ ] **Step 3: Implement streaming top-k kernel**
+- [x] **Step 3: Implement streaming top-k kernel**
 
 Add a CUDA kernel that assigns one block to each `(batch, doc)` score, computes the document score, and updates a compact per-batch top-k buffer without writing the full `[batch, docs]` matrix. Keep the existing full-score fused top-k as a fallback until benchmarks prove the streaming kernel wins.
 
-- [ ] **Step 4: Verify CUDA correctness**
+- [x] **Step 4: Verify CUDA correctness**
 
-Blocked: local `nvcc` is unavailable, and the latest ledger-owned VAST worker
-attempts failed before SSH/CUDA validation.
+Done on project-owned VAST instance `43248165`.
 
 Run remotely: `python -m pytest -q -m cuda tests/test_cuda_extension.py`
 
 Expected: all CUDA tests pass.
 
-- [ ] **Step 5: Benchmark against existing fused top-k**
+- [x] **Step 5: Benchmark against existing fused top-k**
 
 Run a VAST timing script for `docs=64`, `512`, and `4096`, reporting latency, score delta, index equality, and host bytes returned.
 
-- [ ] **Step 6: Gate routing**
+- [x] **Step 6: Gate routing**
 
 Use streaming top-k only for shapes where same-host VAST timing shows lower latency with exact indices.
+
+Result: streaming top-k was exact but slower, so it is not routed.
 
 ## Task 3: Experimental Ternary Document Backend
 
@@ -195,13 +196,12 @@ Only move a variant into `src/bitmax/_api.py` or CUDA if it improves recall/NDCG
 
 Run: `.venv/bin/python -m pytest -q && .venv/bin/python -m benchmarks.blog_baseline --stage smoke`
 
-- [ ] **Step 2: Run VAST CUDA gate**
+- [x] **Step 2: Run VAST CUDA gate**
 
 Run CUDA tests and benchmark scripts on one ledger-owned VAST instance. Destroy only the instance ID recorded in `.vast/bitmax-instances.jsonl` with a live `bitmax-v0-` label.
 
-Blocked for this pass by failed VAST container/SSH/proxy validation. The VAST
-account has running non-project instances, but no reachable `bitmax-v0-` worker
-is available.
+Done on project-owned VAST instance `43248165`. The worker is intentionally left
+running for follow-up GPU experiments.
 
 - [x] **Step 3: Report Pareto rows**
 

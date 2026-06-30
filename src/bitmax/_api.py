@@ -206,6 +206,7 @@ def topk_maxsim(query_tokens, packed: PackedDocs, k: int, *, scale=None, device=
         and (not _scale_is_vector(resolved_scale) or use_resident_vector_scale)
     ):
         query = _as_numpy(query_tokens)
+        prefer_lut_topk = np.issubdtype(query.dtype, np.integer) and packed.dim == 128 and packed.num_docs > 128
         if query.ndim == 2:
             batches = query[np.newaxis, :, :]
             squeeze = True
@@ -222,6 +223,7 @@ def topk_maxsim(query_tokens, packed: PackedDocs, k: int, *, scale=None, device=
             int(k),
             float(_kernel_scale(resolved_scale)),
             use_resident_vector_scale,
+            prefer_lut_topk,
         )
         return (scores[0], indices[0]) if squeeze else (scores, indices)
 
@@ -369,7 +371,11 @@ def _cuda_resident_maxsim_batch(handle, query: np.ndarray, scale: float, use_sca
     return handle.maxsim_batch(query, scale)
 
 
-def _cuda_resident_topk_batch(handle, query: np.ndarray, k: int, scale: float, use_scale_vector: bool):
+def _cuda_resident_topk_batch(handle, query: np.ndarray, k: int, scale: float, use_scale_vector: bool, prefer_lut: bool = False):
+    if prefer_lut and hasattr(handle, "topk_lut_batch"):
+        if use_scale_vector:
+            return handle.topk_lut_batch(query, k, scale, True)
+        return handle.topk_lut_batch(query, k, scale)
     if use_scale_vector:
         return handle.topk_batch(query, k, scale, True)
     return handle.topk_batch(query, k, scale)

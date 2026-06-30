@@ -329,12 +329,50 @@ Interpretation:
 4. Keep unscaled binary docs as the default until a real retrieval slice shows a
    stable recall/NDCG gain after accounting for storage and GPU latency.
 
-Blocked GPU work:
+## 2026-06-30: GPU-First Dim128 Query LUT Top-K
 
-- A true streaming CUDA MaxSim+top-k path still needs GPU validation before it
-  can replace the current resident fused top-k path.
-- The latest project-owned VAST attempts failed before validation due container
-  startup and SSH/proxy access problems. VAST currently has running account
-  instances, but none are `bitmax-v0-` project workers.
-- Do not route the public API to streaming top-k until CUDA tests and same-host
-  timing prove it exact and faster than the resident fused top-k path.
+Change: CUDA-resident `topk_maxsim` now routes int8/integer query tensors with
+`dim=128` and more than 128 documents through a query-byte lookup-table kernel.
+The LUT stores the 256 possible dot contributions for each `(batch, query token,
+packed byte)` and turns each 128-dimensional binary dot product into 16 table
+loads. The small-doc dim128 path remains on the prior unrolled kernel because
+LUT construction overhead dominates there.
+
+Measured on the persistent VAST RTX 4090 worker created by this project:
+
+| benchmark | resident top-k | LUT direct | routed API | API speedup | correctness |
+| --- | ---: | ---: | ---: | ---: | --- |
+| docvqa_like_64, batch64/q23/docs64/doc750/dim128/k10 | 1.287 ms | 2.551 ms | 1.304 ms | 0.99x | exact |
+| rerank_512, batch32/q32/docs512/doc128/dim128/k10 | 2.222 ms | 1.403 ms | 1.440 ms | 1.54x | exact |
+| rerank_4096, batch16/q32/docs4096/doc32/dim128/k10 | 3.622 ms | 2.210 ms | 2.220 ms | 1.63x | exact |
+| blog_single_query, batch1/q33/docs1000/doc786/dim128/k10 | 0.832 ms | 0.485 ms | 0.485 ms | 1.71x | exact |
+| docscale_blog_single_query, batch1/q33/docs1000/doc786/dim128/k10 | 0.887 ms | 0.480 ms | 0.487 ms | 1.82x | exact |
+
+The benchmark artifact is
+`benchmark-results/cuda-dim128-lut-topk-4090.json`. Exactness here means
+`score_delta=0.0` and top-k indices matched the prior resident top-k path for
+integer query tensors.
+
+The same worker measured the blog-style shape against torch dense top-k:
+
+| implementation | bytes/doc | median latency | speedup vs torch fp32 | speedup vs blog 3.71 ms row |
+| --- | ---: | ---: | ---: | ---: |
+| torch fp32 docs/query | 402,432 | 0.723 ms | 1.00x | n/a |
+| torch fp16 docs/query | 201,216 | 0.381 ms | 1.90x | n/a |
+| bitmax int8 query/binary docs LUT top-k | 12,576 | 0.463 ms | 1.56x | 8.02x |
+| bitmax int8 query/binary docs + doc scale LUT top-k | 12,580 | 0.480 ms | 1.51x | 7.73x |
+
+The benchmark artifact is
+`benchmark-results/blog-shape-gpu-topk-4090.json`. This is the first measured
+GPU result that beats the blog table's int8-query/binary-doc latency while
+keeping the same 12.28 KiB/doc storage target. It is still a synthetic
+blog-shape benchmark; real retrieval NDCG must be rerun on a ViDoRe slice before
+claiming an accuracy improvement over the blog.
+
+Streaming top-k status:
+
+- The true streaming CUDA top-k kernel, which avoids materializing the full
+  `[batch, docs]` score matrix, now compiles and passes CUDA correctness tests.
+- Same-host timing showed it is slower than resident score-matrix top-k because
+  per-document global top-k locking dominates.
+- It is intentionally not routed by the public Python API.

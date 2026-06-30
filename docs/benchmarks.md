@@ -143,6 +143,22 @@ documents carry useful signal. CUDA-resident packed docs upload stored doc-scale
 vectors and apply them inside resident `maxsim` and fused `topk_maxsim`; CPU and
 host-packed CUDA paths apply vector scales after native scoring.
 
+CUDA-resident top-k kernel experiments can be run directly on a CUDA worker:
+
+```bash
+python -m benchmarks.run_cuda_topk \
+  --stage lut-sweep \
+  --output benchmark-results/cuda-dim128-lut-topk-4090.json
+python -m benchmarks.run_cuda_topk \
+  --stage blog-shape \
+  --output benchmark-results/blog-shape-gpu-topk-4090.json
+```
+
+These stages require PyTorch with CUDA. `lut-sweep` compares the default
+resident top-k path with the dim128 query-byte LUT path on retrieval-shaped
+synthetic cases. `blog-shape` compares torch fp32/fp16 dense top-k with bitmax
+int8-query/binary-doc top-k on the blog-style 33 x 1000 x 786 x 128 shape.
+
 Pass `--variants all` to emit the experimental Pareto rows:
 
 ```bash
