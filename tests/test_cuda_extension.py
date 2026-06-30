@@ -266,6 +266,50 @@ def test_cuda_int4_topk_matches_cpu_int4_reference():
     np.testing.assert_array_equal(cuda_indices, cpu_indices)
 
 
+@pytest.mark.cuda
+def test_cuda_sdk_binary_and_q40_search_match_cpu():
+    pytest.importorskip("bitmax._bitmax_cuda")
+    rng = np.random.default_rng(20260707)
+    docs = rng.normal(size=(64, 128)).astype(np.float32)
+    offsets = np.array([0, 13, 29, 47, 64], dtype=np.int64)
+    query = rng.normal(size=(3, 5, 128)).astype(np.float32)
+    doc_ids = [f"doc-{idx}" for idx in range(4)]
+
+    for mode in ("binary", "binary_q40"):
+        corpus = bitmax.Corpus.from_embeddings(doc_ids, docs, offsets, mode=mode)
+        cpu_results = bitmax.Reranker.from_corpus(corpus, device="cpu").search(query, k=3)
+        cuda_results = bitmax.Reranker.from_corpus(corpus, device="cuda").search(query, k=3)
+
+        assert [[result.doc_id for result in row] for row in cuda_results] == [[result.doc_id for result in row] for row in cpu_results]
+        for cuda_row, cpu_row in zip(cuda_results, cpu_results):
+            np.testing.assert_allclose([r.score for r in cuda_row], [r.score for r in cpu_row], rtol=0, atol=1e-4)
+
+
+@pytest.mark.cuda
+def test_cuda_sdk_int4_search_and_rerank_match_cpu():
+    pytest.importorskip("bitmax._bitmax_cuda")
+    rng = np.random.default_rng(20260708)
+    docs = rng.normal(size=(64, 128)).astype(np.float32)
+    offsets = np.array([0, 13, 29, 47, 64], dtype=np.int64)
+    query = rng.normal(size=(2, 5, 128)).astype(np.float32)
+    doc_ids = [f"doc-{idx}" for idx in range(4)]
+    corpus = bitmax.Corpus.from_embeddings(doc_ids, docs, offsets, mode="int4")
+
+    cpu = bitmax.Reranker.from_corpus(corpus, device="cpu")
+    cuda = bitmax.Reranker.from_corpus(corpus, device="cuda")
+    cpu_search = cpu.search(query, k=3)
+    cuda_search = cuda.search(query, k=3)
+    cpu_rerank = cpu.rerank(query, ["doc-3", "doc-1", "doc-2"], k=2)
+    cuda_rerank = cuda.rerank(query, ["doc-3", "doc-1", "doc-2"], k=2)
+
+    assert [[result.doc_id for result in row] for row in cuda_search] == [[result.doc_id for result in row] for row in cpu_search]
+    assert [[result.doc_id for result in row] for row in cuda_rerank] == [[result.doc_id for result in row] for row in cpu_rerank]
+    for cuda_row, cpu_row in zip(cuda_search, cpu_search):
+        np.testing.assert_allclose([r.score for r in cuda_row], [r.score for r in cpu_row], rtol=0, atol=1e-4)
+    for cuda_row, cpu_row in zip(cuda_rerank, cpu_rerank):
+        np.testing.assert_allclose([r.score for r in cuda_row], [r.score for r in cpu_row], rtol=0, atol=1e-4)
+
+
 def test_cuda_device_request_fails_clearly_without_cuda_build():
     try:
         import_module("bitmax._bitmax_cuda")
