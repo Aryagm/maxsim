@@ -7,8 +7,11 @@ JSON exists and reports `"gate_passed": true`.
 python benchmarks/run_synthetic.py --stage stage0 --output benchmark-results/stage0.json
 python benchmarks/run_synthetic.py --stage cpu-smoke --output benchmark-results/cpu-smoke.json
 python benchmarks/run_synthetic.py --stage cuda-smoke --output benchmark-results/cuda-smoke.json
-python benchmarks/run_synthetic.py --stage vast-large \
+python benchmarks/run_synthetic.py --stage cuda-sweep \
   --gate benchmark-results/cuda-smoke.json \
+  --output benchmark-results/cuda-sweep.json
+python benchmarks/run_synthetic.py --stage vast-large \
+  --gate benchmark-results/cuda-sweep.json \
   --output benchmark-results/vast-large.json
 ```
 
@@ -37,8 +40,13 @@ Native rows include:
 - `doc_memory_compression_vs_fp32`
 - `baseline_latency_ms`
 
-The `torch_fp16_baseline` and `torch_int8_baseline` rows include:
+The `torch_fp16_baseline` and `torch_int8_baseline` rows use vectorized dense
+MaxSim over the uniform synthetic document layout and include:
 
 - `baseline_backend`: `torch` when PyTorch is installed, otherwise
   `numpy_torch_equivalent`.
-- `formula`: `dense_fp16_maxsim` or `dense_int8_doc_maxsim`.
+- `baseline_device`: `cuda` when the installed PyTorch build supports the
+  current GPU architecture, otherwise `cpu`.
+- `requested_baseline_device`: the requested benchmark device.
+- `formula`: `dense_fp16_vectorized_maxsim` or
+  `dense_int8_vectorized_doc_maxsim`.

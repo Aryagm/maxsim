@@ -19,40 +19,14 @@ except ImportError:  # pragma: no cover - depends on optional local install
 def run_stage(stage: str, *, output_path: Path | str | None = None, gate_path: Path | str | None = None) -> dict[str, Any]:
     output = Path(output_path) if output_path is not None else Path("benchmark-results") / f"{stage}.json"
     _check_stage_gate(stage, gate_path)
-
-    if stage == "stage0":
-        specs = [
-            {"dim": 8, "query_tokens": 2, "doc_tokens": 2, "docs": 3, "dtype": "int8"},
-            {"dim": 128, "query_tokens": 4, "doc_tokens": 3, "docs": 3, "dtype": "float32"},
-        ]
-        repeat = 3
-    elif stage == "cpu-smoke":
-        specs = [
-            {"dim": 128, "query_tokens": 8, "doc_tokens": 16, "docs": 32, "dtype": "int8"},
-            {"dim": 256, "query_tokens": 16, "doc_tokens": 32, "docs": 64, "dtype": "float32"},
-        ]
-        repeat = 5
-    elif stage == "cuda-smoke":
-        specs = [
-            {"dim": 128, "query_tokens": 8, "doc_tokens": 16, "docs": 64, "dtype": "float32"},
-        ]
-        repeat = 5
-    elif stage == "vast-large":
-        specs = [
-            {"dim": 128, "query_tokens": 16, "doc_tokens": 64, "docs": 1_024, "dtype": "int8"},
-            {"dim": 256, "query_tokens": 32, "doc_tokens": 128, "docs": 2_048, "dtype": "float32"},
-        ]
-        repeat = 7
-    else:
-        raise ValueError(f"unknown benchmark stage: {stage}")
+    specs, repeat = _stage_config(stage)
 
     rows: list[dict[str, Any]] = []
     for spec in specs:
         query, docs, offsets = _make_fixture(spec)
         packed = bitmax.pack_signs(docs, offsets)
         reference_scores, reference_latency = _time_call(lambda: _python_reference_maxsim(query, packed), repeat=repeat)
-        native_device = "cuda" if stage == "cuda-smoke" else "auto"
-        baseline_device = "cuda" if stage == "cuda-smoke" else "cpu"
+        native_device, baseline_device = _benchmark_devices(stage)
         fp16_runner, fp16_metadata = _dense_baseline_runner(query, packed, storage_dtype=np.float16, device=baseline_device)
         int8_runner, int8_metadata = _dense_baseline_runner(query, packed, storage_dtype=np.int8, device=baseline_device)
         fp16_scores, fp16_latency = _time_call(fp16_runner, repeat=repeat)
@@ -109,18 +83,57 @@ def run_stage(stage: str, *, output_path: Path | str | None = None, gate_path: P
 
 
 def _check_stage_gate(stage: str, gate_path: Path | str | None) -> None:
-    if stage != "vast-large":
+    required_stage = {
+        "cuda-sweep": "cuda-smoke",
+        "vast-large": "cuda-sweep",
+    }.get(stage)
+    if required_stage is None:
         return
     if gate_path is None:
-        raise RuntimeError("vast-large requires a passing cuda-smoke gate JSON")
+        raise RuntimeError(f"{stage} requires a passing {required_stage} gate JSON")
 
     gate = Path(gate_path)
     if not gate.exists():
-        raise RuntimeError("vast-large requires a passing cuda-smoke gate JSON")
+        raise RuntimeError(f"{stage} requires a passing {required_stage} gate JSON")
 
     data = json.loads(gate.read_text())
-    if data.get("stage") != "cuda-smoke" or data.get("gate_passed") is not True:
-        raise RuntimeError("vast-large requires a passing cuda-smoke gate JSON")
+    if data.get("stage") != required_stage or data.get("gate_passed") is not True:
+        raise RuntimeError(f"{stage} requires a passing {required_stage} gate JSON")
+
+
+def _stage_config(stage: str) -> tuple[list[dict[str, Any]], int]:
+    if stage == "stage0":
+        return [
+            {"dim": 8, "query_tokens": 2, "doc_tokens": 2, "docs": 3, "dtype": "int8"},
+            {"dim": 128, "query_tokens": 4, "doc_tokens": 3, "docs": 3, "dtype": "float32"},
+        ], 3
+    if stage == "cpu-smoke":
+        return [
+            {"dim": 128, "query_tokens": 8, "doc_tokens": 16, "docs": 32, "dtype": "int8"},
+            {"dim": 256, "query_tokens": 16, "doc_tokens": 32, "docs": 64, "dtype": "float32"},
+        ], 5
+    if stage == "cuda-smoke":
+        return [
+            {"dim": 128, "query_tokens": 8, "doc_tokens": 16, "docs": 64, "dtype": "float32"},
+        ], 5
+    if stage == "cuda-sweep":
+        return [
+            {"dim": 128, "query_tokens": 16, "doc_tokens": 32, "docs": 512, "dtype": "int8"},
+            {"dim": 128, "query_tokens": 32, "doc_tokens": 64, "docs": 1_024, "dtype": "float32"},
+            {"dim": 256, "query_tokens": 32, "doc_tokens": 64, "docs": 1_024, "dtype": "float32"},
+        ], 7
+    if stage == "vast-large":
+        return [
+            {"dim": 128, "query_tokens": 16, "doc_tokens": 64, "docs": 1_024, "dtype": "int8"},
+            {"dim": 256, "query_tokens": 32, "doc_tokens": 128, "docs": 2_048, "dtype": "float32"},
+        ], 7
+    raise ValueError(f"unknown benchmark stage: {stage}")
+
+
+def _benchmark_devices(stage: str) -> tuple[str, str]:
+    if stage in {"cuda-smoke", "cuda-sweep", "vast-large"}:
+        return "cuda", "cuda"
+    return "auto", "cpu"
 
 
 def _make_fixture(spec: dict[str, Any]):
@@ -162,7 +175,7 @@ def _python_reference_maxsim(query, packed: bitmax.PackedDocs):
 
 
 def _dense_baseline_runner(query, packed: bitmax.PackedDocs, *, storage_dtype, device: str):
-    formula = "dense_fp16_maxsim" if storage_dtype == np.float16 else "dense_int8_doc_maxsim"
+    formula = "dense_fp16_vectorized_maxsim" if storage_dtype == np.float16 else "dense_int8_vectorized_doc_maxsim"
     torch_device = _resolve_torch_device(device)
     backend = "torch" if torch_device is not None else "numpy_torch_equivalent"
     metadata = {
@@ -200,30 +213,47 @@ def _torch_cuda_supports_current_device() -> bool:
 def _numpy_dense_baseline_maxsim(query, packed: bitmax.PackedDocs, *, storage_dtype) -> np.ndarray:
     query_float = np.asarray(query, dtype=storage_dtype).astype(np.float32)
     signs = _unpack_signs(packed.data, packed.dim).astype(storage_dtype).astype(np.float32)
-    scores = np.empty(packed.num_docs, dtype=np.float32)
     scale = 1.0 if packed.scale is None else float(packed.scale)
-    for doc_idx in range(packed.num_docs):
-        start = int(packed.doc_offsets[doc_idx])
-        end = int(packed.doc_offsets[doc_idx + 1])
-        doc = signs[start:end]
-        scores[doc_idx] = np.max(query_float @ doc.T, axis=1).sum(dtype=np.float32) * scale
-    return scores
+    doc_tokens = _uniform_doc_tokens(packed)
+    if doc_tokens is None:
+        scores = np.empty(packed.num_docs, dtype=np.float32)
+        for doc_idx in range(packed.num_docs):
+            start = int(packed.doc_offsets[doc_idx])
+            end = int(packed.doc_offsets[doc_idx + 1])
+            doc = signs[start:end]
+            scores[doc_idx] = np.max(query_float @ doc.T, axis=1).sum(dtype=np.float32) * scale
+        return scores
+    dots = query_float @ signs.T
+    return dots.reshape(query_float.shape[0], packed.num_docs, doc_tokens).max(axis=2).sum(axis=0, dtype=np.float32) * scale
 
 
 def _torch_dense_baseline_maxsim(query, packed: bitmax.PackedDocs, *, storage_dtype, device) -> np.ndarray:
     torch_dtype = _torch.float16 if storage_dtype == np.float16 else _torch.int8
     query_tensor = _torch.as_tensor(np.asarray(query), dtype=torch_dtype, device=device)
     signs_tensor = _torch.as_tensor(_unpack_signs(packed.data, packed.dim), dtype=torch_dtype, device=device)
-    scores = []
     scale = 1.0 if packed.scale is None else float(packed.scale)
-    for doc_idx in range(packed.num_docs):
-        start = int(packed.doc_offsets[doc_idx])
-        end = int(packed.doc_offsets[doc_idx + 1])
-        dots = query_tensor.to(_torch.float32) @ signs_tensor[start:end].to(_torch.float32).T
-        scores.append(dots.max(dim=1).values.sum() * scale)
+    doc_tokens = _uniform_doc_tokens(packed)
+    if doc_tokens is None:
+        scores = []
+        for doc_idx in range(packed.num_docs):
+            start = int(packed.doc_offsets[doc_idx])
+            end = int(packed.doc_offsets[doc_idx + 1])
+            dots = query_tensor.to(_torch.float32) @ signs_tensor[start:end].to(_torch.float32).T
+            scores.append(dots.max(dim=1).values.sum() * scale)
+        result = _torch.stack(scores)
+    else:
+        dots = query_tensor.to(_torch.float32) @ signs_tensor.to(_torch.float32).T
+        result = dots.reshape(query_tensor.shape[0], packed.num_docs, doc_tokens).max(dim=2).values.sum(dim=0) * scale
     if str(device) == "cuda":
         _torch.cuda.synchronize()
-    return _torch.stack(scores).detach().cpu().numpy().astype(np.float32, copy=False)
+    return result.detach().cpu().numpy().astype(np.float32, copy=False)
+
+
+def _uniform_doc_tokens(packed: bitmax.PackedDocs) -> int | None:
+    lengths = np.diff(packed.doc_offsets)
+    if lengths.size == 0 or np.any(lengths != lengths[0]):
+        return None
+    return int(lengths[0])
 
 
 def _unpack_signs(data: np.ndarray, dim: int) -> np.ndarray:
@@ -302,7 +332,7 @@ def _gate_passed(rows: list[dict[str, Any]]) -> bool:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run staged synthetic bitmax benchmarks.")
-    parser.add_argument("--stage", required=True, choices=["stage0", "cpu-smoke", "cuda-smoke", "vast-large"])
+    parser.add_argument("--stage", required=True, choices=["stage0", "cpu-smoke", "cuda-smoke", "cuda-sweep", "vast-large"])
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--gate", type=Path, default=None)
     args = parser.parse_args()

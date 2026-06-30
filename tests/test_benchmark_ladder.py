@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from benchmarks.run_synthetic import run_stage
+from benchmarks.run_synthetic import _benchmark_devices, _stage_config, run_stage
 
 
 @pytest.mark.benchmark_smoke
@@ -23,7 +23,15 @@ def test_stage0_benchmark_emits_correctness_and_timing_signal(tmp_path):
 
 def test_larger_benchmark_stage_requires_prior_gate_json(tmp_path):
     with pytest.raises(RuntimeError, match="requires a passing cuda-smoke gate"):
-        run_stage("vast-large", output_path=tmp_path / "large.json", gate_path=tmp_path / "missing.json")
+        run_stage("cuda-sweep", output_path=tmp_path / "sweep.json", gate_path=tmp_path / "missing.json")
+
+
+def test_vast_large_requires_prior_cuda_sweep_gate_json(tmp_path):
+    cuda_smoke_gate = tmp_path / "cuda-smoke.json"
+    cuda_smoke_gate.write_text('{"stage": "cuda-smoke", "gate_passed": true}')
+
+    with pytest.raises(RuntimeError, match="requires a passing cuda-sweep gate"):
+        run_stage("vast-large", output_path=tmp_path / "large.json", gate_path=cuda_smoke_gate)
 
 
 @pytest.mark.benchmark_smoke
@@ -73,7 +81,7 @@ def test_torch_style_baseline_rows_describe_backend_and_formula(tmp_path):
         assert row["baseline_backend"] in {"torch", "numpy_torch_equivalent"}
         assert row["baseline_device"] in {"cpu", "cuda"}
         assert row["requested_baseline_device"] in {"cpu", "cuda"}
-        assert row["formula"] in {"dense_fp16_maxsim", "dense_int8_doc_maxsim"}
+        assert row["formula"] in {"dense_fp16_vectorized_maxsim", "dense_int8_vectorized_doc_maxsim"}
         assert row["gate_blocking"] is False
 
 
@@ -103,3 +111,20 @@ def test_torch_cuda_device_resolver_rejects_unsupported_arch(monkeypatch):
     monkeypatch.setattr(synthetic, "_torch", FakeTorch())
 
     assert synthetic._resolve_torch_device("cuda") is None
+
+
+def test_cuda_sweep_stage_uses_larger_shapes_than_smoke():
+    specs, repeat = _stage_config("cuda-sweep")
+
+    assert repeat >= 7
+    assert len(specs) >= 3
+    assert max(spec["docs"] for spec in specs) >= 1_024
+    assert max(spec["doc_tokens"] for spec in specs) >= 64
+    assert {spec["dim"] for spec in specs} >= {128, 256}
+
+
+def test_cuda_stages_request_cuda_for_baselines_and_native_kernel():
+    assert _benchmark_devices("cpu-smoke") == ("auto", "cpu")
+    assert _benchmark_devices("cuda-smoke") == ("cuda", "cuda")
+    assert _benchmark_devices("cuda-sweep") == ("cuda", "cuda")
+    assert _benchmark_devices("vast-large") == ("cuda", "cuda")

@@ -54,11 +54,13 @@ Benchmark JSON uses schema version 2 and includes:
 - packed-document memory compression vs dense fp16/fp32 storage.
 
 If PyTorch is installed, the baseline rows use PyTorch. Otherwise they use a
-NumPy implementation of the same dense MaxSim formulas and mark
+NumPy implementation of the same vectorized dense MaxSim formulas and mark
 `baseline_backend` as `numpy_torch_equivalent`.
 
-CUDA and larger VAST runs are gated by the earlier JSON results. Benchmark tables
-in this README should only contain measured numbers from `benchmark-results/`.
+CUDA and larger VAST runs are gated by the earlier JSON results:
+`cuda-smoke` unlocks `cuda-sweep`, and `cuda-sweep` unlocks `vast-large`.
+Benchmark tables in this README should only contain measured numbers from
+`benchmark-results/`.
 
 ## VAST
 
