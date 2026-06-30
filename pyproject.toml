@@ -31,4 +31,4 @@ markers = [
 
 [tool.scikit-build]
 cmake.source-dir = "."
-wheel.packages = ["src/bitmax", "benchmarks", "ops"]
+wheel.packages = ["src/bitmax", "benchmarks", "ops", "examples"]
