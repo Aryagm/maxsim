@@ -21,7 +21,12 @@ dev = ["pytest>=8.0"]
 torch = ["torch>=2.0"]
 vast = ["vastai>=0.3.0"]
 vision-retrieval = ["accelerate>=0.30", "datasets>=2.19", "pillow>=10", "torch>=2.0", "transformers>=4.57"]
-oss-bench = ["faiss-gpu==1.14.3; platform_system == 'Linux'"]
+oss-bench = [
+  "faiss-gpu==1.14.3; platform_system == 'Linux'",
+  "qdrant-client>=1.15",
+  "cuvs-cu12>=26.6.0; platform_system == 'Linux'",
+  "fast-plaid>=1.4.7.2110; platform_system == 'Linux'",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

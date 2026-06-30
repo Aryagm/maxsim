@@ -227,47 +227,66 @@ Artifact: `benchmark-results/sdk-demo-local-search-limit256-cuda.json`.
 ## Open-Source CUDA Comparison
 
 Use this benchmark to compare the SDK against popular open-source GPU vector
-search baselines on the same multi-vector embedding slice:
+search and multi-vector baselines on the same embedding slice:
 
 ```bash
 python -m pip install ".[oss-bench]"
 python -m benchmarks.compare_open_source \
   --input benchmark-results/vidore-docvqa-colqwen2-limit256.npz \
   --device cuda \
-  --implementations dense_fp16,faiss_pooled,faiss_token_dense_rerank,bitmax_binary,bitmax_binary_q40,bitmax_int4 \
-  --repeat 5 \
+  --implementations dense_fp16,faiss_pooled,faiss_token_dense_rerank,qdrant_multivector,cuvs_pooled,fast_plaid,colbert_plaid,vespa_multivector,bitmax_binary,bitmax_binary_q40,bitmax_int4 \
+  --repeat 3 \
   --faiss-token-topn 512 \
-  --output benchmark-results/open-source-comparison-limit256-cuda.json
+  --allow-unavailable \
+  --output benchmark-results/open-source-comparison-expanded-limit256-cuda.json
 ```
 
-The FAISS rows are intentionally labeled by what they do:
+Rows are intentionally labeled by what they do:
 
 - `faiss_gpu_mean_pool_flat_ip`: popular single-vector FAISS GPU flat inner
   product search over mean-pooled document/query vectors. This is extremely
   fast and tiny, but it is not late interaction.
+- `cuvs_gpu_mean_pool_flat_ip`: NVIDIA cuVS GPU brute-force inner product over
+  the same mean-pooled vectors. This is a CUDA-native single-vector baseline,
+  not late interaction.
 - `faiss_gpu_token_candidates_dense_rerank`: FAISS GPU flat search over all
   document token vectors to produce candidate documents, followed by dense fp16
   MaxSim reranking of those candidates. This recovers dense quality on the
   measured slice but stores full token vectors and is slower than dense fp16.
+- `qdrant_multivector`: Qdrant local in-memory multivector MaxSim with full
+  float32 token vectors. This measures an exact production-style multivector
+  API path, not a GPU kernel path.
+- `fast_plaid`: fast-plaid CUDA search over its own packed/indexed document
+  embeddings. The table reports search latency only; `build_ms` is stored in
+  the JSON artifact.
+- `colbert_plaid`: not run in this embedding-array harness because ColBERT's
+  PLAID stack owns the ColBERT text/model/index pipeline. Use `fast_plaid` here
+  for the embedding-array PLAID-style comparison.
+- `vespa_multivector`: not run in this local CUDA harness because Vespa needs a
+  running service, schema, and ingestion benchmark.
 
 Measured on the persistent project-owned VAST RTX 4090 worker with
 `vidore/docvqa_test_subsampled:test:256` embedded by `vidore/colqwen2-v1.0-hf`:
 
 | implementation | kind | fp32 doc reduction | latency | speedup vs dense fp16 | recall@10 | NDCG@10 |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
-| dense fp16 CUDA | dense baseline | 2.00x | 1856.26 ms | 1.00x | 0.777 | 0.660 |
-| FAISS GPU mean-pool flat IP | open-source first-stage | 752.21x | 0.74 ms | 2514.41x | 0.414 | 0.290 |
-| FAISS GPU token candidates + dense rerank | open-source token baseline | 0.67x | 2784.23 ms | 0.67x | 0.777 | 0.660 |
-| bitmax binary CUDA | bitmax SDK | 32.00x | 58.97 ms | 31.48x | 0.754 | 0.649 |
-| bitmax binary_q40 CUDA | bitmax SDK | 31.98x | 64.24 ms | 28.90x | 0.762 | 0.652 |
-| bitmax int4 CUDA | bitmax SDK | 8.00x | 144.14 ms | 12.88x | 0.773 | 0.658 |
+| dense fp16 CUDA | dense baseline | 2.00x | 1926.10 ms | 1.00x | 0.777 | 0.660 |
+| FAISS GPU mean-pool flat IP | open-source single-vector | 752.21x | 0.75 ms | 2552.09x | 0.414 | 0.290 |
+| cuVS GPU mean-pool flat IP | open-source single-vector | 752.21x | 0.98 ms | 1959.79x | 0.414 | 0.290 |
+| FAISS GPU token candidates + dense rerank | open-source token baseline | 0.67x | 2884.28 ms | 0.67x | 0.777 | 0.660 |
+| Qdrant in-memory multivector | open-source multivector API | 1.00x | 33660.60 ms | 0.06x | 0.777 | 0.660 |
+| fast-plaid CUDA | open-source PLAID-style | 3.37x | 1856.76 ms | 1.04x | 0.766 | 0.660 |
+| bitmax binary CUDA | bitmax SDK | 32.00x | 62.28 ms | 30.93x | 0.754 | 0.649 |
+| bitmax binary_q40 CUDA | bitmax SDK | 31.98x | 64.73 ms | 29.76x | 0.762 | 0.652 |
+| bitmax int4 CUDA | bitmax SDK | 8.00x | 144.24 ms | 13.35x | 0.773 | 0.658 |
 
-Artifact: `benchmark-results/open-source-comparison-limit256-cuda.json`.
+Artifact: `benchmark-results/open-source-comparison-expanded-limit256-cuda.json`.
 
-Interpretation: FAISS mean-pooling wins raw speed and storage but loses most of
-the multi-vector quality. FAISS token-candidate retrieval plus dense MaxSim
-recovers dense quality but is slower than dense fp16 and uses more document
-memory because it stores full token vectors. On this slice, `bitmax` is the
-better production Pareto point for late-interaction reranking: it keeps most of
-dense MaxSim quality while reducing document storage by 8-32x and improving
-CUDA latency by 13-31x.
+Interpretation: FAISS and cuVS mean-pooling win raw speed and storage but lose
+most of the multi-vector quality. FAISS token-candidate retrieval and Qdrant
+exact multivector recover dense quality but are slower on this slice and keep
+full-size vectors. fast-plaid keeps dense-level NDCG with modest compression,
+but its search latency is near dense fp16 here. On this slice, `bitmax` is the
+better compressed CUDA Pareto point for late-interaction reranking: it keeps
+most of dense MaxSim quality while reducing document storage by 8-32x and
+improving CUDA latency by 13-31x.

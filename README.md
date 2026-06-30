@@ -154,16 +154,20 @@ embeddings measured:
 
 Artifact: `benchmark-results/sdk-demo-local-search-limit256-cuda.json`.
 
-Against FAISS GPU on the same slice:
+Against open-source baselines on the same slice:
 
 | implementation | fp32 doc reduction | latency | recall@10 | NDCG@10 |
 | --- | ---: | ---: | ---: | ---: |
-| FAISS GPU mean-pool flat IP | 752.21x | 0.74 ms | 0.414 | 0.290 |
-| FAISS GPU token candidates + dense rerank | 0.67x | 2784.23 ms | 0.777 | 0.660 |
-| SDK binary_q40 CUDA | 31.98x | 64.24 ms | 0.762 | 0.652 |
-| SDK int4 CUDA | 8.00x | 144.14 ms | 0.773 | 0.658 |
+| dense fp16 CUDA | 2.00x | 1926.10 ms | 0.777 | 0.660 |
+| FAISS GPU mean-pool flat IP | 752.21x | 0.75 ms | 0.414 | 0.290 |
+| cuVS GPU mean-pool flat IP | 752.21x | 0.98 ms | 0.414 | 0.290 |
+| FAISS GPU token candidates + dense rerank | 0.67x | 2884.28 ms | 0.777 | 0.660 |
+| Qdrant in-memory multivector | 1.00x | 33660.60 ms | 0.777 | 0.660 |
+| fast-plaid CUDA | 3.37x | 1856.76 ms | 0.766 | 0.660 |
+| SDK binary_q40 CUDA | 31.98x | 64.73 ms | 0.762 | 0.652 |
+| SDK int4 CUDA | 8.00x | 144.24 ms | 0.773 | 0.658 |
 
-Artifact: `benchmark-results/open-source-comparison-limit256-cuda.json`.
+Artifact: `benchmark-results/open-source-comparison-expanded-limit256-cuda.json`.
 
 ## VAST
 
