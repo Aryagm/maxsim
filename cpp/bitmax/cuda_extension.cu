@@ -30,7 +30,8 @@ __global__ void maxsim_batched_kernel(
     int query_tokens,
     int dim,
     int num_docs,
-    float scale) {
+    float scale,
+    const float* scale_vector) {
   const int doc_idx = blockIdx.x;
   const int batch_idx = blockIdx.y;
   const int tid = threadIdx.x;
@@ -77,7 +78,8 @@ __global__ void maxsim_batched_kernel(
   }
 
   if (tid == 0) {
-    output[static_cast<std::int64_t>(batch_idx) * num_docs + doc_idx] = doc_score * scale;
+    const float doc_scale = scale_vector == nullptr ? scale : scale_vector[doc_idx];
+    output[static_cast<std::int64_t>(batch_idx) * num_docs + doc_idx] = doc_score * doc_scale;
   }
 }
 
@@ -104,7 +106,8 @@ __global__ void maxsim_batched_dim128_unrolled_kernel(
     int batch,
     int query_tokens,
     int num_docs,
-    float scale) {
+    float scale,
+    const float* scale_vector) {
   const int doc_idx = blockIdx.x;
   const int batch_idx = blockIdx.y;
   const int tid = threadIdx.x;
@@ -143,7 +146,8 @@ __global__ void maxsim_batched_dim128_unrolled_kernel(
   }
 
   if (tid == 0) {
-    output[static_cast<std::int64_t>(batch_idx) * num_docs + doc_idx] = doc_score * scale;
+    const float doc_scale = scale_vector == nullptr ? scale : scale_vector[doc_idx];
+    output[static_cast<std::int64_t>(batch_idx) * num_docs + doc_idx] = doc_score * doc_scale;
   }
 }
 
@@ -304,15 +308,32 @@ class CudaPackedDocs {
   ~CudaPackedDocs() {
     cudaFree(d_packed_);
     cudaFree(d_offsets_);
+    cudaFree(d_scale_);
     cudaFree(d_query_);
     cudaFree(d_scores_);
     cudaFree(d_top_scores_);
     cudaFree(d_top_indices_);
   }
 
+  void set_scale_vector(py::array_t<float, py::array::c_style | py::array::forcecast> scale) {
+    if (scale.ndim() != 1 || scale.shape(0) != num_docs_) {
+      throw std::invalid_argument("scale vector must have shape [num_docs]");
+    }
+
+    const std::size_t scale_bytes = static_cast<std::size_t>(num_docs_) * sizeof(float);
+    ensure_device_capacity(&d_scale_, &scale_capacity_, scale_bytes, "cudaMalloc resident scale vector");
+    check_cuda(cudaMemcpy(d_scale_, scale.data(), scale_bytes, cudaMemcpyHostToDevice), "copy scale vector to device");
+    has_scale_vector_ = true;
+  }
+
+  void clear_scale_vector() {
+    has_scale_vector_ = false;
+  }
+
   py::array_t<float> maxsim_batch(
       py::array_t<float, py::array::c_style | py::array::forcecast> query,
-      float scale) {
+      float scale,
+      bool use_scale_vector = false) {
     if (query.ndim() != 3) {
       throw std::invalid_argument("query must have shape [batch, query_tokens, dim]");
     }
@@ -330,7 +351,7 @@ class CudaPackedDocs {
 
     check_cuda(cudaMemcpy(d_query_, query.data(), query_bytes, cudaMemcpyHostToDevice), "copy query to device");
 
-    launch_maxsim(d_query_, d_scores_, batch, query_tokens, scale, "resident batched maxsim");
+    launch_maxsim(d_query_, d_scores_, batch, query_tokens, scale, scale_vector_ptr(use_scale_vector), "resident batched maxsim");
     check_cuda(cudaDeviceSynchronize(), "synchronize resident batched maxsim kernel");
 
     py::array_t<float> output({batch, num_docs_});
@@ -341,7 +362,8 @@ class CudaPackedDocs {
   py::tuple topk_batch(
       py::array_t<float, py::array::c_style | py::array::forcecast> query,
       int k,
-      float scale) {
+      float scale,
+      bool use_scale_vector = false) {
     if (k < 1 || k > num_docs_) {
       throw std::invalid_argument("k must be between 1 and num_docs");
     }
@@ -366,7 +388,7 @@ class CudaPackedDocs {
 
     check_cuda(cudaMemcpy(d_query_, query.data(), query_bytes, cudaMemcpyHostToDevice), "copy query to device");
 
-    launch_maxsim(d_query_, d_scores_, batch, query_tokens, scale, "topk maxsim");
+    launch_maxsim(d_query_, d_scores_, batch, query_tokens, scale, scale_vector_ptr(use_scale_vector), "topk maxsim");
     topk_kernel<<<batch, kTopkThreads>>>(d_scores_, d_top_scores_, d_top_indices_, batch, num_docs_, k);
     check_cuda(cudaGetLastError(), "launch topk selection kernel");
     check_cuda(cudaDeviceSynchronize(), "synchronize topk kernels");
@@ -381,6 +403,8 @@ class CudaPackedDocs {
   int dim() const { return dim_; }
   int num_docs() const { return num_docs_; }
   std::size_t packed_size() const { return packed_size_; }
+  bool has_scale_vector() const { return has_scale_vector_; }
+  std::size_t scale_vector_size() const { return has_scale_vector_ ? static_cast<std::size_t>(num_docs_) : 0; }
   const char* maxsim_kernel_variant() const {
     return use_dim128_unrolled() ? "dim128_unrolled" : "generic";
   }
@@ -398,15 +422,25 @@ class CudaPackedDocs {
     *capacity = bytes;
   }
 
-  void launch_maxsim(float* d_query, float* d_output, int batch, int query_tokens, float scale, const char* label) {
+  const float* scale_vector_ptr(bool use_scale_vector) const {
+    if (!use_scale_vector) {
+      return nullptr;
+    }
+    if (!has_scale_vector_) {
+      throw std::invalid_argument("scale vector was requested but is not loaded on this CUDA handle");
+    }
+    return d_scale_;
+  }
+
+  void launch_maxsim(float* d_query, float* d_output, int batch, int query_tokens, float scale, const float* d_scale_vector, const char* label) {
     dim3 grid(num_docs_, batch);
     if (use_dim128_unrolled()) {
-      maxsim_batched_dim128_unrolled_kernel<<<grid, kBlockThreads>>>(d_query, d_packed_, d_offsets_, d_output, batch, query_tokens, num_docs_, scale);
+      maxsim_batched_dim128_unrolled_kernel<<<grid, kBlockThreads>>>(d_query, d_packed_, d_offsets_, d_output, batch, query_tokens, num_docs_, scale, d_scale_vector);
       check_cuda(cudaGetLastError(), (std::string("launch ") + label + " dim128 unrolled kernel").c_str());
       return;
     }
 
-    maxsim_batched_kernel<<<grid, kBlockThreads>>>(d_query, d_packed_, d_offsets_, d_output, batch, query_tokens, dim_, num_docs_, scale);
+    maxsim_batched_kernel<<<grid, kBlockThreads>>>(d_query, d_packed_, d_offsets_, d_output, batch, query_tokens, dim_, num_docs_, scale, d_scale_vector);
     check_cuda(cudaGetLastError(), (std::string("launch ") + label + " generic kernel").c_str());
   }
 
@@ -416,6 +450,7 @@ class CudaPackedDocs {
 
   std::uint8_t* d_packed_ = nullptr;
   std::int64_t* d_offsets_ = nullptr;
+  float* d_scale_ = nullptr;
   float* d_query_ = nullptr;
   float* d_scores_ = nullptr;
   float* d_top_scores_ = nullptr;
@@ -424,10 +459,12 @@ class CudaPackedDocs {
   int num_docs_ = 0;
   std::size_t packed_size_ = 0;
   std::size_t offsets_size_ = 0;
+  std::size_t scale_capacity_ = 0;
   std::size_t query_capacity_ = 0;
   std::size_t scores_capacity_ = 0;
   std::size_t top_scores_capacity_ = 0;
   std::size_t top_indices_capacity_ = 0;
+  bool has_scale_vector_ = false;
 };
 
 py::array_t<float> maxsim_cuda(
@@ -462,7 +499,7 @@ py::array_t<float> maxsim_cuda(
     check_cuda(cudaMemcpy(d_offsets, offsets.data(), offsets_bytes, cudaMemcpyHostToDevice), "copy offsets to device");
 
     dim3 grid(num_docs, batch);
-    maxsim_batched_kernel<<<grid, kBlockThreads>>>(d_query, d_packed, d_offsets, d_output, batch, query_tokens, dim, num_docs, scale);
+    maxsim_batched_kernel<<<grid, kBlockThreads>>>(d_query, d_packed, d_offsets, d_output, batch, query_tokens, dim, num_docs, scale, nullptr);
     check_cuda(cudaGetLastError(), "launch maxsim kernel");
     check_cuda(cudaDeviceSynchronize(), "synchronize maxsim kernel");
 
@@ -515,7 +552,7 @@ py::array_t<float> maxsim_cuda_batch(
     check_cuda(cudaMemcpy(d_offsets, offsets.data(), offsets_bytes, cudaMemcpyHostToDevice), "copy offsets to device");
 
     dim3 grid(num_docs, batch);
-    maxsim_batched_kernel<<<grid, kBlockThreads>>>(d_query, d_packed, d_offsets, d_output, batch, query_tokens, dim, num_docs, scale);
+    maxsim_batched_kernel<<<grid, kBlockThreads>>>(d_query, d_packed, d_offsets, d_output, batch, query_tokens, dim, num_docs, scale, nullptr);
     check_cuda(cudaGetLastError(), "launch batched maxsim kernel");
     check_cuda(cudaDeviceSynchronize(), "synchronize batched maxsim kernel");
 
@@ -542,14 +579,18 @@ PYBIND11_MODULE(_bitmax_cuda, m) {
   m.doc() = "Optional CUDA kernels for bitmax";
   py::class_<CudaPackedDocs>(m, "CudaPackedDocs")
       .def(py::init<
-           py::array_t<std::uint8_t, py::array::c_style | py::array::forcecast>,
-           py::array_t<std::int64_t, py::array::c_style | py::array::forcecast>,
-           int>())
-      .def("maxsim_batch", &CudaPackedDocs::maxsim_batch, py::arg("query"), py::arg("scale") = 1.0F)
-      .def("topk_batch", &CudaPackedDocs::topk_batch, py::arg("query"), py::arg("k"), py::arg("scale") = 1.0F)
+	           py::array_t<std::uint8_t, py::array::c_style | py::array::forcecast>,
+	           py::array_t<std::int64_t, py::array::c_style | py::array::forcecast>,
+	           int>())
+      .def("set_scale_vector", &CudaPackedDocs::set_scale_vector, py::arg("scale"))
+      .def("clear_scale_vector", &CudaPackedDocs::clear_scale_vector)
+      .def("maxsim_batch", &CudaPackedDocs::maxsim_batch, py::arg("query"), py::arg("scale") = 1.0F, py::arg("use_scale_vector") = false)
+      .def("topk_batch", &CudaPackedDocs::topk_batch, py::arg("query"), py::arg("k"), py::arg("scale") = 1.0F, py::arg("use_scale_vector") = false)
       .def_property_readonly("dim", &CudaPackedDocs::dim)
       .def_property_readonly("num_docs", &CudaPackedDocs::num_docs)
       .def_property_readonly("packed_size", &CudaPackedDocs::packed_size)
+      .def_property_readonly("has_scale_vector", &CudaPackedDocs::has_scale_vector)
+      .def_property_readonly("scale_vector_size", &CudaPackedDocs::scale_vector_size)
       .def_property_readonly("maxsim_kernel_variant", &CudaPackedDocs::maxsim_kernel_variant);
   m.def("maxsim_cuda", &maxsim_cuda, py::arg("query"), py::arg("packed"), py::arg("offsets"), py::arg("dim"), py::arg("scale") = 1.0F);
   m.def("maxsim_cuda_batch", &maxsim_cuda_batch, py::arg("query"), py::arg("packed"), py::arg("offsets"), py::arg("dim"), py::arg("scale") = 1.0F);

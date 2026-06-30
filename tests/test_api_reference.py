@@ -244,6 +244,35 @@ def test_to_device_preserves_doc_scale_vector_for_later_host_side_restoration(mo
     np.testing.assert_array_equal(cuda_packed.scale, packed.scale)
 
 
+def test_to_device_uploads_doc_scale_vector_to_cuda_handle_when_supported(monkeypatch):
+    import bitmax._api as api
+
+    docs = np.array(
+        [
+            [2, -2, 2, -2, 2, -2, 2, -2],
+            [5, -5, 5, -5, 5, -5, 5, -5],
+        ],
+        dtype=np.float32,
+    )
+    packed = bitmax.pack_signs(docs, scale="doc")
+    calls = []
+
+    class FakeCuda:
+        class CudaPackedDocs:
+            def __init__(self, data, offsets, dim):
+                pass
+
+            def set_scale_vector(self, scale):
+                calls.append(scale.copy())
+
+    monkeypatch.setattr(api, "_bitmax_cuda", FakeCuda())
+
+    bitmax.to_device(packed, "cuda")
+
+    assert len(calls) == 1
+    np.testing.assert_array_equal(calls[0], packed.scale)
+
+
 def test_maxsim_auto_uses_cuda_resident_packed_docs_without_host_packed_copy():
     query = np.array(
         [
@@ -274,6 +303,36 @@ def test_maxsim_auto_uses_cuda_resident_packed_docs_without_host_packed_copy():
     assert calls[0][0].shape == (2, 1, 8)
     assert calls[0][1] == 2.0
     np.testing.assert_allclose(scores, np.array([[36.0, -36.0], [-36.0, 36.0]], dtype=np.float32))
+
+
+def test_maxsim_uses_resident_cuda_doc_scale_without_host_rescaling():
+    query = np.array([[[1, 2, 3, 4, 5, 6, 7, 8]]], dtype=np.float32)
+    calls = []
+    scale_vector = np.array([10.0, 2.0], dtype=np.float32)
+
+    class FakeCudaPacked:
+        @property
+        def has_scale_vector(self):
+            return True
+
+        def maxsim_batch(self, query_arg, scale_arg, use_scale_vector_arg):
+            calls.append((query_arg.copy(), scale_arg, use_scale_vector_arg))
+            return np.array([[30.0, 4.0]], dtype=np.float32)
+
+    cuda_packed = bitmax.PackedDocs(
+        data=FakeCudaPacked(),
+        doc_offsets=np.array([0, 1, 2], dtype=np.int64),
+        dim=8,
+        num_docs=2,
+        scale=scale_vector,
+        device="cuda",
+    )
+
+    scores = bitmax.maxsim(query, cuda_packed)
+
+    assert len(calls) == 1
+    assert calls[0][1:] == (1.0, True)
+    np.testing.assert_allclose(scores, np.array([[30.0, 4.0]], dtype=np.float32))
 
 
 def test_topk_maxsim_uses_cuda_resident_fused_topk_when_available():
@@ -311,6 +370,43 @@ def test_topk_maxsim_uses_cuda_resident_fused_topk_when_available():
     assert calls[0][2] == 1.5
     np.testing.assert_array_equal(scores, np.array([[9.0, 7.0], [8.0, 6.0]], dtype=np.float32))
     np.testing.assert_array_equal(indices, np.array([[3, 1], [2, 0]], dtype=np.int64))
+
+
+def test_topk_maxsim_uses_cuda_resident_fused_topk_for_stored_doc_scale():
+    query = np.ones((1, 8), dtype=np.float32)
+    calls = []
+    scale_vector = np.array([1.0, 4.0, 2.0], dtype=np.float32)
+
+    class FakeCudaPacked:
+        @property
+        def has_scale_vector(self):
+            return True
+
+        def maxsim_batch(self, query_arg, scale_arg):
+            raise AssertionError("stored doc scale should still use fused CUDA top-k")
+
+        def topk_batch(self, query_arg, k_arg, scale_arg, use_scale_vector_arg):
+            calls.append((query_arg.copy(), k_arg, scale_arg, use_scale_vector_arg))
+            return (
+                np.array([[32.0, 16.0]], dtype=np.float32),
+                np.array([[1, 2]], dtype=np.int64),
+            )
+
+    cuda_packed = bitmax.PackedDocs(
+        data=FakeCudaPacked(),
+        doc_offsets=np.arange(4, dtype=np.int64),
+        dim=8,
+        num_docs=3,
+        scale=scale_vector,
+        device="cuda",
+    )
+
+    scores, indices = bitmax.topk_maxsim(query, cuda_packed, k=2)
+
+    assert len(calls) == 1
+    assert calls[0][1:] == (2, 1.0, True)
+    np.testing.assert_array_equal(scores, np.array([32.0, 16.0], dtype=np.float32))
+    np.testing.assert_array_equal(indices, np.array([1, 2], dtype=np.int64))
 
 
 def test_topk_maxsim_uses_cuda_resident_fused_topk_for_large_doc_counts():

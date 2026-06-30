@@ -165,6 +165,9 @@ def test_cuda_resident_doc_scale_matches_cpu_scores_and_topk():
     packed = bitmax.pack_signs(docs, scale="doc")
     cuda_packed = bitmax.to_device(packed, "cuda")
 
+    assert cuda_packed.data.has_scale_vector is True
+    assert cuda_packed.data.scale_vector_size == packed.num_docs
+
     cpu_scores = bitmax.maxsim(query, packed, device="cpu")
     cuda_scores = bitmax.maxsim(query, cuda_packed)
     cpu_top_scores, cpu_top_indices = bitmax.topk_maxsim(query, packed, k=2)

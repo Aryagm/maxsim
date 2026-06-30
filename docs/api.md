@@ -14,6 +14,7 @@ document. For ragged multi-vector documents, pass offsets shaped
 
 `scale="global"` stores `mean(abs(doc_embeddings))` in `PackedDocs.scale`.
 `scale="doc"` stores one `mean(abs(doc_tokens))` scale per document. `maxsim`
-applies stored scales by default. Per-document scales are applied after native
-scoring in v0.1; CUDA fused top-k falls back to full-score host top-k for that
-mode until a resident vector-scale kernel is added.
+applies stored scales by default. CUDA-resident `PackedDocs` upload stored
+per-document scales with the packed document bits, so resident `maxsim` and
+fused `topk_maxsim` can apply those scales on device. Host-packed CUDA and CPU
+paths still apply vector scales after native scoring.
