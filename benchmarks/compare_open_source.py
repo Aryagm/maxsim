@@ -43,6 +43,7 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         default="dense_fp16,faiss_pooled,faiss_token_dense_rerank,bitmax_binary,bitmax_binary_q40,bitmax_int4",
     )
     parser.add_argument("--k", type=int, default=10)
+    parser.add_argument("--metric-ks", default="1,5,10", help="Comma-separated ranking cutoffs to report, always including --k.")
     parser.add_argument("--repeat", type=int, default=3)
     parser.add_argument("--limit-queries", type=int, default=None)
     parser.add_argument("--faiss-token-topn", type=int, default=512)
@@ -54,13 +55,16 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
 
     dataset = _load_demo_dataset(Path(args.input), limit_queries=args.limit_queries)
     implementations = tuple(value.strip() for value in args.implementations.split(",") if value.strip())
+    metric_ks = _parse_metric_ks(args.metric_ks, default_k=args.k)
+    score_k = min(max(metric_ks), len(dataset["doc_ids"]))
     rows = []
     dense_scores = None
     dense_latency = None
 
     for implementation in implementations:
         if implementation == "dense_fp16":
-            dense_scores, dense_latency = _time_call(lambda: _dense_fp16_scores(dataset, args.device), repeat=args.repeat)
+            dense_scores, dense_latency, dense_latency_stats = _time_call(lambda: _dense_fp16_scores(dataset, args.device), repeat=args.repeat)
+            _release_cuda_cache()
             rows.append(
                 _result_row(
                     "dense_fp16_baseline",
@@ -69,21 +73,24 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
                     dense_scores,
                     dense_latency,
                     args.k,
+                    metric_ks=metric_ks,
                     doc_storage_bytes=_dense_doc_bytes(dataset, 2),
                     dense_scores=dense_scores,
+                    latency_stats=dense_latency_stats,
                     metadata={"library": "torch", "storage_dtype": "fp16", "device": args.device},
                 )
             )
             continue
 
         if dense_scores is None:
-            dense_scores, dense_latency = _time_call(lambda: _dense_fp16_scores(dataset, args.device), repeat=args.repeat)
+            dense_scores, dense_latency, _dense_latency_stats = _time_call(lambda: _dense_fp16_scores(dataset, args.device), repeat=args.repeat)
+            _release_cuda_cache()
 
         if implementation.startswith("bitmax_"):
             mode = implementation.removeprefix("bitmax_")
             corpus = bitmax.Corpus.from_embeddings(dataset["doc_ids"], dataset["doc_embeddings"], dataset["doc_offsets"], mode=mode)
             reranker = bitmax.Reranker.from_corpus(corpus, device=args.device)
-            scores, latency = _time_call(lambda: _scores_from_sdk(reranker, dataset["query_embeddings"], dataset["doc_ids"], args.k), repeat=args.repeat)
+            scores, latency, latency_stats = _time_call(lambda: _scores_from_sdk(reranker, dataset["query_embeddings"], dataset["doc_ids"], score_k), repeat=args.repeat)
             rows.append(
                 _result_row(
                     implementation,
@@ -92,16 +99,18 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
                     scores,
                     latency,
                     args.k,
+                    metric_ks=metric_ks,
                     doc_storage_bytes=corpus.storage_bytes,
                     dense_scores=dense_scores,
                     baseline_latency=dense_latency,
+                    latency_stats=latency_stats,
                     metadata={"mode": mode, "device": args.device},
                 )
             )
             continue
 
         if implementation == "faiss_pooled":
-            scores, latency, storage_bytes, metadata = _faiss_pooled_scores(dataset, args.k, args.device, repeat=args.repeat)
+            scores, latency, latency_stats, storage_bytes, metadata = _faiss_pooled_scores(dataset, score_k, args.device, repeat=args.repeat)
             rows.append(
                 _result_row(
                     "faiss_gpu_mean_pool_flat_ip" if args.device == "cuda" else "faiss_cpu_mean_pool_flat_ip",
@@ -110,18 +119,20 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
                     scores,
                     latency,
                     args.k,
+                    metric_ks=metric_ks,
                     doc_storage_bytes=storage_bytes,
                     dense_scores=dense_scores,
                     baseline_latency=dense_latency,
+                    latency_stats=latency_stats,
                     metadata=metadata,
                 )
             )
             continue
 
         if implementation == "faiss_token_dense_rerank":
-            scores, latency, storage_bytes, metadata = _faiss_token_dense_rerank_scores(
+            scores, latency, latency_stats, storage_bytes, metadata = _faiss_token_dense_rerank_scores(
                 dataset,
-                args.k,
+                score_k,
                 args.device,
                 token_topn=args.faiss_token_topn,
                 repeat=args.repeat,
@@ -134,9 +145,11 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
                     scores,
                     latency,
                     args.k,
+                    metric_ks=metric_ks,
                     doc_storage_bytes=storage_bytes,
                     dense_scores=dense_scores,
                     baseline_latency=dense_latency,
+                    latency_stats=latency_stats,
                     metadata=metadata,
                 )
             )
@@ -150,8 +163,9 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
                 dense_scores,
                 dense_latency,
                 args.k,
+                metric_ks,
                 args.allow_unavailable,
-                lambda: _qdrant_multivector_scores(dataset, args.k, repeat=args.repeat),
+                lambda: _qdrant_multivector_scores(dataset, score_k, repeat=args.repeat),
             )
             rows.append(row)
             continue
@@ -164,8 +178,9 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
                 dense_scores,
                 dense_latency,
                 args.k,
+                metric_ks,
                 args.allow_unavailable,
-                lambda: _cuvs_pooled_scores(dataset, args.k, args.device, repeat=args.repeat),
+                lambda: _cuvs_pooled_scores(dataset, score_k, args.device, repeat=args.repeat),
             )
             rows.append(row)
             continue
@@ -178,10 +193,11 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
                 dense_scores,
                 dense_latency,
                 args.k,
+                metric_ks,
                 args.allow_unavailable,
                 lambda: _fast_plaid_scores(
                     dataset,
-                    args.k,
+                    score_k,
                     args.device,
                     repeat=args.repeat,
                     nbits=args.fast_plaid_nbits,
@@ -229,9 +245,11 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
             "docs": int(len(dataset["doc_ids"])),
             "dim": int(dataset["doc_embeddings"].shape[1]),
             "doc_tokens": int(dataset["doc_embeddings"].shape[0]),
+            "doc_token_count_summary": _doc_token_count_summary(dataset),
         },
         "device": args.device,
         "top_k": int(args.k),
+        "metric_ks": [int(value) for value in metric_ks],
         "repeat": int(args.repeat),
         "results": rows,
     }
@@ -264,14 +282,14 @@ def _faiss_pooled_scores(dataset, k: int, device: str, *, repeat: int):
         _sync_cuda(resources)
         return _scores_from_faiss(indices, distances, len(dataset["doc_ids"]))
 
-    scores, latency = _time_call(run, repeat=repeat)
+    scores, latency, latency_stats = _time_call(run, repeat=repeat)
     metadata = {
         "library": "faiss",
         "faiss_version": getattr(faiss, "__version__", "unknown"),
         "formula": "mean_pool_doc_query_index_flat_ip",
         "device": device,
     }
-    return scores, latency, int(doc_vectors.nbytes), metadata
+    return scores, latency, latency_stats, int(doc_vectors.nbytes), metadata
 
 
 def _faiss_token_dense_rerank_scores(dataset, k: int, device: str, *, token_topn: int, repeat: int):
@@ -297,7 +315,7 @@ def _faiss_token_dense_rerank_scores(dataset, k: int, device: str, *, token_topn
         _sync_cuda(resources)
         return np.stack(rows, axis=0)
 
-    scores, latency = _time_call(run, repeat=repeat)
+    scores, latency, latency_stats = _time_call(run, repeat=repeat)
     metadata = {
         "library": "faiss+torch",
         "faiss_version": getattr(faiss, "__version__", "unknown"),
@@ -307,7 +325,7 @@ def _faiss_token_dense_rerank_scores(dataset, k: int, device: str, *, token_topn
         "mean_candidates_per_query": float(np.mean([np.isfinite(row).sum() for row in scores])),
     }
     storage_bytes = int(doc_tokens.nbytes + _dense_doc_bytes(dataset, 2))
-    return scores, latency, storage_bytes, metadata
+    return scores, latency, latency_stats, storage_bytes, metadata
 
 
 def _qdrant_multivector_scores(dataset, k: int, *, repeat: int):
@@ -353,14 +371,14 @@ def _qdrant_multivector_scores(dataset, k: int, *, repeat: int):
             rows.append(row)
         return np.stack(rows, axis=0)
 
-    scores, latency = _time_call(run, repeat=repeat)
+    scores, latency, latency_stats = _time_call(run, repeat=repeat)
     metadata = {
         "library": "qdrant-client",
         "formula": "in_memory_multivector_dot_maxsim",
         "device": "cpu",
         "status": "ok",
     }
-    return scores, latency, _dense_doc_bytes(dataset, 4), metadata
+    return scores, latency, latency_stats, _dense_doc_bytes(dataset, 4), metadata
 
 
 def _cuvs_pooled_scores(dataset, k: int, device: str, *, repeat: int):
@@ -385,14 +403,14 @@ def _cuvs_pooled_scores(dataset, k: int, device: str, *, repeat: int):
         _sync_cuda(None)
         return _scores_from_faiss(indices.copy_to_host(), distances.copy_to_host(), len(dataset["doc_ids"]))
 
-    scores, latency = _time_call(run, repeat=repeat)
+    scores, latency, latency_stats = _time_call(run, repeat=repeat)
     metadata = {
         "library": "cuvs",
         "formula": "mean_pool_doc_query_bruteforce_inner_product",
         "device": "cuda",
         "status": "ok",
     }
-    return scores, latency, int(doc_vectors.nbytes), metadata
+    return scores, latency, latency_stats, int(doc_vectors.nbytes), metadata
 
 
 def _fast_plaid_scores(
@@ -459,7 +477,7 @@ def _fast_plaid_scores(
                 rows.append(row)
             return np.stack(rows, axis=0)
 
-        scores, latency = _time_call(run, repeat=repeat)
+        scores, latency, latency_stats = _time_call(run, repeat=repeat)
         metadata = {
             "library": "fast-plaid",
             "formula": "plaid_index_search",
@@ -470,7 +488,7 @@ def _fast_plaid_scores(
             "n_ivf_probe": int(n_ivf_probe),
             "build_ms": float(build_ms),
         }
-        return scores, latency, _directory_size(index_dir), metadata
+        return scores, latency, latency_stats, _directory_size(index_dir), metadata
     finally:
         shutil.rmtree(index_dir, ignore_errors=True)
 
@@ -536,11 +554,12 @@ def _optional_measured_row(
     dense_scores,
     dense_latency,
     k,
+    metric_ks,
     allow_unavailable: bool,
     fn,
 ):
     try:
-        scores, latency, storage_bytes, metadata = fn()
+        scores, latency, latency_stats, storage_bytes, metadata = fn()
     except Exception as exc:
         if not allow_unavailable:
             raise
@@ -558,9 +577,11 @@ def _optional_measured_row(
         scores,
         latency,
         k,
+        metric_ks=metric_ks,
         doc_storage_bytes=storage_bytes,
         dense_scores=dense_scores,
         baseline_latency=dense_latency,
+        latency_stats=latency_stats,
         metadata=metadata,
     )
 
@@ -587,18 +608,43 @@ def _directory_size(path: str) -> int:
     return int(total)
 
 
+def _parse_metric_ks(value: str, *, default_k: int) -> tuple[int, ...]:
+    values = {1, int(default_k)}
+    for raw in value.split(","):
+        item = raw.strip()
+        if item:
+            parsed = int(item)
+            if parsed <= 0:
+                raise ValueError("--metric-ks values must be positive")
+            values.add(parsed)
+    return tuple(sorted(values))
+
+
 def _time_call(fn, *, repeat: int):
     best_latency = float("inf")
     best_value = None
-    for _ in range(repeat):
+    samples = []
+    for _ in range(max(int(repeat), 1)):
         start = time.perf_counter()
         value = fn()
         _sync_cuda(None)
         latency = (time.perf_counter() - start) * 1_000.0
+        samples.append(float(latency))
         if latency < best_latency:
             best_latency = latency
             best_value = value
-    return best_value, best_latency
+    return best_value, best_latency, _latency_stats(samples)
+
+
+def _latency_stats(samples: list[float]) -> dict[str, Any]:
+    values = np.asarray(samples, dtype=np.float64)
+    return {
+        "latency_samples_ms": [float(value) for value in samples],
+        "latency_mean_ms": float(np.mean(values)),
+        "latency_p50_ms": float(np.percentile(values, 50)),
+        "latency_p95_ms": float(np.percentile(values, 95)),
+        "latency_p99_ms": float(np.percentile(values, 99)),
+    }
 
 
 def _sync_cuda(resources) -> None:
@@ -608,10 +654,83 @@ def _sync_cuda(resources) -> None:
         torch.cuda.synchronize()
 
 
+def _release_cuda_cache() -> None:
+    if torch is not None and torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
 def _import_faiss():
     if _PRELOADED_FAISS is not None:
         return _PRELOADED_FAISS
     raise RuntimeError("FAISS benchmark requires a working faiss-gpu or faiss-cpu install") from _FAISS_IMPORT_ERROR
+
+
+def _doc_token_count_summary(dataset) -> dict[str, float | int]:
+    counts = np.diff(np.asarray(dataset["doc_offsets"], dtype=np.int64)).astype(np.float64)
+    if counts.size == 0:
+        return {"min": 0, "mean": 0.0, "p50": 0.0, "p95": 0.0, "p99": 0.0, "max": 0}
+    return {
+        "min": int(np.min(counts)),
+        "mean": float(np.mean(counts)),
+        "p50": float(np.percentile(counts, 50)),
+        "p95": float(np.percentile(counts, 95)),
+        "p99": float(np.percentile(counts, 99)),
+        "max": int(np.max(counts)),
+    }
+
+
+def _token_bucket_quality(scores: np.ndarray, qrels: np.ndarray, doc_offsets: np.ndarray, *, k: int, dense_scores: np.ndarray | None) -> dict[str, dict[str, Any]]:
+    doc_token_counts = np.diff(np.asarray(doc_offsets, dtype=np.int64)).astype(np.float64)
+    if doc_token_counts.size == 0:
+        return {}
+    lower, upper = np.percentile(doc_token_counts, [33.3333333333, 66.6666666667])
+    bucket_indices: dict[str, list[int]] = {"short": [], "medium": [], "long": []}
+    bucket_lengths: dict[str, list[float]] = {"short": [], "medium": [], "long": []}
+    for query_idx, relevance in enumerate(qrels):
+        relevant_lengths = doc_token_counts[np.asarray(relevance) > 0]
+        if relevant_lengths.size == 0:
+            continue
+        mean_relevant_length = float(np.mean(relevant_lengths))
+        if mean_relevant_length <= lower:
+            bucket = "short"
+        elif mean_relevant_length <= upper:
+            bucket = "medium"
+        else:
+            bucket = "long"
+        bucket_indices[bucket].append(int(query_idx))
+        bucket_lengths[bucket].append(mean_relevant_length)
+
+    result: dict[str, dict[str, Any]] = {}
+    effective_k = min(int(k), scores.shape[1])
+    for bucket, indices in bucket_indices.items():
+        lengths = bucket_lengths[bucket]
+        if not indices:
+            result[bucket] = {
+                "queries": 0,
+                "mean_relevant_doc_tokens": None,
+                f"recall_at_{k}": None,
+                f"mrr_at_{k}": None,
+                f"ndcg_at_{k}": None,
+                f"quality_delta_vs_dense_ndcg_at_{k}": None,
+            }
+            continue
+        subset_scores = scores[indices]
+        subset_qrels = qrels[indices]
+        metrics = _ranking_metrics(subset_scores, subset_qrels, k=effective_k)
+        item = {
+            "queries": int(len(indices)),
+            "mean_relevant_doc_tokens": float(np.mean(lengths)),
+            "min_relevant_doc_tokens": float(np.min(lengths)),
+            "max_relevant_doc_tokens": float(np.max(lengths)),
+            f"recall_at_{k}": float(metrics["recall_at_k"]),
+            f"mrr_at_{k}": float(metrics["mrr_at_k"]),
+            f"ndcg_at_{k}": float(metrics["ndcg_at_k"]),
+        }
+        if dense_scores is not None:
+            dense_metrics = _ranking_metrics(dense_scores[indices], subset_qrels, k=effective_k)
+            item[f"quality_delta_vs_dense_ndcg_at_{k}"] = float(metrics["ndcg_at_k"] - dense_metrics["ndcg_at_k"])
+        result[bucket] = item
+    return result
 
 
 def _result_row(
@@ -622,14 +741,13 @@ def _result_row(
     latency_ms,
     k,
     *,
+    metric_ks,
     doc_storage_bytes,
     dense_scores,
     baseline_latency=None,
+    latency_stats=None,
     metadata=None,
 ):
-    effective_k = min(k, len(dataset["doc_ids"]))
-    metrics = _ranking_metrics(scores, dataset["qrels"], k=effective_k)
-    dense_metrics = _ranking_metrics(dense_scores, dataset["qrels"], k=effective_k)
     row = {
         "implementation": implementation,
         "implementation_kind": implementation_kind,
@@ -639,12 +757,23 @@ def _result_row(
         "doc_storage_bytes": int(doc_storage_bytes),
         "doc_memory_compression_vs_fp16": float(_dense_doc_bytes(dataset, 2) / max(doc_storage_bytes, 1)),
         "doc_memory_compression_vs_fp32": float(_dense_doc_bytes(dataset, 4) / max(doc_storage_bytes, 1)),
-        "recall_at_1": float(_ranking_metrics(scores, dataset["qrels"], k=1)["recall_at_k"]),
-        f"recall_at_{k}": float(metrics["recall_at_k"]),
-        f"mrr_at_{k}": float(metrics["mrr_at_k"]),
-        f"ndcg_at_{k}": float(metrics["ndcg_at_k"]),
-        f"quality_delta_vs_dense_ndcg_at_{k}": float(metrics["ndcg_at_k"] - dense_metrics["ndcg_at_k"]),
     }
+    row.update(latency_stats or _latency_stats([float(latency_ms)]))
+    for metric_k in metric_ks:
+        effective_k = min(int(metric_k), len(dataset["doc_ids"]))
+        metrics = _ranking_metrics(scores, dataset["qrels"], k=effective_k)
+        dense_metrics = _ranking_metrics(dense_scores, dataset["qrels"], k=effective_k)
+        row[f"recall_at_{metric_k}"] = float(metrics["recall_at_k"])
+        row[f"mrr_at_{metric_k}"] = float(metrics["mrr_at_k"])
+        row[f"ndcg_at_{metric_k}"] = float(metrics["ndcg_at_k"])
+        row[f"quality_delta_vs_dense_ndcg_at_{metric_k}"] = float(metrics["ndcg_at_k"] - dense_metrics["ndcg_at_k"])
+        row[f"token_bucket_quality_at_{metric_k}"] = _token_bucket_quality(
+            scores,
+            dataset["qrels"],
+            dataset["doc_offsets"],
+            k=int(metric_k),
+            dense_scores=dense_scores,
+        )
     if baseline_latency is not None:
         row["speedup_vs_dense_fp16"] = float(baseline_latency / max(latency_ms, 1e-12))
     if metadata is not None:

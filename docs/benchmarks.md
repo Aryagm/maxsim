@@ -236,10 +236,21 @@ python -m benchmarks.compare_open_source \
   --device cuda \
   --implementations dense_fp16,faiss_pooled,faiss_token_dense_rerank,qdrant_multivector,cuvs_pooled,fast_plaid,colbert_plaid,vespa_multivector,bitmax_binary,bitmax_binary_q40,bitmax_int4 \
   --repeat 3 \
+  --metric-ks 1,5,10 \
   --faiss-token-topn 512 \
   --allow-unavailable \
   --output benchmark-results/open-source-comparison-expanded-limit256-cuda.json
 ```
+
+Every completed row preserves the older `latency_ms` and `ndcg_at_10` fields,
+and also emits richer diagnostics:
+
+- `latency_samples_ms`, `latency_mean_ms`, `latency_p50_ms`,
+  `latency_p95_ms`, and `latency_p99_ms`.
+- `recall_at_K`, `mrr_at_K`, `ndcg_at_K`, and
+  `quality_delta_vs_dense_ndcg_at_K` for each cutoff in `--metric-ks`.
+- `token_bucket_quality_at_K` for short, medium, and long pages, where buckets
+  are assigned by the relevant document's page-token count on that dataset.
 
 Rows are intentionally labeled by what they do:
 
@@ -308,8 +319,26 @@ python -m benchmarks.run_multidataset \
   --limit 64 \
   --device cuda \
   --repeat 3 \
+  --metric-ks 1,5,10 \
   --allow-unavailable \
   --build-missing
+```
+
+For corpus scaling, pass multiple limits. The runner reuses existing caches and
+only builds missing `.npz` files when `--build-missing` is present:
+
+```bash
+python -m benchmarks.run_multidataset \
+  --datasets docvqa \
+  --embedding-dir benchmark-results \
+  --output-dir benchmark-results/multidataset-docvqa-scaling \
+  --summary-output benchmark-results/multidataset-docvqa-scaling-summary.json \
+  --model vidore/colqwen2-v1.0-hf \
+  --limits 64,256,1024 \
+  --device cuda \
+  --repeat 5 \
+  --metric-ks 1,5,10 \
+  --allow-unavailable
 ```
 
 Default runnable implementations are dense fp16, FAISS pooled, cuVS pooled,
@@ -320,29 +349,98 @@ This benchmark keeps `bitmax` scoped to the compression/scoring layer. The
 embeddings are produced by the frozen public model named in `--model`, cached as
 artifacts, and reused by every backend.
 
+The summary JSON includes:
+
+- `per_dataset`: full per-dataset comparison artifacts.
+- `per_dataset_deltas`: recall/MRR/NDCG deltas versus dense fp16 for every
+  measured cutoff.
+- `aggregate_results`: mean best latency, mean P50/P95/P99 latency, mean
+  quality metrics, storage compression, speedup, and token-bucket rollups.
+- `scaling_results`: the same aggregate rows grouped by corpus limit.
+
 Measured on the persistent project-owned VAST RTX 4090 worker across
 `docvqa`, `infovqa`, `arxivqa`, and `tabfquad` with limit64 cached ColQwen2
 embeddings:
 
-| implementation | datasets | fp32 doc reduction | mean latency | geomean speedup vs dense | recall@10 | NDCG@10 |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| dense fp16 CUDA | 4 | 2.00x | 110.94 ms | 1.00x | 0.949 | 0.885 |
-| FAISS token candidates + dense rerank | 4 | 0.67x | 226.32 ms | 0.49x | 0.949 | 0.885 |
-| Qdrant in-memory multivector | 4 | 1.00x | 1853.51 ms | 0.06x | 0.949 | 0.885 |
-| fast-plaid CUDA | 4 | 3.22x | 185.65 ms | 0.60x | 0.945 | 0.882 |
-| bitmax int4 CUDA | 4 | 8.00x | 33.05 ms | 3.44x | 0.949 | 0.879 |
-| bitmax binary CUDA | 4 | 32.00x | 9.19 ms | 12.19x | 0.941 | 0.865 |
-| bitmax binary_q40 CUDA | 4 | 31.92x | 10.56 ms | 10.57x | 0.930 | 0.858 |
-| FAISS GPU mean-pool flat IP | 4 | 707.80x | 0.27 ms | 402.15x | 0.809 | 0.650 |
-| cuVS GPU mean-pool flat IP | 4 | 707.80x | 0.54 ms | 204.22x | 0.809 | 0.650 |
+| implementation | datasets | fp32 doc reduction | mean latency | mean P95 | geomean speedup vs dense | recall@10 | NDCG@10 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| dense fp16 CUDA | 4 | 2.00x | 109.82 ms | 187.71 ms | 1.00x | 0.949 | 0.885 |
+| FAISS token candidates + dense rerank | 4 | 0.67x | 224.56 ms | 228.28 ms | 0.49x | 0.949 | 0.885 |
+| Qdrant in-memory multivector | 4 | 1.00x | 1782.25 ms | 2104.45 ms | 0.06x | 0.949 | 0.885 |
+| bitmax int4 CUDA | 4 | 8.00x | 33.68 ms | 34.52 ms | 3.32x | 0.949 | 0.879 |
+| fast-plaid CUDA | 4 | 3.22x | 182.29 ms | 219.26 ms | 0.60x | 0.941 | 0.878 |
+| bitmax binary CUDA | 4 | 32.00x | 9.26 ms | 11.20 ms | 11.89x | 0.941 | 0.865 |
+| bitmax binary_q40 CUDA | 4 | 31.92x | 10.70 ms | 11.02 ms | 10.27x | 0.930 | 0.858 |
+| FAISS GPU mean-pool flat IP | 4 | 707.80x | 0.24 ms | 6.45 ms | 456.09x | 0.809 | 0.650 |
+| cuVS GPU mean-pool flat IP | 4 | 707.80x | 0.44 ms | 6.86 ms | 246.54x | 0.809 | 0.650 |
 
-Artifact: `benchmark-results/multidataset-limit64-slow-summary.json`.
+Artifact: `benchmark-results/multidataset-limit64-rich-summary.json`.
 
 Interpretation: the multi-dataset result supports the same product framing as
 the single-slice result. Single-vector pooled baselines are tiny and fast but
 lose retrieval quality. Full dense/exact multivector paths preserve quality but
 are larger and slower. `bitmax` int4 is the most conservative compressed option
 in this run, averaging only `-0.005` NDCG@10 versus dense while reducing storage
-by 8x and improving latency by 3.44x. `bitmax` binary is the aggressive option,
-reducing storage by 32x and improving latency by 12.19x with an average
+by 8x and improving latency by 3.32x. `bitmax` binary is the aggressive option,
+reducing storage by 32x and improving latency by 11.89x with an average
 `-0.020` NDCG@10 delta.
+
+The same schema also records page-token bucket quality. On this four-dataset
+run, binary's NDCG@10 delta is concentrated in the short-page bucket
+(`-0.034`); long-page binary is effectively tied with dense (`+0.001`).
+
+The scaling artifact `benchmark-results/multidataset-docvqa-scaling-rich-summary.json`
+runs `docvqa` at limits 64 and 256. At limit256, `bitmax_int4` is 12.50x
+faster than dense fp16 with NDCG@10 `0.658` vs dense `0.660`, while
+`bitmax_binary` is 30.58x faster with NDCG@10 `0.649`.
+
+For larger document-count scaling, use fixed-query mixed corpora built from
+compatible real embedding caches. The combiner keeps document/query ids unique
+and writes block-diagonal qrels:
+
+```bash
+python -m benchmarks.build_mixed_embeddings \
+  --inputs benchmark-results/vidore-syntheticdocqa-energy-colqwen2-limit1000.npz \
+           benchmark-results/vidore-syntheticdocqa-healthcare-colqwen2-limit1000.npz \
+           benchmark-results/vidore-syntheticdocqa-government-colqwen2-limit1000.npz \
+  --dataset-name vidore/mixed_syntheticdocqa:test:3000 \
+  --output benchmark-results/vidore-mixed-syntheticdocqa-colqwen2-limit3000.npz
+```
+
+Measured with 256 fixed queries on the same VAST RTX 4090 worker:
+
+| real docs | dense fp16 latency | fast-plaid latency | bitmax int4 latency | bitmax binary latency | binary speedup | dense NDCG@10 | int4 NDCG@10 | binary NDCG@10 |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 977 | 6886.31 ms | 4657.31 ms | 503.63 ms | 141.66 ms | 48.61x | 0.379 | 0.380 | 0.375 |
+| 1,942 | 13517.36 ms | 7744.62 ms | 997.71 ms | 268.86 ms | 50.28x | 0.379 | 0.379 | 0.374 |
+| 2,914 | 20339.91 ms | 12165.72 ms | 1416.06 ms | 376.26 ms | 54.06x | 0.379 | 0.379 | 0.374 |
+
+Artifact: `benchmark-results/mixed-syntheticdocqa-docscale-rich-summary.json`.
+
+For a larger fixed-query stress sweep, start from the mixed real 5k corpus and
+expand document count with repeated non-positive real page embeddings. This is a
+latency/memory and distractor-crowding stress test, not a claim that the 25k
+corpus contains 25k unique pages:
+
+```bash
+python -m benchmarks.build_docscale_stress \
+  --input benchmark-results/vidore-mixed-syntheticdocqa-colqwen2-limit5000.npz \
+  --target-docs 25000 \
+  --query-limit 256 \
+  --dataset-name vidore/mixed_syntheticdocqa_docscale_stress:test:25000 \
+  --output benchmark-results/vidore-mixed-syntheticdocqa-docscale-stress-colqwen2-limit25000.npz
+```
+
+Measured with 256 fixed queries on the VAST RTX 4090 worker:
+
+| docs | dense fp16 mean | dense P95 | bitmax int4 mean | binary_q40 mean | binary mean | binary speedup | dense NDCG@10 | int4 NDCG@10 | binary_q40 NDCG@10 | binary NDCG@10 |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 5,000 | 35492.90 ms | 35623.81 ms | 2414.87 ms | 648.45 ms | 637.72 ms | 55.66x | 0.377 | 0.379 | 0.372 | 0.372 |
+| 10,000 | 71541.32 ms | 71748.70 ms | 4763.87 ms | 1278.96 ms | 1253.83 ms | 57.06x | 0.376 | 0.378 | 0.371 | 0.369 |
+| 25,000 | 174426.51 ms | 174690.07 ms | 11828.15 ms | 3161.95 ms | 3122.47 ms | 55.86x | 0.374 | 0.376 | 0.371 | 0.363 |
+
+Artifact: `benchmark-results/docscale-stress-5k-10k-25k-rich-summary.json`.
+The 5k and 10k comparison files also include FAISS/cuVS mean-pool rows; the
+25k full comparison hit FAISS GPU temporary-memory OOM, so the final 25k
+artifact is dense plus bitmax core modes. This does not affect the dense-vs-
+bitmax scaling result.
