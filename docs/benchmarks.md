@@ -196,3 +196,30 @@ Measured on the persistent project-owned VAST RTX 4090 worker with
 
 Artifact:
 `benchmark-results/retrieval-docvqa-colqwen2-limit256-int4-q40-cuda-focused.json`.
+
+## SDK CUDA Demo
+
+The SDK demo is the main production-facing proof path. It uses `bitmax.Corpus`
+and `bitmax.Reranker`, compares against dense fp16 CUDA on the same embedding
+slice, and reports storage, latency, speedup, recall, MRR, and NDCG.
+
+```bash
+python -m examples.local_multivector_search \
+  --input benchmark-results/vidore-docvqa-colqwen2-limit256.npz \
+  --device cuda \
+  --modes binary,binary_q40,int4 \
+  --repeat 5 \
+  --output benchmark-results/sdk-demo-local-search-limit256-cuda.json
+```
+
+Measured on the persistent project-owned VAST RTX 4090 worker with
+`vidore/docvqa_test_subsampled:test:256` embedded by `vidore/colqwen2-v1.0-hf`:
+
+| implementation | fp32 doc reduction | latency | speedup vs dense fp16 | recall@1 | recall@10 | MRR@10 | NDCG@10 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| dense fp16 CUDA | 2.00x | 1906.08 ms | 1.00x | 0.551 | 0.777 | 0.623 | 0.660 |
+| SDK binary CUDA | 32.00x | 58.79 ms | 32.42x | 0.547 | 0.754 | 0.615 | 0.649 |
+| SDK binary_q40 CUDA | 31.98x | 64.35 ms | 29.62x | 0.547 | 0.762 | 0.617 | 0.652 |
+| SDK int4 CUDA | 8.00x | 144.19 ms | 13.22x | 0.555 | 0.773 | 0.622 | 0.658 |
+
+Artifact: `benchmark-results/sdk-demo-local-search-limit256-cuda.json`.

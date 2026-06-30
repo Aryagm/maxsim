@@ -1,6 +1,54 @@
 # bitmax API
 
-`bitmax` exposes three public functions:
+The production SDK path is `Corpus` plus `Reranker`:
+
+```python
+corpus = bitmax.Corpus.from_embeddings(
+    doc_ids=doc_ids,
+    embeddings=doc_embeddings,
+    offsets=doc_offsets,
+    mode="binary_q40",
+)
+corpus.save("docs.bitmax.npz")
+
+reranker = bitmax.Reranker.load("docs.bitmax.npz", device="cuda")
+results = reranker.search(query_embeddings, k=10)
+reranked = reranker.rerank(query_embeddings, candidate_ids=["doc-a", "doc-b"], k=2)
+```
+
+Each result is a `SearchResult(doc_id: str, score: float, rank: int)`.
+
+## SDK Corpus
+
+`Corpus.from_embeddings(doc_ids, embeddings, offsets, mode="binary")` builds a
+portable packed corpus from multi-vector document embeddings.
+
+Inputs:
+
+- `doc_ids`: one stable external ID per document.
+- `embeddings`: flattened `[total_doc_tokens, dim]` float array.
+- `offsets`: `[num_docs + 1]` offsets into `embeddings`.
+
+Modes:
+
+- `binary`: fastest, 32x fp32 document compression on large corpora.
+- `binary_q40`: experimental 32x-ish q40 centroid calibration.
+- `int4`: experimental accuracy-first mode, 8x fp32 document compression.
+
+## SDK Reranker
+
+`Reranker.search(query_embeddings, k=10)` scores the whole corpus and returns the
+top documents. `Reranker.rerank(query_embeddings, candidate_ids, k=10)` returns
+only the requested candidates sorted by compressed MaxSim score. Candidate IDs
+can come from Qdrant, LanceDB, Elasticsearch, Vespa, pgvector, or a custom
+retriever.
+
+Use `device="cuda"` for production benchmark claims. CPU is available for
+correctness checks and small local experiments.
+
+## Low-Level API
+
+The lower-level kernel API exposes direct packed scoring:
 
 ```python
 packed = bitmax.pack_signs(doc_embeddings, doc_offsets=None, scale=None)

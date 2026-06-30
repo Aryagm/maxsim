@@ -1,11 +1,13 @@
 # bitmax
 
-`bitmax` is a small kernel library for exact asymmetric binary MaxSim scoring:
-query tokens stay `int8`/`float16`/`float32`, stored document tokens are packed to
-1-bit signs.
+`bitmax` is a Python SDK and kernel library for compressed late-interaction
+multi-vector search. Query tokens stay `int8`/`float16`/`float32`; document
+tokens can be stored as 1-bit signs, q40 centroid-calibrated signs, or signed
+int4 values.
 
-This is not a vector database, RAG framework, or embedding model. The v0.1 goal is
-to provide the scoring primitive that those systems can call.
+This is not a vector database, RAG framework, or embedding model. The v0.1 goal
+is to provide the compressed MaxSim scoring and reranking layer that those
+systems can call.
 
 ## Install for development
 
@@ -14,26 +16,42 @@ python -m venv .venv
 .venv/bin/python -m pip install -e ".[dev]"
 ```
 
-## Minimal use
+## SDK Use
 
 ```python
-import numpy as np
 import bitmax
 
-docs = np.random.randn(128, 128).astype("float32")
-packed = bitmax.pack_signs(docs)
+corpus = bitmax.Corpus.from_embeddings(
+    doc_ids=doc_ids,
+    embeddings=doc_embeddings,
+    offsets=doc_offsets,
+    mode="binary_q40",
+    metadata={"model": "vidore/colqwen2-v1.0-hf"},
+)
+corpus.save("docs.bitmax.npz")
 
-query = np.random.randint(-8, 8, size=(16, 128), dtype=np.int8)
-scores = bitmax.maxsim(query, packed)
-top_scores, top_indices = bitmax.topk_maxsim(query, packed, k=10)
+reranker = bitmax.Reranker.load("docs.bitmax.npz", device="cuda")
+results = reranker.search(query_embeddings, k=10)
+
+reranked = reranker.rerank(
+    query_embeddings,
+    candidate_ids=["doc-17", "doc-03", "doc-91"],
+    k=3,
+)
 ```
 
-Packed documents can be saved and loaded without rebuilding them:
+Modes:
+
+- `binary`: fastest, 32x fp32 document compression.
+- `binary_q40`: experimental 32x-ish accuracy mode using q40 centroid calibration.
+- `int4`: experimental accuracy-first mode, 8x fp32 compression.
+
+Lower-level kernels remain available when you need direct packed scoring:
 
 ```python
-bitmax.save_packed("docs.bitmax.npz", packed, metadata={"model": "example"})
-bundle = bitmax.load_packed("docs.bitmax.npz")
-scores = bitmax.maxsim(query, bundle.packed)
+packed = bitmax.pack_signs(doc_embeddings, doc_offsets)
+scores = bitmax.maxsim(query_embeddings, packed)
+top_scores, top_indices = bitmax.topk_maxsim(query_embeddings, packed, k=10)
 ```
 
 ## API contract
@@ -124,12 +142,17 @@ On a project-owned VAST RTX 4090, the dim128 int8-query LUT path measured
 with 12,576 bytes/doc, versus `0.723 ms` for torch fp32 dense top-k on the same
 worker.
 
-On `vidore/docvqa_test_subsampled:test:256` with ColQwen2 embeddings, raw
-binary CUDA measured `0.649` NDCG@10 at 32x fp32 document compression.
-Experimental q40 per-dimension centroid binary measured `0.652` NDCG@10 at the
-same effective 32x compression and `49.01 ms` latency. Experimental int4
-symmetric docs measured `0.658` NDCG@10 at 8x fp32 compression and `192.13 ms`
-latency. Dense fp16 was `0.660` NDCG@10 and `3790.37 ms` on the same worker.
+The SDK CUDA demo on `vidore/docvqa_test_subsampled:test:256` with ColQwen2
+embeddings measured:
+
+| implementation | fp32 doc reduction | latency | speedup vs dense fp16 | recall@10 | NDCG@10 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| dense fp16 CUDA | 2.00x | 1906.08 ms | 1.00x | 0.777 | 0.660 |
+| SDK binary CUDA | 32.00x | 58.79 ms | 32.42x | 0.754 | 0.649 |
+| SDK binary_q40 CUDA | 31.98x | 64.35 ms | 29.62x | 0.762 | 0.652 |
+| SDK int4 CUDA | 8.00x | 144.19 ms | 13.22x | 0.773 | 0.658 |
+
+Artifact: `benchmark-results/sdk-demo-local-search-limit256-cuda.json`.
 
 ## VAST
 
