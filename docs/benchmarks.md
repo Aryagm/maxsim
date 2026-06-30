@@ -174,9 +174,25 @@ python benchmarks/run_retrieval.py \
 ```
 
 The variant set is `binary`, `binary_doc_scale`, `ternary_threshold`,
-`binary_token_scale`, `binary_group_scale_16`, `binary_calibrated_threshold`,
-`binary_dim_centroid_zero`, and `binary_dim_centroid_lloyd`. Ternary and
+`binary_token_scale`, `binary_group_scale_16`, `int4_symmetric_per_tensor`,
+`binary_calibrated_threshold`, `binary_dim_centroid_zero`,
+`binary_dim_centroid_q40`, and `binary_dim_centroid_lloyd`. Ternary and
 token/group/threshold variants are benchmark-only reference implementations
 until a retrieval-quality win justifies moving them into public kernels.
-`binary_dim_centroid_zero` uses `bitmax.experimental` helpers and reuses the
-existing CUDA binary MaxSim path with query preprocessing.
+`binary_dim_centroid_zero` and `binary_dim_centroid_q40` use
+`bitmax.experimental` helpers and reuse the existing CUDA binary MaxSim path
+with query preprocessing. `int4_symmetric_per_tensor` uses the experimental
+CUDA int4 backend when the stage device is CUDA.
+
+Measured on the persistent project-owned VAST RTX 4090 worker with
+`vidore/docvqa_test_subsampled:test:256` embedded by `vidore/colqwen2-v1.0-hf`:
+
+| implementation | fp32 doc reduction | latency | speedup vs dense fp16 | recall@1 | recall@10 | MRR@10 | NDCG@10 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| dense fp16 baseline | 2.00x | 3790.37 ms | 1.00x | 0.551 | 0.777 | 0.623 | 0.660 |
+| raw binary CUDA | 32.00x | 49.05 ms | 77.28x | 0.547 | 0.754 | 0.615 | 0.649 |
+| q40 centroid binary CUDA | 31.98x | 49.01 ms | 77.34x | 0.547 | 0.762 | 0.617 | 0.652 |
+| int4 symmetric CUDA | 8.00x | 192.13 ms | 19.73x | 0.555 | 0.773 | 0.622 | 0.658 |
+
+Artifact:
+`benchmark-results/retrieval-docvqa-colqwen2-limit256-int4-q40-cuda-focused.json`.

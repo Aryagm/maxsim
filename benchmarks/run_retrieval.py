@@ -12,7 +12,10 @@ import numpy as np
 import bitmax
 from bitmax.experimental import (
     fit_dim_centroid_calibration,
+    int4_maxsim,
+    int4_to_device,
     pack_dim_centroid_signs,
+    pack_int4_symmetric,
     pack_ternary,
     ternary_maxsim,
     transform_query_dim_centroids,
@@ -436,6 +439,18 @@ def _variant_scores(dataset: RetrievalEmbeddings, variant: str, native_device: s
             _packed_doc_bytes(dataset) + dataset.doc_embeddings.shape[0] * (dataset.dim // group_size) * 4,
         )
 
+    if variant == "int4_symmetric_per_tensor":
+        packed = pack_int4_symmetric(dataset.doc_embeddings, dataset.doc_offsets)
+        scoring_packed = int4_to_device(packed) if native_device == "cuda" else packed
+        requested_device = "cuda" if native_device == "cuda" else "cpu_reference"
+        scores, latency = _time_call(lambda: _int4_scores(dataset, scoring_packed, device=native_device), repeat=repeat)
+        return (
+            scores,
+            latency,
+            {"implementation": "int4_symmetric_per_tensor", "variant": variant, "requested_device": requested_device, "scale": packed.scale},
+            packed.storage_bytes + 4,
+        )
+
     if variant == "binary_calibrated_threshold":
         thresholds = _calibrated_thresholds(dataset.doc_embeddings)
         scores, latency = _time_call(lambda: _threshold_sign_scores(dataset, thresholds), repeat=repeat)
@@ -449,6 +464,24 @@ def _variant_scores(dataset: RetrievalEmbeddings, variant: str, native_device: s
             scores,
             latency,
             {"implementation": "binary_dim_centroid_zero", "variant": variant, "requested_device": native_device, "calibration": "per_dim_zero_threshold_centroids"},
+            _packed_doc_bytes(dataset) + calibration.metadata_bytes,
+        )
+
+    if variant == "binary_dim_centroid_q40":
+        thresholds = _quantile_thresholds(dataset.doc_embeddings, 40.0)
+        calibration = fit_dim_centroid_calibration(dataset.doc_embeddings, thresholds=thresholds)
+        centroid_dataset, scoring_packed = _prepare_centroid_binary(dataset, calibration, native_device)
+        scores, latency = _time_call(lambda: _bitmax_scores(centroid_dataset, scoring_packed, device=native_device), repeat=repeat)
+        return (
+            scores,
+            latency,
+            {
+                "implementation": "binary_dim_centroid_q40",
+                "variant": variant,
+                "requested_device": native_device,
+                "calibration": "per_dim_q40_threshold_centroids",
+                "threshold_quantile": 40.0,
+            },
             _packed_doc_bytes(dataset) + calibration.metadata_bytes,
         )
 
@@ -506,8 +539,10 @@ def _normalize_variants(variants: str | tuple[str, ...] | list[str] | None) -> t
         "ternary_threshold",
         "binary_token_scale",
         "binary_group_scale_16",
+        "int4_symmetric_per_tensor",
         "binary_calibrated_threshold",
         "binary_dim_centroid_zero",
+        "binary_dim_centroid_q40",
         "binary_dim_centroid_lloyd",
     )
     if isinstance(variants, str):
@@ -527,6 +562,13 @@ def _ternary_scores(dataset: RetrievalEmbeddings, packed) -> np.ndarray:
     return np.stack(rows, axis=0).astype(np.float32, copy=False)
 
 
+def _int4_scores(dataset: RetrievalEmbeddings, packed, *, device: str) -> np.ndarray:
+    if device == "cuda":
+        return int4_maxsim(_padded_query_batch(dataset.query_embeddings), packed, device="cuda").astype(np.float32, copy=False)
+    rows = [int4_maxsim(query, packed) for query in dataset.query_embeddings]
+    return np.stack(rows, axis=0).astype(np.float32, copy=False)
+
+
 def _ternary_threshold(docs: np.ndarray) -> float:
     return float(np.percentile(np.abs(docs), 25.0))
 
@@ -543,6 +585,10 @@ def _group_scales(docs: np.ndarray, group_size: int) -> np.ndarray:
 
 def _calibrated_thresholds(docs: np.ndarray) -> np.ndarray:
     return np.median(docs, axis=0).astype(np.float32)
+
+
+def _quantile_thresholds(docs: np.ndarray, quantile: float) -> np.ndarray:
+    return np.percentile(docs, quantile, axis=0).astype(np.float32)
 
 
 def _scaled_sign_scores(dataset: RetrievalEmbeddings, token_scales: np.ndarray) -> np.ndarray:

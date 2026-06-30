@@ -3,7 +3,13 @@ import pytest
 from importlib import import_module
 
 import bitmax
-from bitmax.experimental import fit_dim_centroid_calibration, pack_dim_centroid_signs, topk_dim_centroid_maxsim
+from bitmax.experimental import (
+    fit_dim_centroid_calibration,
+    pack_dim_centroid_signs,
+    pack_int4_symmetric,
+    topk_dim_centroid_maxsim,
+    topk_int4_maxsim,
+)
 
 
 @pytest.mark.cuda
@@ -236,6 +242,25 @@ def test_cuda_centroid_topk_matches_cpu_centroid_reference():
 
     cpu_scores, cpu_indices = topk_dim_centroid_maxsim(query, packed, calibration, k=3)
     cuda_scores, cuda_indices = topk_dim_centroid_maxsim(query, cuda_packed, calibration, k=3)
+
+    np.testing.assert_allclose(cuda_scores, cpu_scores, rtol=0, atol=1e-4)
+    np.testing.assert_array_equal(cuda_indices, cpu_indices)
+
+
+@pytest.mark.cuda
+def test_cuda_int4_topk_matches_cpu_int4_reference():
+    pytest.importorskip("bitmax._bitmax_cuda")
+    from bitmax.experimental import int4_to_device
+
+    rng = np.random.default_rng(20260706)
+    docs = rng.normal(size=(96, 128)).astype(np.float32)
+    offsets = np.array([0, 17, 41, 64, 96], dtype=np.int64)
+    query = rng.normal(size=(3, 6, 128)).astype(np.float32)
+    packed = pack_int4_symmetric(docs, offsets)
+    cuda_packed = int4_to_device(packed)
+
+    cpu_scores, cpu_indices = topk_int4_maxsim(query, packed, k=3)
+    cuda_scores, cuda_indices = topk_int4_maxsim(query, cuda_packed, k=3)
 
     np.testing.assert_allclose(cuda_scores, cpu_scores, rtol=0, atol=1e-4)
     np.testing.assert_array_equal(cuda_indices, cpu_indices)

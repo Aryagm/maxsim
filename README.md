@@ -28,6 +28,14 @@ scores = bitmax.maxsim(query, packed)
 top_scores, top_indices = bitmax.topk_maxsim(query, packed, k=10)
 ```
 
+Packed documents can be saved and loaded without rebuilding them:
+
+```python
+bitmax.save_packed("docs.bitmax.npz", packed, metadata={"model": "example"})
+bundle = bitmax.load_packed("docs.bitmax.npz")
+scores = bitmax.maxsim(query, bundle.packed)
+```
+
 ## API contract
 
 - Query shapes: `[query_tokens, dim]` or `[batch, query_tokens, dim]`.
@@ -81,21 +89,27 @@ Those rows report recall/MRR/NDCG, top-k agreement with dense fp16 MaxSim,
 latency, speedup, and document-memory compression.
 
 Experimental Pareto variants can be measured with `--variants all`. Those rows
-include ternary documents, per-token scale, grouped scale, calibrated threshold
-references, and per-dimension centroid-calibrated binary docs. Most are
-benchmark probes, not stable public kernels. The centroid path is exposed under
-`bitmax.experimental` because it reuses the existing one-bit CUDA scorer:
+include ternary documents, per-token scale, grouped scale, int4 documents,
+calibrated threshold references, and per-dimension centroid-calibrated binary
+docs. Most are benchmark probes, not stable public kernels. The centroid and
+int4 paths are exposed under `bitmax.experimental`:
 
 ```python
 from bitmax.experimental import (
     dim_centroid_maxsim,
     fit_dim_centroid_calibration,
+    int4_maxsim,
+    int4_to_device,
     pack_dim_centroid_signs,
+    pack_int4_symmetric,
 )
 
 calibration = fit_dim_centroid_calibration(docs)
 packed, calibration = pack_dim_centroid_signs(docs, doc_offsets, calibration=calibration)
 scores = dim_centroid_maxsim(query, packed, calibration)
+
+packed_i4 = pack_int4_symmetric(docs, doc_offsets)
+scores_i4 = int4_maxsim(query, int4_to_device(packed_i4), device="cuda")
 ```
 
 CUDA top-k kernel experiments are available on CUDA workers:
@@ -110,10 +124,12 @@ On a project-owned VAST RTX 4090, the dim128 int8-query LUT path measured
 with 12,576 bytes/doc, versus `0.723 ms` for torch fp32 dense top-k on the same
 worker.
 
-On `vidore/docvqa_test_subsampled:test:64` with ColQwen2 embeddings, raw binary
-CUDA measured `0.737` NDCG@10 at 32x fp32 document compression. Experimental
-per-dimension centroid binary measured `0.746` NDCG@10 and matched dense
-recall@10 at effectively the same 32x compression and about `1.91 ms` latency.
+On `vidore/docvqa_test_subsampled:test:256` with ColQwen2 embeddings, raw
+binary CUDA measured `0.649` NDCG@10 at 32x fp32 document compression.
+Experimental q40 per-dimension centroid binary measured `0.652` NDCG@10 at the
+same effective 32x compression and `49.01 ms` latency. Experimental int4
+symmetric docs measured `0.658` NDCG@10 at 8x fp32 compression and `192.13 ms`
+latency. Dense fp16 was `0.660` NDCG@10 and `3790.37 ms` on the same worker.
 
 ## VAST
 

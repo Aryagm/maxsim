@@ -431,3 +431,43 @@ The int8/int4 rows are quality-reference paths, not custom optimized kernels.
 They define the next GPU research targets: int4 may be the better accuracy
 option when 8x compression is acceptable, while centroid binary is the best
 measured high-compression path so far.
+
+## 2026-06-30: Experimental Int4 CUDA and 256-Doc Frontier
+
+Change: added experimental signed-int4 document packing and a CUDA-resident int4
+MaxSim/top-k backend. The int4 format stores two signed 4-bit values per byte
+plus one tensor scale. The retrieval benchmark now also exposes
+`binary_dim_centroid_q40`, a fixed q40 per-dimension centroid threshold that was
+the best same-storage centroid calibration on the 256-query/doc sweep.
+
+Measured on the persistent project-owned VAST RTX 4090 worker with
+`vidore/docvqa_test_subsampled:test:256` embedded by
+`vidore/colqwen2-v1.0-hf`:
+
+| implementation | fp32 doc reduction | latency | speedup vs dense fp16 | recall@1 | recall@10 | MRR@10 | NDCG@10 | NDCG delta |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| dense fp16 baseline | 2.00x | 3790.37 ms | 1.00x | 0.551 | 0.777 | 0.623 | 0.660 | 0.000 |
+| raw binary CUDA | 32.00x | 49.05 ms | 77.28x | 0.547 | 0.754 | 0.615 | 0.649 | -0.011 |
+| zero centroid binary CUDA | 31.98x | 49.10 ms | 77.20x | 0.547 | 0.754 | 0.615 | 0.648 | -0.011 |
+| q40 centroid binary CUDA | 31.98x | 49.01 ms | 77.34x | 0.547 | 0.762 | 0.617 | 0.652 | -0.008 |
+| int4 symmetric CUDA | 8.00x | 192.13 ms | 19.73x | 0.555 | 0.773 | 0.622 | 0.658 | -0.001 |
+
+Artifacts:
+
+- `benchmark-results/retrieval-docvqa-colqwen2-limit256-int4-q40-cuda-focused.json`
+- `benchmark-results/retrieval-docvqa-colqwen2-limit256-centroid-threshold-sweep.json`
+
+Interpretation:
+
+1. For maximum compression, q40 centroid binary is the current best measured
+   32x-ish mode on the 256 slice: it improves NDCG@10 by 0.0025 over raw binary
+   and recall@10 by 0.0078 with no measurable latency cost. It is not the
+   default because zero thresholds were better on the 64 slice.
+2. For accuracy, int4 is the current best measured compressed GPU mode:
+   NDCG@10 is within 0.0014 of dense fp16 and recall@1 is slightly higher than
+   dense on this slice, at 8x fp32 compression. The first CUDA int4 kernel is
+   still 3.9x slower than binary, so it needs more kernel work before it is a
+   speed-first default.
+3. The default remains raw binary because it is stable, fastest, and preserves
+   the 32x fp32 document-size reduction. q40 centroid and int4 are opt-in
+   experimental paths for users choosing different Pareto points.

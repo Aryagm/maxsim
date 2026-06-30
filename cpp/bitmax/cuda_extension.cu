@@ -249,6 +249,75 @@ __global__ void maxsim_batched_dim128_lut_kernel(
   }
 }
 
+__device__ __forceinline__ int signed_int4(std::uint8_t nibble) {
+  const int value = static_cast<int>(nibble & 0x0FU);
+  return value >= 8 ? value - 16 : value;
+}
+
+__device__ __forceinline__ float dot_int4(const float* query_row, const std::uint8_t* packed_row, int dim) {
+  float dot = 0.0F;
+  for (int byte_idx = 0; byte_idx < dim / 2; ++byte_idx) {
+    const std::uint8_t byte = packed_row[byte_idx];
+    const int dim_idx = byte_idx * 2;
+    dot += static_cast<float>(signed_int4(byte)) * query_row[dim_idx];
+    dot += static_cast<float>(signed_int4(byte >> 4)) * query_row[dim_idx + 1];
+  }
+  return dot;
+}
+
+__global__ void maxsim_int4_batched_kernel(
+    const float* query,
+    const std::uint8_t* packed,
+    const std::int64_t* offsets,
+    float* output,
+    int batch,
+    int query_tokens,
+    int dim,
+    int num_docs,
+    float scale) {
+  const int doc_idx = blockIdx.x;
+  const int batch_idx = blockIdx.y;
+  const int tid = threadIdx.x;
+  __shared__ float reductions[kBlockThreads];
+
+  if (doc_idx >= num_docs || batch_idx >= batch) {
+    return;
+  }
+
+  const int byte_dim = dim / 2;
+  const std::int64_t start = offsets[doc_idx];
+  const std::int64_t end = offsets[doc_idx + 1];
+  float doc_score = 0.0F;
+
+  for (int q = 0; q < query_tokens; ++q) {
+    float local_best = -3.402823466e+38F;
+    const float* query_row = query + (static_cast<std::int64_t>(batch_idx) * query_tokens + q) * dim;
+    for (std::int64_t token = start + tid; token < end; token += blockDim.x) {
+      const std::uint8_t* packed_row = packed + token * byte_dim;
+      const float dot = dot_int4(query_row, packed_row, dim);
+      local_best = dot > local_best ? dot : local_best;
+    }
+
+    reductions[tid] = local_best;
+    __syncthreads();
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+      if (tid < stride) {
+        const float other = reductions[tid + stride];
+        reductions[tid] = other > reductions[tid] ? other : reductions[tid];
+      }
+      __syncthreads();
+    }
+    if (tid == 0 && start != end) {
+      doc_score += reductions[0];
+    }
+    __syncthreads();
+  }
+
+  if (tid == 0) {
+    output[static_cast<std::int64_t>(batch_idx) * num_docs + doc_idx] = doc_score * scale;
+  }
+}
+
 __global__ void topk_kernel(
     const float* scores,
     float* top_scores,
@@ -858,6 +927,167 @@ class CudaPackedDocs {
   bool has_scale_vector_ = false;
 };
 
+class CudaInt4PackedDocs {
+ public:
+  CudaInt4PackedDocs(
+      py::array_t<std::uint8_t, py::array::c_style | py::array::forcecast> packed,
+      py::array_t<std::int64_t, py::array::c_style | py::array::forcecast> offsets,
+      int dim,
+      float scale)
+      : dim_(dim),
+        num_docs_(static_cast<int>(offsets.shape(0) - 1)),
+        scale_(scale),
+        packed_size_(static_cast<std::size_t>(packed.size())),
+        offsets_size_(static_cast<std::size_t>(offsets.size())) {
+    if (packed.ndim() != 2) {
+      throw std::invalid_argument("packed must have shape [num_doc_tokens, dim / 2]");
+    }
+    if (offsets.ndim() != 1) {
+      throw std::invalid_argument("offsets must be a 1-D array");
+    }
+    if (dim <= 0 || dim % 2 != 0) {
+      throw std::invalid_argument("dim must be positive and divisible by 2");
+    }
+    if (packed.shape(1) != dim / 2) {
+      throw std::invalid_argument("packed shape does not match dim");
+    }
+    if (offsets.shape(0) < 2) {
+      throw std::invalid_argument("offsets must contain at least [0, num_doc_tokens]");
+    }
+    if (scale <= 0.0F) {
+      throw std::invalid_argument("scale must be > 0");
+    }
+
+    const std::size_t packed_bytes = packed_size_ * sizeof(std::uint8_t);
+    const std::size_t offsets_bytes = offsets_size_ * sizeof(std::int64_t);
+    check_cuda(cudaMalloc(&d_packed_, packed_bytes), "cudaMalloc int4 packed docs");
+    check_cuda(cudaMalloc(&d_offsets_, offsets_bytes), "cudaMalloc int4 offsets");
+    try {
+      check_cuda(cudaMemcpy(d_packed_, packed.data(), packed_bytes, cudaMemcpyHostToDevice), "copy int4 packed docs to device");
+      check_cuda(cudaMemcpy(d_offsets_, offsets.data(), offsets_bytes, cudaMemcpyHostToDevice), "copy int4 offsets to device");
+    } catch (...) {
+      cudaFree(d_packed_);
+      cudaFree(d_offsets_);
+      d_packed_ = nullptr;
+      d_offsets_ = nullptr;
+      throw;
+    }
+  }
+
+  CudaInt4PackedDocs(const CudaInt4PackedDocs&) = delete;
+  CudaInt4PackedDocs& operator=(const CudaInt4PackedDocs&) = delete;
+
+  ~CudaInt4PackedDocs() {
+    cudaFree(d_packed_);
+    cudaFree(d_offsets_);
+    cudaFree(d_query_);
+    cudaFree(d_scores_);
+    cudaFree(d_top_scores_);
+    cudaFree(d_top_indices_);
+  }
+
+  py::array_t<float> maxsim_batch(py::array_t<float, py::array::c_style | py::array::forcecast> query) {
+    if (query.ndim() != 3) {
+      throw std::invalid_argument("query must have shape [batch, query_tokens, dim]");
+    }
+    if (query.shape(2) != dim_) {
+      throw std::invalid_argument("query shape does not match dim");
+    }
+
+    const int batch = static_cast<int>(query.shape(0));
+    const int query_tokens = static_cast<int>(query.shape(1));
+    const std::size_t query_bytes = static_cast<std::size_t>(query.size()) * sizeof(float);
+    const std::size_t output_bytes = static_cast<std::size_t>(batch) * static_cast<std::size_t>(num_docs_) * sizeof(float);
+
+    ensure_device_capacity(&d_query_, &query_capacity_, query_bytes, "cudaMalloc int4 query cache");
+    ensure_device_capacity(&d_scores_, &scores_capacity_, output_bytes, "cudaMalloc int4 score cache");
+    check_cuda(cudaMemcpy(d_query_, query.data(), query_bytes, cudaMemcpyHostToDevice), "copy int4 query to device");
+
+    launch_maxsim(d_query_, d_scores_, batch, query_tokens, "int4 resident maxsim");
+    check_cuda(cudaDeviceSynchronize(), "synchronize int4 resident maxsim");
+
+    py::array_t<float> output({batch, num_docs_});
+    check_cuda(cudaMemcpy(output.mutable_data(), d_scores_, output_bytes, cudaMemcpyDeviceToHost), "copy int4 output to host");
+    return output;
+  }
+
+  py::tuple topk_batch(py::array_t<float, py::array::c_style | py::array::forcecast> query, int k) {
+    if (k < 1 || k > num_docs_) {
+      throw std::invalid_argument("k must be between 1 and num_docs");
+    }
+    if (query.ndim() != 3) {
+      throw std::invalid_argument("query must have shape [batch, query_tokens, dim]");
+    }
+    if (query.shape(2) != dim_) {
+      throw std::invalid_argument("query shape does not match dim");
+    }
+
+    const int batch = static_cast<int>(query.shape(0));
+    const int query_tokens = static_cast<int>(query.shape(1));
+    const std::size_t query_bytes = static_cast<std::size_t>(query.size()) * sizeof(float);
+    const std::size_t scores_bytes = static_cast<std::size_t>(batch) * static_cast<std::size_t>(num_docs_) * sizeof(float);
+    const std::size_t top_scores_bytes = static_cast<std::size_t>(batch) * static_cast<std::size_t>(k) * sizeof(float);
+    const std::size_t top_indices_bytes = static_cast<std::size_t>(batch) * static_cast<std::size_t>(k) * sizeof(std::int64_t);
+
+    ensure_device_capacity(&d_query_, &query_capacity_, query_bytes, "cudaMalloc int4 topk query cache");
+    ensure_device_capacity(&d_scores_, &scores_capacity_, scores_bytes, "cudaMalloc int4 full score cache");
+    ensure_device_capacity(&d_top_scores_, &top_scores_capacity_, top_scores_bytes, "cudaMalloc int4 top score cache");
+    ensure_device_capacity(&d_top_indices_, &top_indices_capacity_, top_indices_bytes, "cudaMalloc int4 top index cache");
+    check_cuda(cudaMemcpy(d_query_, query.data(), query_bytes, cudaMemcpyHostToDevice), "copy int4 topk query to device");
+
+    launch_maxsim(d_query_, d_scores_, batch, query_tokens, "int4 topk maxsim");
+    topk_kernel<<<batch, kTopkThreads>>>(d_scores_, d_top_scores_, d_top_indices_, batch, num_docs_, k);
+    check_cuda(cudaGetLastError(), "launch int4 topk selection kernel");
+    check_cuda(cudaDeviceSynchronize(), "synchronize int4 topk kernels");
+
+    py::array_t<float> output_scores({batch, k});
+    py::array_t<std::int64_t> output_indices({batch, k});
+    check_cuda(cudaMemcpy(output_scores.mutable_data(), d_top_scores_, top_scores_bytes, cudaMemcpyDeviceToHost), "copy int4 top scores to host");
+    check_cuda(cudaMemcpy(output_indices.mutable_data(), d_top_indices_, top_indices_bytes, cudaMemcpyDeviceToHost), "copy int4 top indices to host");
+    return py::make_tuple(output_scores, output_indices);
+  }
+
+  int dim() const { return dim_; }
+  int num_docs() const { return num_docs_; }
+  float scale() const { return scale_; }
+  std::size_t packed_size() const { return packed_size_; }
+
+ private:
+  template <typename T>
+  void ensure_device_capacity(T** ptr, std::size_t* capacity, std::size_t bytes, const char* action) {
+    if (bytes <= *capacity) {
+      return;
+    }
+    T* next = nullptr;
+    check_cuda(cudaMalloc(reinterpret_cast<void**>(&next), bytes), action);
+    cudaFree(*ptr);
+    *ptr = next;
+    *capacity = bytes;
+  }
+
+  void launch_maxsim(float* d_query, float* d_output, int batch, int query_tokens, const char* label) {
+    dim3 grid(num_docs_, batch);
+    maxsim_int4_batched_kernel<<<grid, kBlockThreads>>>(d_query, d_packed_, d_offsets_, d_output, batch, query_tokens, dim_, num_docs_, scale_);
+    check_cuda(cudaGetLastError(), (std::string("launch ") + label + " kernel").c_str());
+  }
+
+  std::uint8_t* d_packed_ = nullptr;
+  std::int64_t* d_offsets_ = nullptr;
+  float* d_query_ = nullptr;
+  float* d_scores_ = nullptr;
+  float* d_top_scores_ = nullptr;
+  std::int64_t* d_top_indices_ = nullptr;
+  int dim_ = 0;
+  int num_docs_ = 0;
+  float scale_ = 1.0F;
+  std::size_t packed_size_ = 0;
+  std::size_t offsets_size_ = 0;
+  std::size_t query_capacity_ = 0;
+  std::size_t scores_capacity_ = 0;
+  std::size_t top_scores_capacity_ = 0;
+  std::size_t top_indices_capacity_ = 0;
+};
+
 py::array_t<float> maxsim_cuda(
     py::array_t<float, py::array::c_style | py::array::forcecast> query,
     py::array_t<std::uint8_t, py::array::c_style | py::array::forcecast> packed,
@@ -986,6 +1216,18 @@ PYBIND11_MODULE(_bitmax_cuda, m) {
       .def_property_readonly("has_scale_vector", &CudaPackedDocs::has_scale_vector)
       .def_property_readonly("scale_vector_size", &CudaPackedDocs::scale_vector_size)
       .def_property_readonly("maxsim_kernel_variant", &CudaPackedDocs::maxsim_kernel_variant);
+  py::class_<CudaInt4PackedDocs>(m, "CudaInt4PackedDocs")
+      .def(py::init<
+	           py::array_t<std::uint8_t, py::array::c_style | py::array::forcecast>,
+	           py::array_t<std::int64_t, py::array::c_style | py::array::forcecast>,
+	           int,
+	           float>())
+      .def("maxsim_batch", &CudaInt4PackedDocs::maxsim_batch, py::arg("query"))
+      .def("topk_batch", &CudaInt4PackedDocs::topk_batch, py::arg("query"), py::arg("k"))
+      .def_property_readonly("dim", &CudaInt4PackedDocs::dim)
+      .def_property_readonly("num_docs", &CudaInt4PackedDocs::num_docs)
+      .def_property_readonly("scale", &CudaInt4PackedDocs::scale)
+      .def_property_readonly("packed_size", &CudaInt4PackedDocs::packed_size);
   m.def("maxsim_cuda", &maxsim_cuda, py::arg("query"), py::arg("packed"), py::arg("offsets"), py::arg("dim"), py::arg("scale") = 1.0F);
   m.def("maxsim_cuda_batch", &maxsim_cuda_batch, py::arg("query"), py::arg("packed"), py::arg("offsets"), py::arg("dim"), py::arg("scale") = 1.0F);
 }

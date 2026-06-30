@@ -8,6 +8,14 @@
 
 **Tech Stack:** Python, NumPy, PyTorch CUDA, pybind11/CUDA extension, pytest, VAST.
 
+**Execution Outcome:** Persistence and fused centroid top-k are implemented and
+committed. This follow-up adds an experimental CUDA int4 backend, exposes q40
+centroid calibration as a benchmark variant, and measures both on the 256
+ViDoRe/ColQwen2 slice. q40 is the best measured 32x-ish variant on that slice
+but remains opt-in because zero-threshold centroid was better on the 64 slice.
+Int4 nearly matches dense fp16 NDCG at 8x fp32 compression but is slower than
+binary, so it is documented as an accuracy-first experimental backend.
+
 ---
 
 ## File Structure

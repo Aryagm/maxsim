@@ -10,8 +10,8 @@ accuracy over maximum compression.
 ## Priorities
 
 1. Keep raw binary signs as the stable default.
-2. Promote zero-threshold per-dimension centroid calibration as the primary
-   experimental 32x accuracy path.
+2. Promote per-dimension centroid calibration as the primary experimental 32x
+   accuracy path, with zero-threshold and q40 variants measured separately.
 3. Optimize centroid top-k for CUDA by moving query weighting onto the resident
    GPU path.
 4. Add persistence helpers so packed corpora and centroid calibration can be
@@ -67,8 +67,8 @@ compression or int4 for higher quality.
 - Larger VAST retrieval artifacts report latency, storage reduction, recall@1,
   recall@10, MRR@10, and NDCG@10 for dense, raw binary, centroid binary, and
   int4 reference/backend when available.
-- Binary centroid remains the recommended high-compression path unless a
-  same-storage calibration variant beats it on larger slices.
+- Binary centroid remains an opt-in high-compression path unless one
+  same-storage calibration variant wins consistently across larger slices.
 - Int4 is documented as an accuracy/storage option, not as a replacement for
   32x binary.
 

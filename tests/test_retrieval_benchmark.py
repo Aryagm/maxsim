@@ -131,8 +131,10 @@ def test_embedding_stage_can_emit_experimental_pareto_variants(tmp_path):
         "ternary_threshold",
         "binary_token_scale",
         "binary_group_scale_16",
+        "int4_symmetric_per_tensor",
         "binary_calibrated_threshold",
         "binary_dim_centroid_zero",
+        "binary_dim_centroid_q40",
         "binary_dim_centroid_lloyd",
     }
     assert set(rows) == expected
@@ -235,12 +237,14 @@ def test_embedding_stage_centroid_binary_can_restore_dimension_magnitude_ranking
         "embeddings-smoke",
         input_path=input_path,
         output_path=tmp_path / "centroid.json",
-        variants="binary,binary_dim_centroid_zero,binary_dim_centroid_lloyd",
+        variants="binary,binary_dim_centroid_zero,binary_dim_centroid_q40,binary_dim_centroid_lloyd",
     )
 
     rows = {row["implementation"]: row for row in result["results"]}
     assert rows["dense_fp16_baseline"]["recall_at_1"] == pytest.approx(1.0)
     assert rows["bitmax_binary"]["recall_at_1"] == pytest.approx(0.0)
     assert rows["binary_dim_centroid_zero"]["recall_at_1"] == pytest.approx(1.0)
+    assert rows["binary_dim_centroid_q40"]["recall_at_1"] == pytest.approx(1.0)
     assert rows["binary_dim_centroid_lloyd"]["recall_at_1"] == pytest.approx(1.0)
     assert rows["binary_dim_centroid_zero"]["doc_storage_bytes"] == rows["bitmax_binary"]["doc_storage_bytes"] + 3 * 8 * 4
+    assert rows["binary_dim_centroid_q40"]["doc_storage_bytes"] == rows["binary_dim_centroid_zero"]["doc_storage_bytes"]

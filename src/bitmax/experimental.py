@@ -42,6 +42,25 @@ class TernaryPackedDocs:
         return int(self.values.shape[0] * self.dim * 2 // 8)
 
 
+@dataclass(frozen=True)
+class Int4PackedDocs:
+    data: object
+    values: np.ndarray | None
+    doc_offsets: np.ndarray
+    dim: int
+    num_docs: int
+    scale: float
+    device: str = "cpu"
+
+    @property
+    def storage_bytes(self) -> int:
+        if self.device == "cuda" and self.values is not None:
+            return int(self.values.shape[0] * self.dim // 2)
+        if not isinstance(self.data, np.ndarray):
+            return 0
+        return int(self.data.size)
+
+
 def fit_dim_centroid_calibration(
     doc_embeddings,
     *,
@@ -190,6 +209,132 @@ def pack_ternary(doc_embeddings, doc_offsets=None, *, threshold: float = 0.0) ->
     )
 
 
+def pack_int4_symmetric(doc_embeddings, doc_offsets=None, *, scale: float | None = None) -> Int4PackedDocs:
+    docs = _as_numpy(doc_embeddings).astype(np.float32, copy=False)
+    if docs.ndim != 2:
+        raise ValueError("doc_embeddings must have shape [num_doc_tokens, dim]")
+    if docs.shape[1] % 2 != 0:
+        raise ValueError("dim must be divisible by 2 for int4 packing")
+    if docs.shape[1] % 8 != 0:
+        raise ValueError("dim must be divisible by 8")
+
+    if scale is None:
+        max_abs = float(np.max(np.abs(docs))) if docs.size else 0.0
+        scale_value = 1.0 if max_abs == 0.0 else max_abs / 7.0
+    else:
+        scale_value = float(scale)
+        if scale_value <= 0.0:
+            raise ValueError("scale must be > 0")
+
+    values = np.clip(np.rint(docs / scale_value), -7, 7).astype(np.int8)
+    packed = _pack_signed_int4_values(values)
+    offsets = _normalize_offsets(doc_offsets, docs.shape[0])
+    return Int4PackedDocs(
+        data=packed,
+        values=np.ascontiguousarray(values, dtype=np.int8),
+        doc_offsets=offsets,
+        dim=int(docs.shape[1]),
+        num_docs=int(offsets.shape[0] - 1),
+        scale=scale_value,
+        device="cpu",
+    )
+
+
+def int4_to_device(packed: Int4PackedDocs, device: str = "cuda") -> Int4PackedDocs:
+    if device != "cuda":
+        raise ValueError("device must be 'cuda'")
+    _validate_int4_packed(packed)
+    if packed.device == "cuda":
+        return packed
+    try:
+        from bitmax import _bitmax_cuda
+    except ImportError as exc:  # pragma: no cover - depends on CUDA build
+        raise NotImplementedError("CUDA int4 packed docs are not available in this build") from exc
+    if not hasattr(_bitmax_cuda, "CudaInt4PackedDocs"):
+        raise NotImplementedError("CUDA int4 packed docs are not available in this build")
+    handle = _bitmax_cuda.CudaInt4PackedDocs(
+        np.ascontiguousarray(packed.data, dtype=np.uint8),
+        np.ascontiguousarray(packed.doc_offsets, dtype=np.int64),
+        packed.dim,
+        float(packed.scale),
+    )
+    return Int4PackedDocs(
+        data=handle,
+        values=packed.values,
+        doc_offsets=packed.doc_offsets.copy(),
+        dim=packed.dim,
+        num_docs=packed.num_docs,
+        scale=packed.scale,
+        device="cuda",
+    )
+
+
+def int4_maxsim(query_tokens, packed: Int4PackedDocs, *, device="auto") -> np.ndarray:
+    _validate_int4_packed(packed)
+    effective_device = "cuda" if device == "auto" and packed.device == "cuda" else device
+    if effective_device == "cuda" and packed.device == "cpu":
+        return int4_maxsim(query_tokens, int4_to_device(packed), device="cuda")
+
+    query = _as_numpy(query_tokens)
+    if query.ndim == 2:
+        batches = query[np.newaxis, :, :]
+        squeeze = True
+    elif query.ndim == 3:
+        batches = query
+        squeeze = False
+    else:
+        raise ValueError("query_tokens must have shape [query_tokens, dim] or [batch, query_tokens, dim]")
+    if batches.shape[2] != packed.dim:
+        raise ValueError(f"query dim={batches.shape[2]} does not match packed dim={packed.dim}")
+
+    query_float = batches.astype(np.float32, copy=False)
+    if effective_device == "cuda" and packed.device == "cuda":
+        result = packed.data.maxsim_batch(np.ascontiguousarray(query_float, dtype=np.float32))
+        return result[0] if squeeze else result
+    if packed.device == "cuda":
+        raise NotImplementedError("CPU scoring for CUDA Int4PackedDocs is not implemented")
+
+    docs = packed.values.astype(np.float32, copy=False) * np.float32(packed.scale)
+    result = np.empty((query_float.shape[0], packed.num_docs), dtype=np.float32)
+    for batch_idx, query_matrix in enumerate(query_float):
+        for doc_idx, (start, end) in enumerate(zip(packed.doc_offsets[:-1], packed.doc_offsets[1:])):
+            doc = docs[int(start) : int(end)]
+            result[batch_idx, doc_idx] = np.max(query_matrix @ doc.T, axis=1).sum(dtype=np.float32) if doc.shape[0] else 0.0
+    return result[0] if squeeze else result
+
+
+def topk_int4_maxsim(query_tokens, packed: Int4PackedDocs, k: int, *, device="auto"):
+    if k < 1:
+        raise ValueError("k must be >= 1")
+    if k > packed.num_docs:
+        raise ValueError("k cannot exceed packed.num_docs")
+    _validate_int4_packed(packed)
+    effective_device = "cuda" if device == "auto" and packed.device == "cuda" else device
+    if effective_device == "cuda" and packed.device == "cpu":
+        return topk_int4_maxsim(query_tokens, int4_to_device(packed), k, device="cuda")
+    if effective_device == "cuda" and packed.device == "cuda" and hasattr(packed.data, "topk_batch"):
+        query = _as_numpy(query_tokens).astype(np.float32, copy=False)
+        if query.ndim == 2:
+            batches = query[np.newaxis, :, :]
+            squeeze = True
+        elif query.ndim == 3:
+            batches = query
+            squeeze = False
+        else:
+            raise ValueError("query_tokens must have shape [query_tokens, dim] or [batch, query_tokens, dim]")
+        if batches.shape[2] != packed.dim:
+            raise ValueError(f"query dim={batches.shape[2]} does not match packed dim={packed.dim}")
+        scores, indices = packed.data.topk_batch(np.ascontiguousarray(batches, dtype=np.float32), int(k))
+        return (scores[0], indices[0]) if squeeze else (scores, indices)
+
+    scores = int4_maxsim(query_tokens, packed, device=device)
+    if scores.ndim == 1:
+        indices = _topk_indices(scores, k)
+        return scores[indices], indices
+    all_indices = np.stack([_topk_indices(row, k) for row in scores], axis=0)
+    return np.take_along_axis(scores, all_indices, axis=1), all_indices
+
+
 def ternary_maxsim(query_tokens, packed: TernaryPackedDocs) -> np.ndarray:
     _validate_ternary_packed(packed)
     query = _as_numpy(query_tokens)
@@ -256,6 +401,14 @@ def _mean_or_fallback(values: np.ndarray, fallback: np.float32) -> np.float32:
     return np.float32(np.mean(values, dtype=np.float64))
 
 
+def _pack_signed_int4_values(values: np.ndarray) -> np.ndarray:
+    packed = np.zeros((values.shape[0], values.shape[1] // 2), dtype=np.uint8)
+    low = (values[:, 0::2].astype(np.int16) & 0x0F).astype(np.uint8)
+    high = (values[:, 1::2].astype(np.int16) & 0x0F).astype(np.uint8)
+    packed[:, :] = low | (high << 4)
+    return np.ascontiguousarray(packed, dtype=np.uint8)
+
+
 def _restore_dim_centroid_scores(scores, query_tokens, calibration: DimCentroidCalibration) -> np.ndarray:
     score_values = _as_numpy(scores).astype(np.float32, copy=False)
     query = _as_numpy(query_tokens).astype(np.float32, copy=False)
@@ -292,3 +445,21 @@ def _validate_ternary_packed(packed: TernaryPackedDocs) -> None:
         raise ValueError("packed.values must have shape [num_doc_tokens, dim]")
     if packed.doc_offsets.ndim != 1 or packed.doc_offsets.shape[0] != packed.num_docs + 1:
         raise ValueError("packed.doc_offsets must have shape [num_docs + 1]")
+
+
+def _validate_int4_packed(packed: Int4PackedDocs) -> None:
+    if not isinstance(packed, Int4PackedDocs):
+        raise TypeError("packed must be an Int4PackedDocs instance")
+    if packed.values is not None and (packed.values.ndim != 2 or packed.values.shape[1] != packed.dim):
+        raise ValueError("packed.values must have shape [num_doc_tokens, dim]")
+    if packed.device == "cpu":
+        if packed.values is None:
+            raise ValueError("CPU Int4PackedDocs must include values")
+        if not isinstance(packed.data, np.ndarray) or packed.data.ndim != 2 or packed.data.shape != (packed.values.shape[0], packed.dim // 2):
+            raise ValueError("packed.data must have shape [num_doc_tokens, dim / 2]")
+    elif packed.device != "cuda":
+        raise ValueError("packed.device must be 'cpu' or 'cuda'")
+    if packed.doc_offsets.ndim != 1 or packed.doc_offsets.shape[0] != packed.num_docs + 1:
+        raise ValueError("packed.doc_offsets must have shape [num_docs + 1]")
+    if packed.scale <= 0.0:
+        raise ValueError("packed.scale must be > 0")
