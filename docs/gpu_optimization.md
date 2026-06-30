@@ -376,3 +376,58 @@ Streaming top-k status:
 - Same-host timing showed it is slower than resident score-matrix top-k because
   per-document global top-k locking dominates.
 - It is intentionally not routed by the public Python API.
+
+## 2026-06-30: Real ViDoRe Accuracy/Size Frontier
+
+Change: added an experimental one-bit per-dimension centroid calibration path
+under `bitmax.experimental`. It still stores document tokens as packed signs,
+but learns positive/negative centroids per dimension and transforms query
+vectors before calling the existing CUDA binary MaxSim kernel. This is a
+library-level accuracy knob, not a database/index feature.
+
+Measured on the persistent project-owned VAST RTX 4090 worker with
+`vidore/docvqa_test_subsampled:test:64` embedded by
+`vidore/colqwen2-v1.0-hf`:
+
+| implementation | total doc bytes | fp32 doc reduction | latency | recall@1 | recall@10 | MRR@10 | NDCG@10 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| dense fp16 baseline | 12,290,048 | 2.0x | 264.42 ms | 0.688 | 0.891 | 0.756 | 0.788 |
+| raw binary CUDA | 768,128 | 32.0x | 1.91 ms | 0.609 | 0.875 | 0.695 | 0.737 |
+| binary + doc scale CUDA | 768,384 | 32.0x | 1.90 ms | 0.625 | 0.844 | 0.705 | 0.738 |
+| ternary threshold CPU reference | 1,536,256 | 16.0x | 942.75 ms | 0.609 | 0.875 | 0.700 | 0.742 |
+| binary + per-dim centroids CUDA | 769,664 | 31.9x | 1.91 ms | 0.609 | 0.891 | 0.700 | 0.746 |
+| binary + Lloyd centroids CUDA | 769,664 | 31.9x | 1.90 ms | 0.641 | 0.812 | 0.695 | 0.723 |
+
+Artifacts:
+
+- `benchmark-results/retrieval-docvqa-colqwen2-limit64-centroid-api-r5.json`
+- `benchmark-results/retrieval-docvqa-colqwen2-limit64-centroid-threshold-sweep.json`
+- `benchmark-results/retrieval-docvqa-colqwen2-limit64-quant-quality-sweep.json`
+
+Decision:
+
+1. Promote zero-threshold per-dimension centroids as an experimental
+   GPU-first path. It improved NDCG@10 from 0.737 to 0.746 and recovered dense
+   recall@10 while keeping effectively the same 32x fp32 document compression
+   and the same CUDA binary kernel latency.
+2. Do not promote median/quantile threshold-only packing. The threshold sweep
+   showed zero-threshold centroids were best; median and quantile thresholds
+   reduced NDCG on this slice.
+3. Do not write a per-token/group-scale GPU kernel yet. Those variants were
+   worse than raw binary on NDCG@10 and used more storage.
+4. Ternary is not currently Pareto-optimal: it used 2x the binary storage and
+   was lower-quality than centroid binary on this real slice.
+
+Reference quality frontier from the same slice:
+
+| reference format | fp32 doc reduction | recall@1 | recall@10 | MRR@10 | NDCG@10 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| uint8 affine per-dim docs | 4.0x | 0.688 | 0.891 | 0.757 | 0.789 |
+| int4 symmetric per-tensor docs | 8.0x | 0.656 | 0.875 | 0.737 | 0.771 |
+| binary + per-dim centroids | 31.9x | 0.609 | 0.891 | 0.700 | 0.746 |
+| int2 symmetric per-token docs | 14.2x | 0.594 | 0.812 | 0.678 | 0.711 |
+
+The int8/int4 rows are quality-reference paths, not custom optimized kernels.
+They define the next GPU research targets: int4 may be the better accuracy
+option when 8x compression is acceptable, while centroid binary is the best
+measured high-compression path so far.

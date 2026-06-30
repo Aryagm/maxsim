@@ -132,6 +132,8 @@ def test_embedding_stage_can_emit_experimental_pareto_variants(tmp_path):
         "binary_token_scale",
         "binary_group_scale_16",
         "binary_calibrated_threshold",
+        "binary_dim_centroid_zero",
+        "binary_dim_centroid_lloyd",
     }
     assert set(rows) == expected
     for name in expected - {"dense_fp16_baseline"}:
@@ -207,3 +209,38 @@ def test_cuda_retrieval_prepares_resident_packed_docs_once(monkeypatch):
     assert _prepare_bitmax_packed(packed, "cuda") == "cuda-packed"
     assert calls == [(packed, "cuda")]
     assert _prepare_bitmax_packed(packed, "auto") is packed
+
+
+@pytest.mark.benchmark_smoke
+def test_embedding_stage_centroid_binary_can_restore_dimension_magnitude_ranking(tmp_path):
+    input_path = tmp_path / "centroid-binary-retrieval.npz"
+    doc_embeddings = np.array(
+        [
+            [-1, 1, -1, -1, -1, -1, -1, -1],
+            [10, -1, -1, -1, -1, -1, -1, -1],
+        ],
+        dtype=np.float32,
+    )
+    query = np.array([[[1, 1, 0, 0, 0, 0, 0, 0]]], dtype=np.float32)
+    np.savez(
+        input_path,
+        doc_embeddings=doc_embeddings,
+        doc_offsets=np.array([0, 1, 2], dtype=np.int64),
+        query_embeddings=query,
+        qrels=np.array([[0, 1]], dtype=np.float32),
+        dataset_name=np.array("centroid-binary"),
+    )
+
+    result = run_stage(
+        "embeddings-smoke",
+        input_path=input_path,
+        output_path=tmp_path / "centroid.json",
+        variants="binary,binary_dim_centroid_zero,binary_dim_centroid_lloyd",
+    )
+
+    rows = {row["implementation"]: row for row in result["results"]}
+    assert rows["dense_fp16_baseline"]["recall_at_1"] == pytest.approx(1.0)
+    assert rows["bitmax_binary"]["recall_at_1"] == pytest.approx(0.0)
+    assert rows["binary_dim_centroid_zero"]["recall_at_1"] == pytest.approx(1.0)
+    assert rows["binary_dim_centroid_lloyd"]["recall_at_1"] == pytest.approx(1.0)
+    assert rows["binary_dim_centroid_zero"]["doc_storage_bytes"] == rows["bitmax_binary"]["doc_storage_bytes"] + 3 * 8 * 4

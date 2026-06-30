@@ -81,8 +81,22 @@ Those rows report recall/MRR/NDCG, top-k agreement with dense fp16 MaxSim,
 latency, speedup, and document-memory compression.
 
 Experimental Pareto variants can be measured with `--variants all`. Those rows
-include ternary documents, per-token scale, grouped scale, and calibrated
-threshold references; they are benchmark probes, not stable public kernels.
+include ternary documents, per-token scale, grouped scale, calibrated threshold
+references, and per-dimension centroid-calibrated binary docs. Most are
+benchmark probes, not stable public kernels. The centroid path is exposed under
+`bitmax.experimental` because it reuses the existing one-bit CUDA scorer:
+
+```python
+from bitmax.experimental import (
+    dim_centroid_maxsim,
+    fit_dim_centroid_calibration,
+    pack_dim_centroid_signs,
+)
+
+calibration = fit_dim_centroid_calibration(docs)
+packed, calibration = pack_dim_centroid_signs(docs, doc_offsets, calibration=calibration)
+scores = dim_centroid_maxsim(query, packed, calibration)
+```
 
 CUDA top-k kernel experiments are available on CUDA workers:
 
@@ -95,6 +109,11 @@ On a project-owned VAST RTX 4090, the dim128 int8-query LUT path measured
 `0.463 ms` median latency on the blog-style 33 x 1000 x 786 x 128 top-k shape
 with 12,576 bytes/doc, versus `0.723 ms` for torch fp32 dense top-k on the same
 worker.
+
+On `vidore/docvqa_test_subsampled:test:64` with ColQwen2 embeddings, raw binary
+CUDA measured `0.737` NDCG@10 at 32x fp32 document compression. Experimental
+per-dimension centroid binary measured `0.746` NDCG@10 and matched dense
+recall@10 at effectively the same 32x compression and about `1.91 ms` latency.
 
 ## VAST
 

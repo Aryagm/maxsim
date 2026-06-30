@@ -10,7 +10,13 @@ from typing import Any
 import numpy as np
 
 import bitmax
-from bitmax.experimental import pack_ternary, ternary_maxsim
+from bitmax.experimental import (
+    fit_dim_centroid_calibration,
+    pack_dim_centroid_signs,
+    pack_ternary,
+    ternary_maxsim,
+    transform_query_dim_centroids,
+)
 
 try:
     import torch as _torch
@@ -435,6 +441,34 @@ def _variant_scores(dataset: RetrievalEmbeddings, variant: str, native_device: s
         scores, latency = _time_call(lambda: _threshold_sign_scores(dataset, thresholds), repeat=repeat)
         return scores, latency, {"implementation": "binary_calibrated_threshold", "variant": variant, "requested_device": "cpu_reference"}, _packed_doc_bytes(dataset)
 
+    if variant == "binary_dim_centroid_zero":
+        calibration = fit_dim_centroid_calibration(dataset.doc_embeddings)
+        centroid_dataset, scoring_packed = _prepare_centroid_binary(dataset, calibration, native_device)
+        scores, latency = _time_call(lambda: _bitmax_scores(centroid_dataset, scoring_packed, device=native_device), repeat=repeat)
+        return (
+            scores,
+            latency,
+            {"implementation": "binary_dim_centroid_zero", "variant": variant, "requested_device": native_device, "calibration": "per_dim_zero_threshold_centroids"},
+            _packed_doc_bytes(dataset) + calibration.metadata_bytes,
+        )
+
+    if variant == "binary_dim_centroid_lloyd":
+        calibration = fit_dim_centroid_calibration(dataset.doc_embeddings, lloyd_iterations=4)
+        centroid_dataset, scoring_packed = _prepare_centroid_binary(dataset, calibration, native_device)
+        scores, latency = _time_call(lambda: _bitmax_scores(centroid_dataset, scoring_packed, device=native_device), repeat=repeat)
+        return (
+            scores,
+            latency,
+            {
+                "implementation": "binary_dim_centroid_lloyd",
+                "variant": variant,
+                "requested_device": native_device,
+                "calibration": "per_dim_lloyd_threshold_centroids",
+                "lloyd_iterations": 4,
+            },
+            _packed_doc_bytes(dataset) + calibration.metadata_bytes,
+        )
+
     raise ValueError(f"unknown retrieval variant: {variant}")
 
 
@@ -473,6 +507,8 @@ def _normalize_variants(variants: str | tuple[str, ...] | list[str] | None) -> t
         "binary_token_scale",
         "binary_group_scale_16",
         "binary_calibrated_threshold",
+        "binary_dim_centroid_zero",
+        "binary_dim_centroid_lloyd",
     )
     if isinstance(variants, str):
         if variants == "all":
@@ -523,6 +559,22 @@ def _group_scaled_sign_scores(dataset: RetrievalEmbeddings, group_scales: np.nda
 def _threshold_sign_scores(dataset: RetrievalEmbeddings, thresholds: np.ndarray) -> np.ndarray:
     signs = np.where(dataset.doc_embeddings >= thresholds[np.newaxis, :], 1.0, -1.0).astype(np.float32)
     return _dense_scores_with_docs(dataset, signs)
+
+
+def _prepare_centroid_binary(dataset: RetrievalEmbeddings, calibration, native_device: str):
+    adjusted_queries = tuple(transform_query_dim_centroids(query, calibration) for query in dataset.query_embeddings)
+    packed, _ = pack_dim_centroid_signs(dataset.doc_embeddings, dataset.doc_offsets, calibration=calibration)
+    scoring_packed = _prepare_bitmax_packed(packed, native_device)
+    centroid_dataset = RetrievalEmbeddings(
+        name=dataset.name,
+        query_embeddings=adjusted_queries,
+        doc_embeddings=dataset.doc_embeddings,
+        doc_offsets=dataset.doc_offsets,
+        qrels=dataset.qrels,
+        query_ids=dataset.query_ids,
+        doc_ids=dataset.doc_ids,
+    )
+    return centroid_dataset, scoring_packed
 
 
 def _dense_scores_with_docs(dataset: RetrievalEmbeddings, docs: np.ndarray) -> np.ndarray:

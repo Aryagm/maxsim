@@ -174,7 +174,9 @@ python benchmarks/run_retrieval.py \
 ```
 
 The variant set is `binary`, `binary_doc_scale`, `ternary_threshold`,
-`binary_token_scale`, `binary_group_scale_16`, and
-`binary_calibrated_threshold`. Ternary and token/group/threshold variants are
-benchmark-only reference implementations until a retrieval-quality win justifies
-moving them into public kernels.
+`binary_token_scale`, `binary_group_scale_16`, `binary_calibrated_threshold`,
+`binary_dim_centroid_zero`, and `binary_dim_centroid_lloyd`. Ternary and
+token/group/threshold variants are benchmark-only reference implementations
+until a retrieval-quality win justifies moving them into public kernels.
+`binary_dim_centroid_zero` uses `bitmax.experimental` helpers and reuses the
+existing CUDA binary MaxSim path with query preprocessing.

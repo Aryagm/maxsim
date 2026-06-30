@@ -8,6 +8,8 @@
 
 **Tech Stack:** Python, NumPy, PyTorch CUDA, transformers/datasets for embedding generation, C++/CUDA pybind kernels, pytest, VAST.
 
+**Execution Outcome:** The same-size median/quantile threshold variants did not win on the real slice. The promoted variant is instead zero-threshold per-dimension centroid calibration under `bitmax.experimental`, which keeps one-bit document storage and reuses the existing CUDA binary kernel through query preprocessing. Per-token/group scale and ternary were not promoted because they were worse on the measured accuracy/storage Pareto frontier.
+
 ---
 
 ## File Structure
