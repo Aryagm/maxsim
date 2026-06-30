@@ -1,6 +1,8 @@
+from types import SimpleNamespace
+
 import numpy as np
 
-from benchmarks.build_vidore_embeddings import _deduplicate_doc_rows, _flatten_ragged
+from benchmarks.build_vidore_embeddings import _deduplicate_doc_rows, _flatten_ragged, _ignore_missing_torchvision_nms_fake_registration
 
 
 def test_deduplicate_doc_rows_maps_multiple_queries_to_one_document():
@@ -34,3 +36,20 @@ def test_flatten_ragged_embeddings_records_offsets():
     assert offsets.tolist() == [0, 2, 5]
     assert flat.dtype == np.float32
 
+
+def test_torchvision_nms_fake_registration_patch_ignores_only_missing_nms():
+    class FakeLibrary:
+        def register_fake(self, op_name, *args, **kwargs):
+            def decorator(fn):
+                raise RuntimeError(f"operator {op_name} does not exist")
+
+            return decorator
+
+    fake_torch = SimpleNamespace(library=FakeLibrary())
+
+    _ignore_missing_torchvision_nms_fake_registration(fake_torch)
+
+    def fn():
+        return None
+
+    assert fake_torch.library.register_fake("torchvision::nms")(fn) is fn

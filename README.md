@@ -169,6 +169,18 @@ Against open-source baselines on the same slice:
 
 Artifact: `benchmark-results/open-source-comparison-expanded-limit256-cuda.json`.
 
+Across four ViDoRe datasets at limit64 with frozen ColQwen2 embeddings:
+
+| implementation | datasets | fp32 doc reduction | mean latency | recall@10 | NDCG@10 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| dense fp16 CUDA | 4 | 2.00x | 110.94 ms | 0.949 | 0.885 |
+| fast-plaid CUDA | 4 | 3.22x | 185.65 ms | 0.945 | 0.882 |
+| SDK int4 CUDA | 4 | 8.00x | 33.05 ms | 0.949 | 0.879 |
+| SDK binary CUDA | 4 | 32.00x | 9.19 ms | 0.941 | 0.865 |
+| FAISS pooled GPU | 4 | 707.80x | 0.27 ms | 0.809 | 0.650 |
+
+Artifact: `benchmark-results/multidataset-limit64-slow-summary.json`.
+
 ## VAST
 
 VAST helpers live under `ops/vast/` and are also exposed as `bitmax-vast` after

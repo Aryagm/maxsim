@@ -65,19 +65,20 @@ def _load_vidore_rows(*, dataset_name: str, config: str, split: str, limit: int)
 def _load_retrieval_model(model_name: str):
     try:
         import torch
-        from transformers import ColPaliForRetrieval, ColPaliProcessor, ColQwen2ForRetrieval, ColQwen2Processor
+        _ignore_missing_torchvision_nms_fake_registration(torch)
+        import transformers
         from transformers.utils.import_utils import is_flash_attn_2_available
     except ImportError as exc:  # pragma: no cover - optional dependency
         raise RuntimeError("build_vidore_embeddings requires torch and transformers with ColVision retrieval models") from exc
 
     model_key = model_name.lower()
     if "colqwen" in model_key:
-        model_cls = ColQwen2ForRetrieval
-        processor_cls = ColQwen2Processor
+        model_cls = transformers.ColQwen2ForRetrieval
+        processor_cls = transformers.ColQwen2Processor
         kwargs = {"attn_implementation": "flash_attention_2" if is_flash_attn_2_available() else "sdpa"}
     elif "colpali" in model_key:
-        model_cls = ColPaliForRetrieval
-        processor_cls = ColPaliProcessor
+        model_cls = transformers.ColPaliForRetrieval
+        processor_cls = transformers.ColPaliProcessor
         kwargs = {}
     else:
         raise ValueError("model_name must reference a ColQwen2 or ColPali retrieval checkpoint")
@@ -87,6 +88,28 @@ def _load_retrieval_model(model_name: str):
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
     return model, processor
+
+
+def _ignore_missing_torchvision_nms_fake_registration(torch_module) -> None:
+    register_fake = getattr(getattr(torch_module, "library", None), "register_fake", None)
+    if register_fake is None or getattr(register_fake, "_bitmax_safe_register", False):
+        return
+
+    def safe_register_fake(op_name, *args, **kwargs):
+        decorator = register_fake(op_name, *args, **kwargs)
+
+        def wrapped(fn):
+            try:
+                return decorator(fn)
+            except RuntimeError as exc:
+                if op_name == "torchvision::nms" and "does not exist" in str(exc):
+                    return fn
+                raise
+
+        return wrapped
+
+    safe_register_fake._bitmax_safe_register = True
+    torch_module.library.register_fake = safe_register_fake
 
 
 def _encode_batches(model, processor, values: list[Any], *, batch_size: int, modality: str) -> list[np.ndarray]:

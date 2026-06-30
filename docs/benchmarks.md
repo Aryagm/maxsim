@@ -290,3 +290,59 @@ but its search latency is near dense fp16 here. On this slice, `bitmax` is the
 better compressed CUDA Pareto point for late-interaction reranking: it keeps
 most of dense MaxSim quality while reducing document storage by 8-32x and
 improving CUDA latency by 13-31x.
+
+## Multi-Dataset Proof
+
+Use the multi-dataset runner to test the same fixed public model embeddings
+across multiple ViDoRe datasets. The runner is cache-first: it uses existing
+`.npz` embedding files when present, and only creates missing embeddings when
+`--build-missing` is passed.
+
+```bash
+python -m benchmarks.run_multidataset \
+  --datasets docvqa,infovqa,arxivqa,tabfquad \
+  --embedding-dir benchmark-results \
+  --output-dir benchmark-results/multidataset-limit64 \
+  --summary-output benchmark-results/multidataset-limit64-summary.json \
+  --model vidore/colqwen2-v1.0-hf \
+  --limit 64 \
+  --device cuda \
+  --repeat 3 \
+  --allow-unavailable \
+  --build-missing
+```
+
+Default runnable implementations are dense fp16, FAISS pooled, cuVS pooled,
+fast-plaid, and the bitmax binary/q40/int4 SDK modes. Add `--include-slow` to
+also run FAISS token-candidate dense rerank and Qdrant exact multivector.
+
+This benchmark keeps `bitmax` scoped to the compression/scoring layer. The
+embeddings are produced by the frozen public model named in `--model`, cached as
+artifacts, and reused by every backend.
+
+Measured on the persistent project-owned VAST RTX 4090 worker across
+`docvqa`, `infovqa`, `arxivqa`, and `tabfquad` with limit64 cached ColQwen2
+embeddings:
+
+| implementation | datasets | fp32 doc reduction | mean latency | geomean speedup vs dense | recall@10 | NDCG@10 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| dense fp16 CUDA | 4 | 2.00x | 110.94 ms | 1.00x | 0.949 | 0.885 |
+| FAISS token candidates + dense rerank | 4 | 0.67x | 226.32 ms | 0.49x | 0.949 | 0.885 |
+| Qdrant in-memory multivector | 4 | 1.00x | 1853.51 ms | 0.06x | 0.949 | 0.885 |
+| fast-plaid CUDA | 4 | 3.22x | 185.65 ms | 0.60x | 0.945 | 0.882 |
+| bitmax int4 CUDA | 4 | 8.00x | 33.05 ms | 3.44x | 0.949 | 0.879 |
+| bitmax binary CUDA | 4 | 32.00x | 9.19 ms | 12.19x | 0.941 | 0.865 |
+| bitmax binary_q40 CUDA | 4 | 31.92x | 10.56 ms | 10.57x | 0.930 | 0.858 |
+| FAISS GPU mean-pool flat IP | 4 | 707.80x | 0.27 ms | 402.15x | 0.809 | 0.650 |
+| cuVS GPU mean-pool flat IP | 4 | 707.80x | 0.54 ms | 204.22x | 0.809 | 0.650 |
+
+Artifact: `benchmark-results/multidataset-limit64-slow-summary.json`.
+
+Interpretation: the multi-dataset result supports the same product framing as
+the single-slice result. Single-vector pooled baselines are tiny and fast but
+lose retrieval quality. Full dense/exact multivector paths preserve quality but
+are larger and slower. `bitmax` int4 is the most conservative compressed option
+in this run, averaging only `-0.005` NDCG@10 versus dense while reducing storage
+by 8x and improving latency by 3.44x. `bitmax` binary is the aggressive option,
+reducing storage by 32x and improving latency by 12.19x with an average
+`-0.020` NDCG@10 delta.
