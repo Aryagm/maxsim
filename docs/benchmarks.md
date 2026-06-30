@@ -223,3 +223,51 @@ Measured on the persistent project-owned VAST RTX 4090 worker with
 | SDK int4 CUDA | 8.00x | 144.19 ms | 13.22x | 0.555 | 0.773 | 0.622 | 0.658 |
 
 Artifact: `benchmark-results/sdk-demo-local-search-limit256-cuda.json`.
+
+## Open-Source CUDA Comparison
+
+Use this benchmark to compare the SDK against popular open-source GPU vector
+search baselines on the same multi-vector embedding slice:
+
+```bash
+python -m pip install ".[oss-bench]"
+python -m benchmarks.compare_open_source \
+  --input benchmark-results/vidore-docvqa-colqwen2-limit256.npz \
+  --device cuda \
+  --implementations dense_fp16,faiss_pooled,faiss_token_dense_rerank,bitmax_binary,bitmax_binary_q40,bitmax_int4 \
+  --repeat 5 \
+  --faiss-token-topn 512 \
+  --output benchmark-results/open-source-comparison-limit256-cuda.json
+```
+
+The FAISS rows are intentionally labeled by what they do:
+
+- `faiss_gpu_mean_pool_flat_ip`: popular single-vector FAISS GPU flat inner
+  product search over mean-pooled document/query vectors. This is extremely
+  fast and tiny, but it is not late interaction.
+- `faiss_gpu_token_candidates_dense_rerank`: FAISS GPU flat search over all
+  document token vectors to produce candidate documents, followed by dense fp16
+  MaxSim reranking of those candidates. This recovers dense quality on the
+  measured slice but stores full token vectors and is slower than dense fp16.
+
+Measured on the persistent project-owned VAST RTX 4090 worker with
+`vidore/docvqa_test_subsampled:test:256` embedded by `vidore/colqwen2-v1.0-hf`:
+
+| implementation | kind | fp32 doc reduction | latency | speedup vs dense fp16 | recall@10 | NDCG@10 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| dense fp16 CUDA | dense baseline | 2.00x | 1856.26 ms | 1.00x | 0.777 | 0.660 |
+| FAISS GPU mean-pool flat IP | open-source first-stage | 752.21x | 0.74 ms | 2514.41x | 0.414 | 0.290 |
+| FAISS GPU token candidates + dense rerank | open-source token baseline | 0.67x | 2784.23 ms | 0.67x | 0.777 | 0.660 |
+| bitmax binary CUDA | bitmax SDK | 32.00x | 58.97 ms | 31.48x | 0.754 | 0.649 |
+| bitmax binary_q40 CUDA | bitmax SDK | 31.98x | 64.24 ms | 28.90x | 0.762 | 0.652 |
+| bitmax int4 CUDA | bitmax SDK | 8.00x | 144.14 ms | 12.88x | 0.773 | 0.658 |
+
+Artifact: `benchmark-results/open-source-comparison-limit256-cuda.json`.
+
+Interpretation: FAISS mean-pooling wins raw speed and storage but loses most of
+the multi-vector quality. FAISS token-candidate retrieval plus dense MaxSim
+recovers dense quality but is slower than dense fp16 and uses more document
+memory because it stores full token vectors. On this slice, `bitmax` is the
+better production Pareto point for late-interaction reranking: it keeps most of
+dense MaxSim quality while reducing document storage by 8-32x and improving
+CUDA latency by 13-31x.
