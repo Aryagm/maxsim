@@ -28,7 +28,7 @@
 - Create: `tests/test_blog_baseline.py`
 - Modify: `docs/benchmarks.md`
 
-- [ ] **Step 1: Write the failing schema/correctness test**
+- [x] **Step 1: Write the failing schema/correctness test**
 
 ```python
 def test_blog_binary_benchmark_emits_blog_shape_storage_and_correct_scores(tmp_path):
@@ -43,13 +43,13 @@ def test_blog_binary_benchmark_emits_blog_shape_storage_and_correct_scores(tmp_p
     assert rows["int8_query_binary_docs"]["max_abs_delta_vs_reference"] == 0.0
 ```
 
-- [ ] **Step 2: Verify the test fails**
+- [x] **Step 2: Verify the test fails**
 
 Run: `.venv/bin/python -m pytest -q tests/test_blog_baseline.py`
 
 Expected: FAIL with `ModuleNotFoundError: No module named 'benchmarks.blog_baseline'`.
 
-- [ ] **Step 3: Implement the benchmark runner**
+- [x] **Step 3: Implement the benchmark runner**
 
 Create `benchmarks/blog_baseline.py` with:
 
@@ -70,19 +70,19 @@ def run_benchmark(stage="smoke", output_path=None, repeat=None):
 
 The actual implementation must include concrete row dictionaries with `latency_ms`, `doc_storage_bytes_per_doc`, `speedup_vs_fp32`, and `max_abs_delta_vs_reference`.
 
-- [ ] **Step 4: Verify the focused test passes**
+- [x] **Step 4: Verify the focused test passes**
 
 Run: `.venv/bin/python -m pytest -q tests/test_blog_baseline.py`
 
 Expected: PASS.
 
-- [ ] **Step 5: Run local smoke benchmark**
+- [x] **Step 5: Run local smoke benchmark**
 
 Run: `.venv/bin/python -m benchmarks.blog_baseline --stage smoke --output benchmark-results/blog-baseline-smoke.json`
 
 Expected: JSON artifact with fp32, int8 x int8, int8 x binary, and binary x binary rows.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add benchmarks/blog_baseline.py tests/test_blog_baseline.py docs/benchmarks.md
@@ -113,6 +113,9 @@ Add a CUDA kernel that assigns one block to each `(batch, doc)` score, computes 
 
 - [ ] **Step 4: Verify CUDA correctness**
 
+Blocked: local `nvcc` is unavailable, and the latest ledger-owned VAST worker
+attempts failed before SSH/CUDA validation.
+
 Run remotely: `python -m pytest -q -m cuda tests/test_cuda_extension.py`
 
 Expected: all CUDA tests pass.
@@ -134,11 +137,11 @@ Use streaming top-k only for shapes where same-host VAST timing shows lower late
 - Modify: `tests/test_cuda_extension.py`
 - Modify: `benchmarks/blog_baseline.py`
 
-- [ ] **Step 1: Write failing reference tests**
+- [x] **Step 1: Write failing reference tests**
 
 Add tests for `pack_ternary(docs, threshold=...)` where values with `abs(x) <= threshold` score as zero, positive values score as `+1`, and negative values score as `-1`.
 
-- [ ] **Step 2: Implement Python reference pack/scoring**
+- [x] **Step 2: Implement Python reference pack/scoring**
 
 Add an experimental `TernaryPackedDocs` dataclass and `pack_ternary` behind `bitmax.experimental` or a private benchmark module so the v0.1 public API does not expand prematurely.
 
@@ -150,6 +153,10 @@ Compare CUDA ternary MaxSim scores to Python reference for small and dim128 fixt
 
 Compare binary 1-bit docs to ternary 2-bit docs on smoke, blog-shape synthetic, and ViDoRe slices. Report storage as 32x vs 16x fp32.
 
+Partial: smoke, blog-shape synthetic, and local targeted retrieval fixtures are
+measured. The ViDoRe rerun is blocked because the embedding `.npz` is not
+present locally and would need to be regenerated.
+
 ## Task 4: Magnitude Restoration Variants
 
 **Files:**
@@ -158,19 +165,23 @@ Compare binary 1-bit docs to ternary 2-bit docs on smoke, blog-shape synthetic, 
 - Modify: `src/bitmax/_api.py` only for variants that pass benchmark gates.
 - Modify: `docs/gpu_optimization.md`
 
-- [ ] **Step 1: Add per-token scale benchmark variant**
+- [x] **Step 1: Add per-token scale benchmark variant**
 
 Compute one `mean(abs(token))` scale per doc token and apply it in the reference scorer. Gate public/kernel work on retrieval quality improvement.
 
-- [ ] **Step 2: Add grouped scale benchmark variant**
+- [x] **Step 2: Add grouped scale benchmark variant**
 
 Compute one scale per 16 or 32 dimensions and compare storage, latency, and NDCG.
 
-- [ ] **Step 3: Add calibrated threshold benchmark variant**
+- [x] **Step 3: Add calibrated threshold benchmark variant**
 
 Estimate per-dimension sign thresholds on a calibration split and apply the thresholds to held-out docs.
 
-- [ ] **Step 4: Promote only measured wins**
+Current implementation is a median-threshold reference probe over the benchmark
+docs. A true train/held-out calibration split remains future work before
+promotion.
+
+- [x] **Step 4: Promote only measured wins**
 
 Only move a variant into `src/bitmax/_api.py` or CUDA if it improves recall/NDCG enough to justify added storage/latency.
 
@@ -180,7 +191,7 @@ Only move a variant into `src/bitmax/_api.py` or CUDA if it improves recall/NDCG
 - Modify: `docs/gpu_optimization.md`
 - Modify: `docs/benchmarks.md`
 
-- [ ] **Step 1: Run local smoke**
+- [x] **Step 1: Run local smoke**
 
 Run: `.venv/bin/python -m pytest -q && .venv/bin/python -m benchmarks.blog_baseline --stage smoke`
 
@@ -188,7 +199,11 @@ Run: `.venv/bin/python -m pytest -q && .venv/bin/python -m benchmarks.blog_basel
 
 Run CUDA tests and benchmark scripts on one ledger-owned VAST instance. Destroy only the instance ID recorded in `.vast/bitmax-instances.jsonl` with a live `bitmax-v0-` label.
 
-- [ ] **Step 3: Report Pareto rows**
+Blocked for this pass by failed VAST container/SSH/proxy validation. The VAST
+account has running non-project instances, but no reachable `bitmax-v0-` worker
+is available.
+
+- [x] **Step 3: Report Pareto rows**
 
 Document each variant with latency, storage bytes/doc, recall@1, recall@10, MRR@10, NDCG@10, score delta, and artifact path.
 

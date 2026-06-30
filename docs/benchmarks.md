@@ -22,7 +22,8 @@ score checksum, and correctness delta against the Python reference.
 
 Use this benchmark to reproduce the blogpost-style late-interaction scoring
 shape before changing kernels or formats. It compares fp32 query/docs,
-int8 query/docs, int8 query with binary docs, and binary query/docs.
+int8 query/docs, int8 query with binary docs, binary query/docs, and
+experimental ternary/scale/threshold variants.
 
 ```bash
 python -m benchmarks.blog_baseline \
@@ -38,6 +39,19 @@ Rows report `latency_ms`, `doc_storage_bytes_per_doc`,
 `speedup_vs_fp32`, and `max_abs_delta_vs_reference`. The `blog-shape`
 stage uses the blogpost scoring dimensions: 33 query tokens, 1000
 documents, 786 document tokens per document, and 128 dimensions.
+
+The current local reference artifact is
+`benchmark-results/blog-baseline-blog-shape-variants.json`. It is a CPU/NumPy
+signal benchmark, not an optimized kernel result. On that artifact:
+
+- raw int8-query x binary-doc keeps the blog storage target at 12,576 bytes/doc
+  (32x smaller than fp32) but is slower than local fp32 in the reference path.
+- per-token scale lowers max score delta from 2741.61 to 1222.35 while keeping
+  15,720 bytes/doc (25.6x smaller than fp32).
+- grouped scale lowers max score delta to 1179.47 at 37,728 bytes/doc
+  (10.7x smaller than fp32).
+- ternary docs use 25,152 bytes/doc (16x smaller than fp32) but did not reduce
+  score delta on this synthetic distribution.
 
 ## Schema v2
 
@@ -128,3 +142,23 @@ restoration. `doc` scale can improve ranking when magnitude differences between
 documents carry useful signal. CUDA-resident packed docs upload stored doc-scale
 vectors and apply them inside resident `maxsim` and fused `topk_maxsim`; CPU and
 host-packed CUDA paths apply vector scales after native scoring.
+
+Pass `--variants all` to emit the experimental Pareto rows:
+
+```bash
+python benchmarks/run_retrieval.py \
+  --stage fixture-smoke \
+  --variants all \
+  --output benchmark-results/retrieval-fixture-pareto-variants.json
+python benchmarks/run_retrieval.py \
+  --stage embeddings-smoke \
+  --input benchmark-results/doc-scale-targeted.npz \
+  --variants all \
+  --output benchmark-results/retrieval-doc-scale-targeted-pareto-variants.json
+```
+
+The variant set is `binary`, `binary_doc_scale`, `ternary_threshold`,
+`binary_token_scale`, `binary_group_scale_16`, and
+`binary_calibrated_threshold`. Ternary and token/group/threshold variants are
+benchmark-only reference implementations until a retrieval-quality win justifies
+moving them into public kernels.

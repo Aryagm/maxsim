@@ -111,6 +111,38 @@ def test_embedding_stage_doc_scale_can_restore_dense_ranking(tmp_path):
     assert scaled_row["topk_agreement_vs_dense_at_10"] == pytest.approx(1.0)
 
 
+@pytest.mark.benchmark_smoke
+def test_embedding_stage_can_emit_experimental_pareto_variants(tmp_path):
+    input_path = tmp_path / "pareto-retrieval.npz"
+    _write_tiny_embedding_file(input_path)
+
+    result = run_stage(
+        "embeddings-smoke",
+        input_path=input_path,
+        output_path=tmp_path / "pareto.json",
+        variants="all",
+    )
+
+    rows = {row["implementation"]: row for row in result["results"]}
+    expected = {
+        "dense_fp16_baseline",
+        "bitmax_binary",
+        "bitmax_binary_doc_scale",
+        "ternary_threshold",
+        "binary_token_scale",
+        "binary_group_scale_16",
+        "binary_calibrated_threshold",
+    }
+    assert set(rows) == expected
+    for name in expected - {"dense_fp16_baseline"}:
+        assert rows[name]["recall_at_1"] >= 0.0
+        assert rows[name]["recall_at_10"] >= 0.0
+        assert rows[name]["mrr_at_10"] >= 0.0
+        assert rows[name]["ndcg_at_10"] >= 0.0
+        assert rows[name]["doc_storage_bytes"] > 0
+        assert rows[name]["speedup_vs_dense_fp16"] > 0.0
+
+
 def test_retrieval_stage_rejects_missing_qrels(tmp_path):
     input_path = tmp_path / "missing-qrels.npz"
     np.savez(

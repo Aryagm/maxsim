@@ -15,15 +15,32 @@ def test_blog_binary_benchmark_emits_storage_speed_and_correctness(tmp_path):
     assert result["stage"] == "smoke"
 
     rows = {row["implementation"]: row for row in result["results"]}
-    assert set(rows) == {"fp32_query_fp32_docs", "int8_query_int8_docs", "int8_query_binary_docs", "binary_query_binary_docs"}
+    assert set(rows) == {
+        "fp32_query_fp32_docs",
+        "int8_query_int8_docs",
+        "int8_query_binary_docs",
+        "binary_query_binary_docs",
+        "int8_query_ternary_docs",
+        "int8_query_binary_docs_token_scale",
+        "int8_query_binary_docs_group_scale_16",
+        "int8_query_binary_docs_calibrated_threshold",
+    }
 
     assert rows["fp32_query_fp32_docs"]["doc_storage_bytes_per_doc"] == 4 * 16 * 4
     assert rows["int8_query_int8_docs"]["doc_storage_bytes_per_doc"] == 4 * 16
     assert rows["int8_query_binary_docs"]["doc_storage_bytes_per_doc"] == 4 * 16 // 8
     assert rows["binary_query_binary_docs"]["doc_storage_bytes_per_doc"] == 4 * 16 // 8
+    assert rows["int8_query_ternary_docs"]["doc_storage_bytes_per_doc"] == 4 * 16 * 2 // 8
+    assert rows["int8_query_binary_docs_token_scale"]["doc_storage_bytes_per_doc"] == 4 * 16 // 8 + 4 * 4
+    assert rows["int8_query_binary_docs_group_scale_16"]["doc_storage_bytes_per_doc"] == 4 * 16 // 8 + 4 * 1 * 4
+    assert rows["int8_query_binary_docs_calibrated_threshold"]["doc_storage_bytes_per_doc"] == 4 * 16 // 8
 
     assert rows["fp32_query_fp32_docs"]["max_abs_delta_vs_reference"] == 0.0
     assert rows["int8_query_binary_docs"]["formula"] == "sum(max(q_int8 @ sign(doc).T))"
+    assert rows["int8_query_ternary_docs"]["formula"] == "sum(max(q_int8 @ ternary(doc).T))"
+    assert rows["int8_query_binary_docs_token_scale"]["formula"] == "sum(max(q_int8 @ (sign(doc) * token_scale).T))"
+    assert rows["int8_query_binary_docs_group_scale_16"]["formula"] == "sum(max(q_int8 @ (sign(doc) * group_scale_16).T))"
+    assert rows["int8_query_binary_docs_calibrated_threshold"]["formula"] == "sum(max(q_int8 @ threshold_sign(doc).T))"
     assert np.isfinite(rows["int8_query_binary_docs"]["latency_ms"])
     assert np.isfinite(rows["int8_query_binary_docs"]["speedup_vs_fp32"])
 
@@ -46,3 +63,6 @@ def test_blog_stage_matches_blog_shape_metadata(tmp_path):
     assert rows["fp32_query_fp32_docs"]["doc_storage_bytes_per_doc"] == 786 * 128 * 4
     assert rows["int8_query_int8_docs"]["doc_storage_bytes_per_doc"] == 786 * 128
     assert rows["int8_query_binary_docs"]["doc_storage_bytes_per_doc"] == 786 * 128 // 8
+    assert rows["int8_query_ternary_docs"]["doc_storage_bytes_per_doc"] == 786 * 128 * 2 // 8
+    assert rows["int8_query_binary_docs_token_scale"]["doc_storage_bytes_per_doc"] == 786 * 128 // 8 + 786 * 4
+    assert rows["int8_query_binary_docs_group_scale_16"]["doc_storage_bytes_per_doc"] == 786 * 128 // 8 + 786 * 8 * 4

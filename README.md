@@ -80,6 +80,10 @@ python benchmarks/run_retrieval.py \
 Those rows report recall/MRR/NDCG, top-k agreement with dense fp16 MaxSim,
 latency, speedup, and document-memory compression.
 
+Experimental Pareto variants can be measured with `--variants all`. Those rows
+include ternary documents, per-token scale, grouped scale, and calibrated
+threshold references; they are benchmark probes, not stable public kernels.
+
 ## VAST
 
 VAST helpers live under `ops/vast/` and are also exposed as `bitmax-vast` after

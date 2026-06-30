@@ -10,6 +10,7 @@ from typing import Any
 import numpy as np
 
 import bitmax
+from bitmax.experimental import pack_ternary, ternary_maxsim
 
 try:
     import torch as _torch
@@ -49,6 +50,7 @@ def run_stage(
     top_k: int = 10,
     repeat: int | None = None,
     scale: str | float | None = None,
+    variants: str | tuple[str, ...] | list[str] | None = None,
 ) -> dict[str, Any]:
     _check_stage_gate(stage, gate_path)
     dataset = _load_stage_dataset(stage, input_path)
@@ -60,14 +62,6 @@ def run_stage(
         lambda: _dense_fp16_scores(dataset, device=baseline_device),
         repeat=actual_repeat,
     )
-    packed = bitmax.pack_signs(dataset.doc_embeddings, dataset.doc_offsets, scale=scale)
-    scoring_packed = _prepare_bitmax_packed(packed, native_device)
-    bitmax_name = "bitmax_cuda" if native_device == "cuda" else "bitmax_native"
-    bitmax_scores, bitmax_latency = _time_call(
-        lambda: _bitmax_scores(dataset, scoring_packed, device=native_device),
-        repeat=actual_repeat,
-    )
-
     dense_row = _result_row(
         stage,
         dataset,
@@ -80,21 +74,51 @@ def run_stage(
         dense_reference_scores=dense_scores,
         metadata={"baseline_device": baseline_device, "formula": "dense_fp16_maxsim"},
     )
-    bitmax_row = _result_row(
-        stage,
-        dataset,
-        bitmax_name,
-        bitmax_latency,
-        bitmax_scores,
-        dataset.qrels,
-        top_k=top_k,
-        doc_storage_bytes=_packed_doc_bytes(dataset),
-        dense_reference_scores=dense_scores,
-        baseline_row=dense_row,
-        metadata={"requested_device": native_device, "scale": "none" if scale is None else scale},
-    )
 
-    rows = [dense_row, bitmax_row]
+    requested_variants = _normalize_variants(variants)
+    if requested_variants is None:
+        packed = bitmax.pack_signs(dataset.doc_embeddings, dataset.doc_offsets, scale=scale)
+        scoring_packed = _prepare_bitmax_packed(packed, native_device)
+        bitmax_name = "bitmax_cuda" if native_device == "cuda" else "bitmax_native"
+        bitmax_scores, bitmax_latency = _time_call(
+            lambda: _bitmax_scores(dataset, scoring_packed, device=native_device),
+            repeat=actual_repeat,
+        )
+        rows = [
+            dense_row,
+            _result_row(
+                stage,
+                dataset,
+                bitmax_name,
+                bitmax_latency,
+                bitmax_scores,
+                dataset.qrels,
+                top_k=top_k,
+                doc_storage_bytes=_packed_doc_bytes(dataset),
+                dense_reference_scores=dense_scores,
+                baseline_row=dense_row,
+                metadata={"requested_device": native_device, "scale": "none" if scale is None else scale},
+            ),
+        ]
+    else:
+        rows = [dense_row]
+        for variant in requested_variants:
+            variant_scores, variant_latency, metadata, doc_storage_bytes = _variant_scores(dataset, variant, native_device, actual_repeat)
+            rows.append(
+                _result_row(
+                    stage,
+                    dataset,
+                    metadata.pop("implementation"),
+                    variant_latency,
+                    variant_scores,
+                    dataset.qrels,
+                    top_k=top_k,
+                    doc_storage_bytes=doc_storage_bytes,
+                    dense_reference_scores=dense_scores,
+                    baseline_row=dense_row,
+                    metadata=metadata,
+                )
+            )
     result = {
         "schema_version": 1,
         "benchmark": "retrieval",
@@ -372,6 +396,48 @@ def _bitmax_scores(dataset: RetrievalEmbeddings, packed: bitmax.PackedDocs, *, d
     return np.stack(rows, axis=0).astype(np.float32, copy=False)
 
 
+def _variant_scores(dataset: RetrievalEmbeddings, variant: str, native_device: str, repeat: int):
+    if variant == "binary":
+        packed = bitmax.pack_signs(dataset.doc_embeddings, dataset.doc_offsets)
+        scoring_packed = _prepare_bitmax_packed(packed, native_device)
+        scores, latency = _time_call(lambda: _bitmax_scores(dataset, scoring_packed, device=native_device), repeat=repeat)
+        return scores, latency, {"implementation": "bitmax_binary", "variant": variant, "requested_device": native_device}, _packed_doc_bytes(dataset)
+
+    if variant == "binary_doc_scale":
+        packed = bitmax.pack_signs(dataset.doc_embeddings, dataset.doc_offsets, scale="doc")
+        scoring_packed = _prepare_bitmax_packed(packed, native_device)
+        scores, latency = _time_call(lambda: _bitmax_scores(dataset, scoring_packed, device=native_device), repeat=repeat)
+        return scores, latency, {"implementation": "bitmax_binary_doc_scale", "variant": variant, "requested_device": native_device}, _packed_doc_bytes(dataset) + dataset.num_docs * 4
+
+    if variant == "ternary_threshold":
+        packed = pack_ternary(dataset.doc_embeddings, dataset.doc_offsets, threshold=_ternary_threshold(dataset.doc_embeddings))
+        scores, latency = _time_call(lambda: _ternary_scores(dataset, packed), repeat=repeat)
+        return scores, latency, {"implementation": "ternary_threshold", "variant": variant, "requested_device": "cpu_reference"}, _ternary_doc_bytes(dataset)
+
+    if variant == "binary_token_scale":
+        token_scales = _token_scales(dataset.doc_embeddings)
+        scores, latency = _time_call(lambda: _scaled_sign_scores(dataset, token_scales), repeat=repeat)
+        return scores, latency, {"implementation": "binary_token_scale", "variant": variant, "requested_device": "cpu_reference"}, _packed_doc_bytes(dataset) + dataset.doc_embeddings.shape[0] * 4
+
+    if variant == "binary_group_scale_16":
+        group_size = min(16, dataset.dim)
+        group_scales = _group_scales(dataset.doc_embeddings, group_size)
+        scores, latency = _time_call(lambda: _group_scaled_sign_scores(dataset, group_scales, group_size), repeat=repeat)
+        return (
+            scores,
+            latency,
+            {"implementation": "binary_group_scale_16", "variant": variant, "requested_device": "cpu_reference", "effective_group_size": group_size},
+            _packed_doc_bytes(dataset) + dataset.doc_embeddings.shape[0] * (dataset.dim // group_size) * 4,
+        )
+
+    if variant == "binary_calibrated_threshold":
+        thresholds = _calibrated_thresholds(dataset.doc_embeddings)
+        scores, latency = _time_call(lambda: _threshold_sign_scores(dataset, thresholds), repeat=repeat)
+        return scores, latency, {"implementation": "binary_calibrated_threshold", "variant": variant, "requested_device": "cpu_reference"}, _packed_doc_bytes(dataset)
+
+    raise ValueError(f"unknown retrieval variant: {variant}")
+
+
 def _prepare_bitmax_packed(packed: bitmax.PackedDocs, device: str):
     return bitmax.to_device(packed, "cuda") if device == "cuda" else packed
 
@@ -395,6 +461,85 @@ def _uniform_doc_tokens(doc_offsets: np.ndarray) -> int | None:
     if lengths.size == 0 or np.any(lengths != lengths[0]):
         return None
     return int(lengths[0])
+
+
+def _normalize_variants(variants: str | tuple[str, ...] | list[str] | None) -> tuple[str, ...] | None:
+    if variants is None:
+        return None
+    all_variants = (
+        "binary",
+        "binary_doc_scale",
+        "ternary_threshold",
+        "binary_token_scale",
+        "binary_group_scale_16",
+        "binary_calibrated_threshold",
+    )
+    if isinstance(variants, str):
+        if variants == "all":
+            return all_variants
+        values = tuple(value.strip() for value in variants.split(",") if value.strip())
+    else:
+        values = tuple(str(value) for value in variants)
+    unknown = sorted(set(values) - set(all_variants))
+    if unknown:
+        raise ValueError(f"unknown retrieval variants: {unknown}")
+    return values
+
+
+def _ternary_scores(dataset: RetrievalEmbeddings, packed) -> np.ndarray:
+    rows = [ternary_maxsim(query, packed) for query in dataset.query_embeddings]
+    return np.stack(rows, axis=0).astype(np.float32, copy=False)
+
+
+def _ternary_threshold(docs: np.ndarray) -> float:
+    return float(np.percentile(np.abs(docs), 25.0))
+
+
+def _token_scales(docs: np.ndarray) -> np.ndarray:
+    return np.mean(np.abs(docs), axis=1, dtype=np.float64).astype(np.float32)
+
+
+def _group_scales(docs: np.ndarray, group_size: int) -> np.ndarray:
+    if docs.shape[1] % group_size != 0:
+        raise ValueError("dim must be divisible by group_size")
+    return np.mean(np.abs(docs.reshape(docs.shape[0], docs.shape[1] // group_size, group_size)), axis=2, dtype=np.float64).astype(np.float32)
+
+
+def _calibrated_thresholds(docs: np.ndarray) -> np.ndarray:
+    return np.median(docs, axis=0).astype(np.float32)
+
+
+def _scaled_sign_scores(dataset: RetrievalEmbeddings, token_scales: np.ndarray) -> np.ndarray:
+    signs = np.where(dataset.doc_embeddings >= 0, 1.0, -1.0).astype(np.float32)
+    return _dense_scores_with_docs(dataset, signs * token_scales[:, np.newaxis].astype(np.float32, copy=False))
+
+
+def _group_scaled_sign_scores(dataset: RetrievalEmbeddings, group_scales: np.ndarray, group_size: int) -> np.ndarray:
+    signs = np.where(dataset.doc_embeddings >= 0, 1.0, -1.0).astype(np.float32)
+    expanded = np.repeat(group_scales, group_size, axis=1).astype(np.float32, copy=False)
+    return _dense_scores_with_docs(dataset, signs * expanded)
+
+
+def _threshold_sign_scores(dataset: RetrievalEmbeddings, thresholds: np.ndarray) -> np.ndarray:
+    signs = np.where(dataset.doc_embeddings >= thresholds[np.newaxis, :], 1.0, -1.0).astype(np.float32)
+    return _dense_scores_with_docs(dataset, signs)
+
+
+def _dense_scores_with_docs(dataset: RetrievalEmbeddings, docs: np.ndarray) -> np.ndarray:
+    scores = np.empty((dataset.num_queries, dataset.num_docs), dtype=np.float32)
+    uniform_doc_tokens = _uniform_doc_tokens(dataset.doc_offsets)
+    for query_idx, query in enumerate(dataset.query_embeddings):
+        query_float = query.astype(np.float32, copy=False)
+        if uniform_doc_tokens is not None:
+            dots = query_float @ docs.T
+            scores[query_idx] = dots.reshape(query.shape[0], dataset.num_docs, uniform_doc_tokens).max(axis=2).sum(axis=0, dtype=np.float32)
+            continue
+        for doc_idx in range(dataset.num_docs):
+            start = int(dataset.doc_offsets[doc_idx])
+            end = int(dataset.doc_offsets[doc_idx + 1])
+            doc = docs[start:end]
+            scores[query_idx, doc_idx] = np.max(query_float @ doc.T, axis=1).sum(dtype=np.float32) if doc.shape[0] else 0.0
+    return scores
 
 
 def _result_row(
@@ -514,6 +659,10 @@ def _packed_doc_bytes(dataset: RetrievalEmbeddings) -> int:
     return int(dataset.doc_embeddings.shape[0]) * (int(dataset.dim) // 8)
 
 
+def _ternary_doc_bytes(dataset: RetrievalEmbeddings) -> int:
+    return int(dataset.doc_embeddings.shape[0]) * int(dataset.dim) * 2 // 8
+
+
 def _gate_passed(rows: list[dict[str, Any]]) -> bool:
     for row in rows:
         if not np.isfinite(float(row["latency_ms"])):
@@ -533,6 +682,7 @@ def main() -> None:
     parser.add_argument("--top-k", type=int, default=10)
     parser.add_argument("--repeat", type=int, default=None)
     parser.add_argument("--scale", default=None, help="Optional bitmax scale value, 'global', or 'doc'.")
+    parser.add_argument("--variants", default=None, help="Comma-separated experimental variants, or 'all'.")
     args = parser.parse_args()
 
     scale = None if args.scale in {None, "none"} else args.scale
@@ -544,6 +694,7 @@ def main() -> None:
         top_k=args.top_k,
         repeat=args.repeat,
         scale=scale,
+        variants=args.variants,
     )
     print(json.dumps(result, indent=2, sort_keys=True))
 

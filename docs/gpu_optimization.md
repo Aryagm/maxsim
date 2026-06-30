@@ -249,15 +249,92 @@ Artifacts:
 
 The result is mixed: per-document scale improved recall@1, MRR, and NDCG
 slightly on the 64-query slice, but reduced recall@10. It should remain an
-opt-in accuracy knob until broader slices show a stable win. CUDA resident
-fused top-k currently falls back to full-score host top-k for vector scales;
-that is the next kernel task if this mode proves useful.
+opt-in accuracy knob until broader slices show a stable win.
 
 Next GPU optimization hypotheses:
 
-1. Move per-document scale into `CudaPackedDocs` and fused CUDA top-k so vector
-   scales do not require host-side post-processing.
-2. Evaluate per-token or per-dimension scale variants on larger ViDoRe slices,
+1. Evaluate per-token or per-dimension scale variants on larger ViDoRe slices,
    using recall@1, recall@10, MRR, and NDCG as separate gates.
-3. Keep unscaled signs as the default until a scale mode improves the broad
+2. Keep unscaled signs as the default until a scale mode improves the broad
    quality profile without a large latency penalty.
+
+## 2026-06-30: Resident CUDA Top-K With Per-Document Scale
+
+Change: CUDA-resident `PackedDocs` upload per-document scale vectors and fused
+`topk_maxsim` now applies those scales on GPU before selecting top-k. This keeps
+scale-restored ranking on the fused CUDA path instead of materializing a full
+score matrix for host-side scale and sort.
+
+Measured on a VAST RTX 4090 instance created and destroyed by this project:
+
+| benchmark | full scores + host scale top-k | resident scale fused top-k | speedup | host bytes returned | correctness |
+| --- | ---: | ---: | ---: | ---: | --- |
+| docscale_docvqa_like_64, batch64/q23/docs64/doc750/dim128/k10 | 1.52 ms | 1.30 ms | 1.17x | 16,384 -> 7,680 | exact |
+| docscale_rerank_512, batch32/q32/docs512/doc128/dim128/k10 | 2.99 ms | 2.30 ms | 1.30x | 65,536 -> 3,840 | exact |
+| docscale_rerank_4096, batch16/q32/docs4096/doc32/dim128/k10 | 7.59 ms | 3.71 ms | 2.05x | 262,144 -> 1,920 | exact |
+
+The benchmark artifact is
+`benchmark-results/cuda-doc-scale-resident-4090.json`. Exactness here means
+score deltas were zero and top-k indices matched full-score ranking.
+
+## 2026-06-30: Experimental Pareto Variants
+
+Change: benchmark-only reference implementations now cover:
+
+- int8-query x ternary-doc scoring with a percentile threshold.
+- int8-query x binary-doc with per-token magnitude scales.
+- int8-query x binary-doc with per-16-dimension grouped scales.
+- int8-query x binary-doc with calibrated per-dimension thresholds.
+
+These are deliberately not public `bitmax` kernels yet. They are probes to find
+accuracy/storage wins before writing more CUDA.
+
+Local blog-shape reference artifact:
+`benchmark-results/blog-baseline-blog-shape-variants.json`.
+
+| variant | bytes/doc | fp32 storage reduction | latency | max score delta vs fp32 |
+| --- | ---: | ---: | ---: | ---: |
+| fp32 query/docs | 402,432 | 1.0x | 27.58 ms | 0.00 |
+| int8 query/int8 docs | 100,608 | 4.0x | 46.38 ms | 286.00 |
+| int8 query/binary docs | 12,576 | 32.0x | 111.05 ms | 2741.61 |
+| binary query/binary docs | 12,576 | 32.0x | 116.68 ms | 3936.61 |
+| int8 query/ternary docs | 25,152 | 16.0x | 46.89 ms | 2983.61 |
+| int8 query/binary docs + token scale | 15,720 | 25.6x | 89.94 ms | 1222.35 |
+| int8 query/binary docs + group scale 16 | 37,728 | 10.7x | 156.59 ms | 1179.47 |
+| int8 query/binary docs + calibrated threshold | 12,576 | 32.0x | 83.48 ms | 2741.61 |
+
+Local retrieval artifacts:
+
+- `benchmark-results/retrieval-fixture-pareto-variants.json`
+- `benchmark-results/retrieval-doc-scale-targeted-pareto-variants.json`
+
+On the targeted magnitude fixture, raw binary preserves the 32x fp32 storage
+reduction but misses the dense top-1 document because tied signs lose magnitude:
+recall@1 = 0.0, NDCG@10 = 0.631. Per-document scale, per-token scale, grouped
+scale, ternary thresholding, and calibrated thresholds all restore recall@1 and
+NDCG@10 to 1.0 on that fixture. The storage cost differs: ternary uses 16x fp32
+compression, while doc/token/group scale use 6.4x compression on the tiny
+fixture because scale metadata dominates at three documents.
+
+Interpretation:
+
+1. The clearest accuracy signal is magnitude restoration, not ternary, on the
+   synthetic/blog and targeted retrieval fixtures.
+2. Per-token and group scale cut score error by roughly 55-57% versus raw
+   int8-query x binary-doc scoring on the blog-shape fixture, but the current
+   implementations are CPU reference paths and slower than dense fp32.
+3. Calibrated thresholds did not improve synthetic score delta in the current
+   median-threshold form; it remains a candidate only if held-out retrieval
+   quality improves.
+4. Keep unscaled binary docs as the default until a real retrieval slice shows a
+   stable recall/NDCG gain after accounting for storage and GPU latency.
+
+Blocked GPU work:
+
+- A true streaming CUDA MaxSim+top-k path still needs GPU validation before it
+  can replace the current resident fused top-k path.
+- The latest project-owned VAST attempts failed before validation due container
+  startup and SSH/proxy access problems. VAST currently has running account
+  instances, but none are `bitmax-v0-` project workers.
+- Do not route the public API to streaming top-k until CUDA tests and same-host
+  timing prove it exact and faster than the resident fused top-k path.

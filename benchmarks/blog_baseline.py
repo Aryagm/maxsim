@@ -9,6 +9,7 @@ from typing import Any
 import numpy as np
 
 import bitmax
+from bitmax.experimental import pack_ternary, ternary_maxsim
 
 
 def run_benchmark(stage: str = "smoke", *, output_path: Path | str | None = None, repeat: int | None = None) -> dict[str, Any]:
@@ -70,6 +71,67 @@ def run_benchmark(stage: str = "smoke", *, output_path: Path | str | None = None
                 formula="sum(max(sign(query) @ sign(doc).T))",
                 latency_ms=binary_binary_ms,
                 scores=binary_binary_scores,
+                reference_scores=reference_scores,
+                doc_storage_bytes_per_doc=_doc_storage_bytes(spec, bits_per_dim=1),
+                baseline_latency_ms=reference_ms,
+            )
+        )
+
+        packed_ternary = pack_ternary(docs, offsets, threshold=_ternary_threshold(docs))
+        ternary_scores, ternary_ms = _time_call(lambda: ternary_maxsim(query_int8, packed_ternary), repeat=actual_repeat)
+        rows.append(
+            _row(
+                spec,
+                implementation="int8_query_ternary_docs",
+                formula="sum(max(q_int8 @ ternary(doc).T))",
+                latency_ms=ternary_ms,
+                scores=ternary_scores,
+                reference_scores=reference_scores,
+                doc_storage_bytes_per_doc=_doc_storage_bytes(spec, bits_per_dim=2),
+                baseline_latency_ms=reference_ms,
+            )
+        )
+
+        token_scales = _token_scales(docs)
+        token_scale_scores, token_scale_ms = _time_call(lambda: _scaled_sign_maxsim(query_int8, docs, offsets, token_scales), repeat=actual_repeat)
+        rows.append(
+            _row(
+                spec,
+                implementation="int8_query_binary_docs_token_scale",
+                formula="sum(max(q_int8 @ (sign(doc) * token_scale).T))",
+                latency_ms=token_scale_ms,
+                scores=token_scale_scores,
+                reference_scores=reference_scores,
+                doc_storage_bytes_per_doc=_doc_storage_bytes(spec, bits_per_dim=1) + int(spec["doc_tokens"]) * 4,
+                baseline_latency_ms=reference_ms,
+            )
+        )
+
+        group_size = 16
+        group_scales = _group_scales(docs, group_size)
+        group_scale_scores, group_scale_ms = _time_call(lambda: _group_scaled_sign_maxsim(query_int8, docs, offsets, group_scales, group_size), repeat=actual_repeat)
+        rows.append(
+            _row(
+                spec,
+                implementation="int8_query_binary_docs_group_scale_16",
+                formula="sum(max(q_int8 @ (sign(doc) * group_scale_16).T))",
+                latency_ms=group_scale_ms,
+                scores=group_scale_scores,
+                reference_scores=reference_scores,
+                doc_storage_bytes_per_doc=_doc_storage_bytes(spec, bits_per_dim=1) + int(spec["doc_tokens"]) * (int(spec["dim"]) // group_size) * 4,
+                baseline_latency_ms=reference_ms,
+            )
+        )
+
+        thresholds = _calibrated_thresholds(docs)
+        threshold_scores, threshold_ms = _time_call(lambda: _threshold_sign_maxsim(query_int8, docs, offsets, thresholds), repeat=actual_repeat)
+        rows.append(
+            _row(
+                spec,
+                implementation="int8_query_binary_docs_calibrated_threshold",
+                formula="sum(max(q_int8 @ threshold_sign(doc).T))",
+                latency_ms=threshold_ms,
+                scores=threshold_scores,
                 reference_scores=reference_scores,
                 doc_storage_bytes_per_doc=_doc_storage_bytes(spec, bits_per_dim=1),
                 baseline_latency_ms=reference_ms,
@@ -141,6 +203,42 @@ def _dense_maxsim(query: np.ndarray, docs: np.ndarray, offsets: np.ndarray) -> n
 def _quantize_int8(values: np.ndarray) -> np.ndarray:
     rounded = np.rint(values)
     return np.clip(rounded, -127, 127).astype(np.int8)
+
+
+def _ternary_threshold(docs: np.ndarray) -> float:
+    return float(np.percentile(np.abs(docs), 25.0))
+
+
+def _token_scales(docs: np.ndarray) -> np.ndarray:
+    return np.mean(np.abs(docs), axis=1, dtype=np.float64).astype(np.float32)
+
+
+def _group_scales(docs: np.ndarray, group_size: int) -> np.ndarray:
+    if docs.shape[1] % group_size != 0:
+        raise ValueError("dim must be divisible by group_size")
+    groups = docs.reshape(docs.shape[0], docs.shape[1] // group_size, group_size)
+    return np.mean(np.abs(groups), axis=2, dtype=np.float64).astype(np.float32)
+
+
+def _calibrated_thresholds(docs: np.ndarray) -> np.ndarray:
+    return np.median(docs, axis=0).astype(np.float32)
+
+
+def _scaled_sign_maxsim(query: np.ndarray, docs: np.ndarray, offsets: np.ndarray, token_scales: np.ndarray) -> np.ndarray:
+    signs = np.where(docs >= 0, 1.0, -1.0).astype(np.float32)
+    scaled_docs = signs * token_scales[:, np.newaxis].astype(np.float32, copy=False)
+    return _dense_maxsim(query, scaled_docs, offsets)
+
+
+def _group_scaled_sign_maxsim(query: np.ndarray, docs: np.ndarray, offsets: np.ndarray, group_scales: np.ndarray, group_size: int) -> np.ndarray:
+    signs = np.where(docs >= 0, 1.0, -1.0).astype(np.float32)
+    expanded_scales = np.repeat(group_scales, group_size, axis=1).astype(np.float32, copy=False)
+    return _dense_maxsim(query, signs * expanded_scales, offsets)
+
+
+def _threshold_sign_maxsim(query: np.ndarray, docs: np.ndarray, offsets: np.ndarray, thresholds: np.ndarray) -> np.ndarray:
+    signs = np.where(docs >= thresholds[np.newaxis, :], 1.0, -1.0).astype(np.float32)
+    return _dense_maxsim(query, signs, offsets)
 
 
 def _time_call(fn, *, repeat: int):
