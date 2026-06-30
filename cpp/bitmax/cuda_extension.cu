@@ -13,6 +13,7 @@ namespace py = pybind11;
 namespace {
 
 constexpr int kBlockThreads = 128;
+constexpr int kTopkThreads = 256;
 
 void check_cuda(cudaError_t status, const char* action) {
   if (status != cudaSuccess) {
@@ -77,6 +78,71 @@ __global__ void maxsim_batched_kernel(
 
   if (tid == 0) {
     output[static_cast<std::int64_t>(batch_idx) * num_docs + doc_idx] = doc_score * scale;
+  }
+}
+
+__global__ void topk_kernel(
+    const float* scores,
+    float* top_scores,
+    std::int64_t* top_indices,
+    int batch,
+    int num_docs,
+    int k) {
+  const int batch_idx = blockIdx.x;
+  const int tid = threadIdx.x;
+  __shared__ float best_scores[kTopkThreads];
+  __shared__ int best_indices[kTopkThreads];
+
+  if (batch_idx >= batch) {
+    return;
+  }
+
+  const float* row = scores + static_cast<std::int64_t>(batch_idx) * num_docs;
+  float* out_scores = top_scores + static_cast<std::int64_t>(batch_idx) * k;
+  std::int64_t* out_indices = top_indices + static_cast<std::int64_t>(batch_idx) * k;
+
+  for (int rank = 0; rank < k; ++rank) {
+    float local_score = -3.402823466e+38F;
+    int local_doc = -1;
+    for (int doc = tid; doc < num_docs; doc += blockDim.x) {
+      bool already_selected = false;
+      for (int previous = 0; previous < rank; ++previous) {
+        if (out_indices[previous] == doc) {
+          already_selected = true;
+          break;
+        }
+      }
+      if (already_selected) {
+        continue;
+      }
+
+      const float score = row[doc];
+      if (local_doc < 0 || score > local_score || (score == local_score && doc < local_doc)) {
+        local_score = score;
+        local_doc = doc;
+      }
+    }
+
+    best_scores[tid] = local_score;
+    best_indices[tid] = local_doc;
+    __syncthreads();
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+      if (tid < stride) {
+        const float other_score = best_scores[tid + stride];
+        const int other_doc = best_indices[tid + stride];
+        const int current_doc = best_indices[tid];
+        if (other_doc >= 0 && (current_doc < 0 || other_score > best_scores[tid] || (other_score == best_scores[tid] && other_doc < current_doc))) {
+          best_scores[tid] = other_score;
+          best_indices[tid] = other_doc;
+        }
+      }
+      __syncthreads();
+    }
+    if (tid == 0) {
+      out_scores[rank] = best_scores[0];
+      out_indices[rank] = static_cast<std::int64_t>(best_indices[0]);
+    }
+    __syncthreads();
   }
 }
 
@@ -214,6 +280,64 @@ class CudaPackedDocs {
     }
   }
 
+  py::tuple topk_batch(
+      py::array_t<float, py::array::c_style | py::array::forcecast> query,
+      int k,
+      float scale) const {
+    if (k < 1 || k > num_docs_) {
+      throw std::invalid_argument("k must be between 1 and num_docs");
+    }
+    if (query.ndim() != 3) {
+      throw std::invalid_argument("query must have shape [batch, query_tokens, dim]");
+    }
+    if (query.shape(2) != dim_) {
+      throw std::invalid_argument("query shape does not match dim");
+    }
+
+    const int batch = static_cast<int>(query.shape(0));
+    const int query_tokens = static_cast<int>(query.shape(1));
+    const std::size_t query_bytes = static_cast<std::size_t>(query.size()) * sizeof(float);
+    const std::size_t scores_bytes = static_cast<std::size_t>(batch) * static_cast<std::size_t>(num_docs_) * sizeof(float);
+    const std::size_t top_scores_bytes = static_cast<std::size_t>(batch) * static_cast<std::size_t>(k) * sizeof(float);
+    const std::size_t top_indices_bytes = static_cast<std::size_t>(batch) * static_cast<std::size_t>(k) * sizeof(std::int64_t);
+
+    float* d_query = nullptr;
+    float* d_scores = nullptr;
+    float* d_top_scores = nullptr;
+    std::int64_t* d_top_indices = nullptr;
+    check_cuda(cudaMalloc(&d_query, query_bytes), "cudaMalloc query");
+    check_cuda(cudaMalloc(&d_scores, scores_bytes), "cudaMalloc full scores");
+    check_cuda(cudaMalloc(&d_top_scores, top_scores_bytes), "cudaMalloc top scores");
+    check_cuda(cudaMalloc(&d_top_indices, top_indices_bytes), "cudaMalloc top indices");
+    try {
+      check_cuda(cudaMemcpy(d_query, query.data(), query_bytes, cudaMemcpyHostToDevice), "copy query to device");
+
+      dim3 grid(num_docs_, batch);
+      maxsim_batched_kernel<<<grid, kBlockThreads>>>(d_query, d_packed_, d_offsets_, d_scores, batch, query_tokens, dim_, num_docs_, scale);
+      check_cuda(cudaGetLastError(), "launch topk maxsim kernel");
+      topk_kernel<<<batch, kTopkThreads>>>(d_scores, d_top_scores, d_top_indices, batch, num_docs_, k);
+      check_cuda(cudaGetLastError(), "launch topk selection kernel");
+      check_cuda(cudaDeviceSynchronize(), "synchronize topk kernels");
+
+      py::array_t<float> output_scores({batch, k});
+      py::array_t<std::int64_t> output_indices({batch, k});
+      check_cuda(cudaMemcpy(output_scores.mutable_data(), d_top_scores, top_scores_bytes, cudaMemcpyDeviceToHost), "copy top scores to host");
+      check_cuda(cudaMemcpy(output_indices.mutable_data(), d_top_indices, top_indices_bytes, cudaMemcpyDeviceToHost), "copy top indices to host");
+
+      cudaFree(d_query);
+      cudaFree(d_scores);
+      cudaFree(d_top_scores);
+      cudaFree(d_top_indices);
+      return py::make_tuple(output_scores, output_indices);
+    } catch (...) {
+      cudaFree(d_query);
+      cudaFree(d_scores);
+      cudaFree(d_top_scores);
+      cudaFree(d_top_indices);
+      throw;
+    }
+  }
+
   int dim() const { return dim_; }
   int num_docs() const { return num_docs_; }
   std::size_t packed_size() const { return packed_size_; }
@@ -343,6 +467,7 @@ PYBIND11_MODULE(_bitmax_cuda, m) {
            py::array_t<std::int64_t, py::array::c_style | py::array::forcecast>,
            int>())
       .def("maxsim_batch", &CudaPackedDocs::maxsim_batch, py::arg("query"), py::arg("scale") = 1.0F)
+      .def("topk_batch", &CudaPackedDocs::topk_batch, py::arg("query"), py::arg("k"), py::arg("scale") = 1.0F)
       .def_property_readonly("dim", &CudaPackedDocs::dim)
       .def_property_readonly("num_docs", &CudaPackedDocs::num_docs)
       .def_property_readonly("packed_size", &CudaPackedDocs::packed_size);

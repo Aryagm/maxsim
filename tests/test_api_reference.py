@@ -210,6 +210,74 @@ def test_maxsim_auto_uses_cuda_resident_packed_docs_without_host_packed_copy():
     np.testing.assert_allclose(scores, np.array([[36.0, -36.0], [-36.0, 36.0]], dtype=np.float32))
 
 
+def test_topk_maxsim_uses_cuda_resident_fused_topk_when_available():
+    query = np.array(
+        [
+            [[1, 2, 3, 4, 5, 6, 7, 8]],
+            [[-1, -2, -3, -4, -5, -6, -7, -8]],
+        ],
+        dtype=np.float32,
+    )
+    calls = []
+
+    class FakeCudaPacked:
+        def topk_batch(self, query_arg, k_arg, scale_arg):
+            calls.append((query_arg.copy(), k_arg, scale_arg))
+            return (
+                np.array([[9.0, 7.0], [8.0, 6.0]], dtype=np.float32),
+                np.array([[3, 1], [2, 0]], dtype=np.int64),
+            )
+
+    cuda_packed = bitmax.PackedDocs(
+        data=FakeCudaPacked(),
+        doc_offsets=np.array([0, 1, 2, 3, 4], dtype=np.int64),
+        dim=8,
+        num_docs=4,
+        scale=1.5,
+        device="cuda",
+    )
+
+    scores, indices = bitmax.topk_maxsim(query, cuda_packed, k=2)
+
+    assert len(calls) == 1
+    assert calls[0][0].shape == (2, 1, 8)
+    assert calls[0][1] == 2
+    assert calls[0][2] == 1.5
+    np.testing.assert_array_equal(scores, np.array([[9.0, 7.0], [8.0, 6.0]], dtype=np.float32))
+    np.testing.assert_array_equal(indices, np.array([[3, 1], [2, 0]], dtype=np.int64))
+
+
+def test_topk_maxsim_uses_cuda_resident_fused_topk_for_large_doc_counts():
+    query = np.ones((1, 8), dtype=np.float32)
+    calls = []
+
+    class FakeCudaPacked:
+        def maxsim_batch(self, query_arg, scale_arg):
+            raise AssertionError("CUDA-resident top-k should use fused topk_batch when available")
+
+        def topk_batch(self, query_arg, k_arg, scale_arg):
+            calls.append((query_arg.copy(), k_arg, scale_arg))
+            return (
+                np.array([[511.0, 510.0, 509.0]], dtype=np.float32),
+                np.array([[511, 510, 509]], dtype=np.int64),
+            )
+
+    cuda_packed = bitmax.PackedDocs(
+        data=FakeCudaPacked(),
+        doc_offsets=np.arange(513, dtype=np.int64),
+        dim=8,
+        num_docs=512,
+        device="cuda",
+    )
+
+    scores, indices = bitmax.topk_maxsim(query, cuda_packed, k=3)
+
+    assert len(calls) == 1
+    assert calls[0][1] == 3
+    np.testing.assert_array_equal(indices, np.array([511, 510, 509], dtype=np.int64))
+    np.testing.assert_array_equal(scores, np.array([511.0, 510.0, 509.0], dtype=np.float32))
+
+
 def test_topk_maxsim_sorts_by_score_descending_then_lower_doc_id():
     docs = np.array(
         [

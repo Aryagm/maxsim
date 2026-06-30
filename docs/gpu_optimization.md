@@ -81,3 +81,41 @@ Next GPU optimization hypotheses:
    need the top documents.
 3. Start accuracy work with global and per-token scale restoration on the same
    ViDoRe/ColQwen2 benchmark slice.
+
+## 2026-06-30: CUDA-Resident Fused Top-K
+
+Change: CUDA-resident `PackedDocs` handles now expose `topk_batch`, and
+`bitmax.topk_maxsim` uses it directly when the packed docs are already resident
+on GPU. The fused path computes the full exact score matrix on device, selects
+top-k on device with deterministic lower-doc-id tie breaking, and returns only
+top-k scores and indices to the host.
+
+Root cause addressed:
+
+- Retrieval callers usually need only top-k documents, but the previous
+  CUDA-resident path copied the full `[batch, docs]` float32 score matrix back to
+  the host and sorted there.
+- The cost gets worse for reranking shapes with thousands of candidate docs,
+  where the selected top-k payload is much smaller than the full score matrix.
+
+Measured on a VAST RTX 4090 instance created and destroyed by this project:
+
+| benchmark | full scores + host top-k | fused CUDA top-k | speedup | host bytes returned | correctness |
+| --- | ---: | ---: | ---: | ---: | --- |
+| topk_docvqa_like_64, batch64/q23/docs64/doc750/dim128/k10 | 2.57 ms | 2.21 ms | 1.16x | 16,384 -> 7,680 | exact |
+| topk_rerank_512, batch32/q32/docs512/doc128/dim128/k10 | 3.22 ms | 2.30 ms | 1.40x | 65,536 -> 3,840 | exact |
+| topk_rerank_4096, batch16/q32/docs4096/doc32/dim128/k10 | 8.13 ms | 3.55 ms | 2.29x | 262,144 -> 1,920 | exact |
+
+The benchmark artifact is
+`benchmark-results/cuda-resident-topk-4090.json`. Exactness here means the
+fused top-k scores and indices matched the full score matrix plus host top-k for
+all measured rows with `score_delta=0.0`.
+
+Next GPU optimization hypotheses:
+
+1. Move query buffers and top-k output buffers into reusable CUDA handles to cut
+   repeated allocation overhead.
+2. Specialize `dim=128` and `dim=256` kernels and cache query bytes/values more
+   aggressively inside each `(query, document)` block.
+3. Start accuracy work with global, per-token, and asymmetric scale restoration
+   on the same retrieval-quality benchmark slices, then measure the latency cost.

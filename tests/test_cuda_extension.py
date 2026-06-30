@@ -68,6 +68,35 @@ def test_cuda_resident_packed_docs_match_host_cuda_scores():
     np.testing.assert_allclose(resident_scores, host_scores, rtol=0, atol=1e-5)
 
 
+@pytest.mark.cuda
+def test_cuda_resident_topk_matches_cpu_topk_and_tie_breaking():
+    pytest.importorskip("bitmax._bitmax_cuda")
+    docs = np.array(
+        [
+            [1, 1, 1, 1, 1, 1, 1, 1],
+            [1, 1, 1, 1, 1, 1, 1, 1],
+            [-1, -1, -1, -1, -1, -1, -1, -1],
+            [1, -1, 1, -1, 1, -1, 1, -1],
+        ],
+        dtype=np.float32,
+    )
+    query = np.array(
+        [
+            [[1, 1, 1, 1, 1, 1, 1, 1]],
+            [[-1, -1, -1, -1, -1, -1, -1, -1]],
+        ],
+        dtype=np.float32,
+    )
+    packed = bitmax.pack_signs(docs)
+    cuda_packed = bitmax.to_device(packed, "cuda")
+
+    cpu_scores, cpu_indices = bitmax.topk_maxsim(query, packed, k=3)
+    cuda_scores, cuda_indices = bitmax.topk_maxsim(query, cuda_packed, k=3)
+
+    np.testing.assert_allclose(cuda_scores, cpu_scores, rtol=0, atol=1e-5)
+    np.testing.assert_array_equal(cuda_indices, cpu_indices)
+
+
 def test_cuda_device_request_fails_clearly_without_cuda_build():
     try:
         import_module("bitmax._bitmax_cuda")

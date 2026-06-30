@@ -178,6 +178,23 @@ def topk_maxsim(query_tokens, packed: PackedDocs, k: int, *, scale=None, device=
         raise ValueError("k must be >= 1")
     if k > packed.num_docs:
         raise ValueError("k cannot exceed packed.num_docs")
+    _validate_packed(packed)
+    effective_device = "cuda" if device == "auto" and packed.device == "cuda" else device
+    if effective_device == "cuda" and packed.device == "cuda" and hasattr(packed.data, "topk_batch"):
+        query = _as_numpy(query_tokens)
+        if query.ndim == 2:
+            batches = query[np.newaxis, :, :]
+            squeeze = True
+        elif query.ndim == 3:
+            batches = query
+            squeeze = False
+        else:
+            raise ValueError("query_tokens must have shape [query_tokens, dim] or [batch, query_tokens, dim]")
+        if batches.shape[2] != packed.dim:
+            raise ValueError(f"query dim={batches.shape[2]} does not match packed dim={packed.dim}")
+        multiplier = _resolve_scale(scale, packed)
+        scores, indices = packed.data.topk_batch(np.ascontiguousarray(batches, dtype=np.float32), int(k), float(multiplier))
+        return (scores[0], indices[0]) if squeeze else (scores, indices)
 
     scores = maxsim(query_tokens, packed, scale=scale, device=device)
     if scores.ndim == 1:
@@ -225,8 +242,8 @@ def _validate_packed(packed: PackedDocs) -> None:
     if packed.dim % 8 != 0:
         raise ValueError("packed.dim must be divisible by 8")
     if packed.device == "cuda":
-        if not hasattr(packed.data, "maxsim_batch"):
-            raise ValueError("CUDA PackedDocs data must expose maxsim_batch")
+        if not hasattr(packed.data, "maxsim_batch") and not hasattr(packed.data, "topk_batch"):
+            raise ValueError("CUDA PackedDocs data must expose maxsim_batch or topk_batch")
         if packed.doc_offsets.ndim != 1 or packed.doc_offsets.shape[0] != packed.num_docs + 1:
             raise ValueError("packed.doc_offsets must have shape [num_docs + 1]")
         return
