@@ -188,21 +188,21 @@ def _plot_marketing_scorecard(frame, metadata, output_dir: Path, formats, sns, p
             "Accuracy",
             "NDCG@10 retained, higher is better",
             (0, 108),
-            lambda value: f"{value:.1f}%",
+            lambda value, row: f"{value:.1f}%",
         ),
         (
             "latency_p95_s",
             "Latency",
             "P95 seconds, lower is better",
             (0, 85),
-            lambda value: f"{value:.2f}s",
+            lambda value, row: _format_latency_scorecard_label(row),
         ),
         (
             "corpus_storage_mib",
             "Size",
-            "Full-corpus storage, lower is better",
+            "Full-corpus storage; parenthesis = reduction vs fp32",
             (0, 2050),
-            _format_storage_mib,
+            lambda value, row: _format_storage_scorecard_label(row),
         ),
     )
 
@@ -216,15 +216,21 @@ def _plot_marketing_scorecard(frame, metadata, output_dir: Path, formats, sns, p
             patch.set_linewidth(1.2)
             width = patch.get_width()
             label_x = width + (xlim[1] - xlim[0]) * 0.018
+            label_ha = "left"
+            label_color = "#111827"
+            if metric in {"latency_p95_s", "corpus_storage_mib"} and width > xlim[1] * 0.72:
+                label_x = width - (xlim[1] - xlim[0]) * 0.025
+                label_ha = "right"
+                label_color = "white"
             ax.text(
                 label_x,
                 patch.get_y() + patch.get_height() / 2,
-                formatter(float(width)),
+                formatter(float(width), row),
                 va="center",
-                ha="left",
+                ha=label_ha,
                 fontsize=13,
                 fontweight="bold",
-                color="#111827",
+                color=label_color,
             )
         ax.set_xlim(*xlim)
         ax.set_title(title, loc="left", fontsize=17, fontweight="bold", pad=14)
@@ -240,29 +246,29 @@ def _plot_marketing_scorecard(frame, metadata, output_dir: Path, formats, sns, p
             ax.tick_params(axis="y", labelleft=False, length=0)
 
     fig.suptitle(
-        "Near-dense quality with much lower latency and storage",
+        f"{binary.quality_retained_pct:.0f}% dense quality. "
+        f"{_format_factor(binary.speedup_vs_dense_fp16)} faster. "
+        f"{_format_factor(binary.doc_memory_compression_vs_fp32)} smaller.",
         x=0.025,
         y=0.965,
         ha="left",
-        fontsize=25,
+        fontsize=26,
         fontweight="bold",
         color="#111827",
     )
     fig.text(
         0.025,
-        0.905,
-        f"bitmax binary keeps {binary.quality_retained_pct:.1f}% of dense NDCG@10, while cutting P95 latency "
-        f"from {dense.latency_p95_s:.1f}s to {binary.latency_p95_s:.2f}s and storage from "
-        f"{_format_storage_mib(dense.corpus_storage_mib)} to {_format_storage_mib(binary.corpus_storage_mib)}.",
+        0.888,
+        "Mixed public ViDoRe/SyntheticDocQA benchmark with ColQwen2 multivector embeddings: "
+        f"{metadata['docs']:,} unique docs, {metadata['queries']} queries, RTX 4090.",
         ha="left",
-        fontsize=15,
+        fontsize=14,
         color="#374151",
     )
     fig.text(
         0.025,
         0.035,
-        "Benchmark: mixed public ViDoRe/SyntheticDocQA, ColQwen2 multivector embeddings, "
-        f"{metadata['docs']:,} unique docs, {metadata['queries']} queries on RTX 4090. "
+        "Latency speedup is vs dense fp16 MaxSim. Size reduction is vs fp32 document storage. "
         "Pooled single-vector baselines are omitted here because they lose most "
         "late-interaction quality; see the full Pareto plots for that context.",
         fontsize=10.5,
@@ -413,12 +419,32 @@ def _format_latency_ms(value: float, _: int) -> str:
     return f"{value:g}ms"
 
 
+def _format_latency_scorecard_label(row) -> str:
+    label = f"{float(row.latency_p95_s):.2f}s"
+    if str(row.implementation) == "dense_fp16_baseline":
+        return label
+    return f"{label} ({_format_factor(float(row.speedup_vs_dense_fp16))} faster)"
+
+
+def _format_storage_scorecard_label(row) -> str:
+    return (
+        f"{_format_storage_mib(float(row.corpus_storage_mib))} "
+        f"({_format_factor(float(row.doc_memory_compression_vs_fp32))} smaller)"
+    )
+
+
 def _format_storage_mib(value: float) -> str:
     if value >= 1024:
         return f"{value / 1024:.2f} GiB"
     if value >= 100:
         return f"{value:.0f} MiB"
     return f"{value:.1f} MiB"
+
+
+def _format_factor(value: float) -> str:
+    if value >= 10 or abs(value - round(value)) < 0.05:
+        return f"{value:.0f}x"
+    return f"{value:.1f}x"
 
 
 def _save(fig, base_path: Path, formats: tuple[str, ...]) -> None:
