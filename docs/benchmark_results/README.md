@@ -61,10 +61,12 @@ Generate the committed seaborn figures from the 10k unique-corpus result with:
 ```
 
 The most useful release/demo figure is the marketing scorecard: it shows
-accuracy, P95 latency, and document size in one view with direct labels. The
-first panel should stay high; the latency and size panels should be short. The
-Pareto plots remain useful as supporting evidence because they include the
-pooled single-vector baselines and expose the full tradeoff surface.
+accuracy, P95 latency, and full-corpus document storage in one view with direct
+labels. The first panel should stay high; the latency and size panels should be
+short. The chart labels the benchmark context directly: mixed public
+ViDoRe/SyntheticDocQA with ColQwen2 multivector embeddings. The Pareto plots
+remain useful as supporting evidence because they include the pooled
+single-vector baselines and expose the full tradeoff surface.
 
 ![10k marketing scorecard](plots/unique10k_marketing_scorecard.png)
 

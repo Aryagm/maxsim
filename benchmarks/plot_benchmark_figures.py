@@ -136,6 +136,7 @@ def _load_frame(path: Path, pd):
                 "latency_p95_ms": float(row["latency_p95_ms"]),
                 "latency_p95_s": float(row["latency_p95_ms"]) / 1000.0,
                 "speedup_vs_dense_fp16": float(row.get("speedup_vs_dense_fp16") or 1.0),
+                "corpus_storage_mib": float(row["doc_storage_bytes"]) / 1024.0 / 1024.0,
                 "doc_storage_kib_per_doc": float(row["doc_storage_bytes"]) / float(row["docs"]) / 1024.0,
                 "doc_memory_compression_vs_fp32": float(row["doc_memory_compression_vs_fp32"]),
                 "recall_at_10": float(row["recall_at_10"]),
@@ -197,11 +198,11 @@ def _plot_marketing_scorecard(frame, metadata, output_dir: Path, formats, sns, p
             lambda value: f"{value:.2f}s",
         ),
         (
-            "doc_storage_kib_per_doc",
+            "corpus_storage_mib",
             "Size",
-            "KiB per document, lower is better",
-            (0, 210),
-            lambda value: f"{value:.1f} KiB",
+            "Full-corpus storage, lower is better",
+            (0, 2050),
+            _format_storage_mib,
         ),
     )
 
@@ -252,7 +253,7 @@ def _plot_marketing_scorecard(frame, metadata, output_dir: Path, formats, sns, p
         0.905,
         f"bitmax binary keeps {binary.quality_retained_pct:.1f}% of dense NDCG@10, while cutting P95 latency "
         f"from {dense.latency_p95_s:.1f}s to {binary.latency_p95_s:.2f}s and storage from "
-        f"{dense.doc_storage_kib_per_doc:.1f} KiB/doc to {binary.doc_storage_kib_per_doc:.1f} KiB/doc.",
+        f"{_format_storage_mib(dense.corpus_storage_mib)} to {_format_storage_mib(binary.corpus_storage_mib)}.",
         ha="left",
         fontsize=15,
         color="#374151",
@@ -260,6 +261,7 @@ def _plot_marketing_scorecard(frame, metadata, output_dir: Path, formats, sns, p
     fig.text(
         0.025,
         0.035,
+        "Benchmark: mixed public ViDoRe/SyntheticDocQA, ColQwen2 multivector embeddings, "
         f"{metadata['docs']:,} unique docs, {metadata['queries']} queries on RTX 4090. "
         "Pooled single-vector baselines are omitted here because they lose most "
         "late-interaction quality; see the full Pareto plots for that context.",
@@ -409,6 +411,14 @@ def _format_latency_ms(value: float, _: int) -> str:
     if value >= 1000:
         return f"{value / 1000:g}s"
     return f"{value:g}ms"
+
+
+def _format_storage_mib(value: float) -> str:
+    if value >= 1024:
+        return f"{value / 1024:.2f} GiB"
+    if value >= 100:
+        return f"{value:.0f} MiB"
+    return f"{value:.1f} MiB"
 
 
 def _save(fig, base_path: Path, formats: tuple[str, ...]) -> None:
