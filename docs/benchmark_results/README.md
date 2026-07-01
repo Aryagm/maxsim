@@ -51,6 +51,27 @@ Run tests before committing the refreshed ledger:
 .venv/bin/python -m pytest -q
 ```
 
+## Plots
+
+Generate the committed seaborn figures from the 10k unique-corpus result with:
+
+```bash
+.venv/bin/python -m benchmarks.plot_benchmark_figures \
+  --output-dir docs/benchmark_results/plots
+```
+
+The most useful release/demo figure is the latency-quality Pareto plot: it
+shows P95 latency against NDCG@10, with bubble size encoding fp32 document
+storage reduction. The storage-quality plot is the cleanest way to explain the
+32x binary tradeoff, and the speedup-quality-loss plot is the most direct
+engineering view of the frontier.
+
+![10k latency-quality Pareto](plots/unique10k_latency_quality_pareto.png)
+
+![10k storage-quality Pareto](plots/unique10k_storage_quality_pareto.png)
+
+![10k speedup-quality loss](plots/unique10k_speedup_quality_loss.png)
+
 ## Headline Results
 
 The current strongest unique-corpus run uses a mixed public ViDoRe/SyntheticDocQA

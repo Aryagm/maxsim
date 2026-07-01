@@ -18,12 +18,14 @@ bitmax-vidore-embeddings = "benchmarks.build_vidore_embeddings:main"
 bitmax-mixed-embeddings = "benchmarks.build_mixed_embeddings:main"
 bitmax-docscale-stress = "benchmarks.build_docscale_stress:main"
 bitmax-reproduce-bench = "benchmarks.reproduce:main"
+bitmax-plot-benchmarks = "benchmarks.plot_benchmark_figures:main"
 bitmax-vast = "ops.vast.vast_workflow:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
 torch = ["torch>=2.0"]
 vast = ["vastai>=0.3.0"]
+viz = ["matplotlib>=3.8", "pandas>=2.0", "seaborn>=0.13"]
 vision-retrieval = ["accelerate>=0.30", "datasets>=2.19", "pillow>=10", "torch>=2.0", "transformers>=4.57"]
 oss-bench = [
   "faiss-gpu==1.14.3; platform_system == 'Linux'",
