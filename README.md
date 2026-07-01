@@ -14,19 +14,19 @@ systems can call.
 Measured artifacts are committed under `docs/benchmark_results/raw/`; generated
 embedding caches are intentionally ignored.
 
-The strongest current unique-corpus result is a mixed ViDoRe/SyntheticDocQA
-slice with 4,882 unique documents and 256 measured queries on a VAST RTX 4090:
+The strongest current unique-corpus result is a mixed public ViDoRe/SyntheticDocQA
+slice with 10,171 unique documents and 256 measured queries on a VAST RTX 4090:
 
 | implementation | fp32 doc reduction | P95 latency | speedup vs dense fp16 | recall@10 | NDCG@10 |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| dense fp16 CUDA | 2.00x | 34.32s | 1.00x | 0.383 | 0.378 |
-| fast-plaid CUDA | 3.45x | 21.76s | 1.63x | 0.387 | 0.379 |
-| bitmax binary CUDA | 32.00x | 627ms | 54.53x | 0.387 | 0.374 |
-| bitmax binary_q40 CUDA | 32.00x | 640ms | 53.38x | 0.383 | 0.375 |
-| bitmax int4 CUDA | 8.00x | 2.38s | 14.34x | 0.383 | 0.379 |
+| dense fp16 CUDA | 2.00x | 77.17s | 1.00x | 0.602 | 0.510 |
+| fast-plaid CUDA | 3.45x | 24.84s | 3.26x | 0.609 | 0.512 |
+| bitmax binary CUDA | 32.00x | 1.29s | 59.59x | 0.602 | 0.491 |
+| bitmax binary_q40 CUDA | 32.00x | 1.31s | 58.76x | 0.582 | 0.475 |
+| bitmax int4 CUDA | 8.00x | 4.86s | 15.79x | 0.617 | 0.503 |
 
 Artifact:
-`docs/benchmark_results/raw/unique-mixed-syntheticdocqa-5k-rich/vidore-mixed-syntheticdocqa-colqwen2-limit5000-comparison.json`.
+`docs/benchmark_results/raw/unique-public-10k-rich/vidore-mixed-public-unique-colqwen2-limit10000-comparison.json`.
 
 The largest current result is a fixed-query document-count stress sweep on the
 same VAST RTX 4090:
@@ -58,6 +58,20 @@ artifacts, and caveats.
 python -m venv .venv
 .venv/bin/python -m pip install -e ".[dev]"
 ```
+
+## CUDA Build
+
+CUDA kernels are built from source when `BITMAX_BUILD_CUDA=1` is set and a CUDA
+toolchain is available:
+
+```bash
+BITMAX_BUILD_CUDA=1 python -m pip install -e ".[dev,torch,oss-bench]"
+python -m pytest -m cuda
+```
+
+The committed benchmark numbers were measured on a project-owned VAST RTX 4090
+worker. There are no published prebuilt CUDA wheels yet; build from source for
+CUDA benchmark work.
 
 ## SDK Use
 

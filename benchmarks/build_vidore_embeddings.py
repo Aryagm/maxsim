@@ -16,8 +16,9 @@ def build_vidore_embeddings(
     limit: int = 16,
     model_name: str = "vidore/colqwen2-v1.0-hf",
     batch_size: int = 1,
+    streaming: bool = False,
 ) -> Path:
-    rows = _load_vidore_rows(dataset_name=dataset_name, config=config, split=split, limit=limit)
+    rows = _load_vidore_rows(dataset_name=dataset_name, config=config, split=split, limit=limit, streaming=streaming)
     doc_keys, doc_row_indices, _query_doc_indices, qrels = _deduplicate_doc_rows(rows)
     model, processor = _load_retrieval_model(model_name)
 
@@ -49,15 +50,25 @@ def build_vidore_embeddings(
     return output_path
 
 
-def _load_vidore_rows(*, dataset_name: str, config: str, split: str, limit: int) -> list[dict[str, Any]]:
+def _load_vidore_rows(*, dataset_name: str, config: str, split: str, limit: int, streaming: bool = False) -> list[dict[str, Any]]:
     try:
         from datasets import load_dataset
     except ImportError as exc:  # pragma: no cover - optional dependency
         raise RuntimeError("build_vidore_embeddings requires the 'datasets' package") from exc
 
-    dataset = load_dataset(dataset_name, config, split=split)
     if limit < 1:
         raise ValueError("limit must be >= 1")
+    if streaming:
+        dataset = load_dataset(dataset_name, config, split=split, streaming=True)
+        rows = []
+        for row in dataset:
+            rows.append(dict(row))
+            if len(rows) >= int(limit):
+                break
+        if len(rows) < int(limit):
+            raise ValueError(f"streaming dataset only yielded {len(rows)} rows before limit {limit}")
+        return rows
+    dataset = load_dataset(dataset_name, config, split=split)
     count = min(int(limit), len(dataset))
     return [dict(dataset[idx]) for idx in range(count)]
 
@@ -195,6 +206,7 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=16)
     parser.add_argument("--model", default="vidore/colqwen2-v1.0-hf")
     parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument("--streaming", action="store_true", help="Stream source rows and stop after --limit instead of downloading the full split first.")
     args = parser.parse_args()
 
     path = build_vidore_embeddings(
@@ -205,6 +217,7 @@ def main() -> None:
         limit=args.limit,
         model_name=args.model,
         batch_size=args.batch_size,
+        streaming=args.streaming,
     )
     print(path)
 

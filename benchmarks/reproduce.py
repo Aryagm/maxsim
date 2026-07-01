@@ -27,7 +27,7 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
     parser = argparse.ArgumentParser(description="Plan or run reproducible bitmax benchmark suites.")
     parser.add_argument(
         "--suite",
-        choices=["smoke", "cuda-unique-5k", "cuda-docscale", "ledger-refresh"],
+        choices=["smoke", "build-unique-caches", "cuda-unique-5k", "cuda-unique-10k", "cuda-docscale", "ledger-refresh"],
         default="smoke",
     )
     parser.add_argument("--output", type=Path, default=None)
@@ -54,8 +54,12 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
 def build_plan(suite: str, *, output_path: Path) -> dict[str, Any]:
     if suite == "smoke":
         steps = _smoke_steps()
+    elif suite == "build-unique-caches":
+        steps = _build_unique_cache_steps()
     elif suite == "cuda-unique-5k":
         steps = _cuda_unique_5k_steps()
+    elif suite == "cuda-unique-10k":
+        steps = _cuda_unique_10k_steps()
     elif suite == "cuda-docscale":
         steps = _cuda_docscale_steps()
     elif suite == "ledger-refresh":
@@ -89,6 +93,78 @@ def _smoke_steps() -> list[BenchmarkStep]:
     ]
 
 
+def _build_unique_cache_steps() -> list[BenchmarkStep]:
+    sources = [
+        ("docvqa-test", "vidore/docvqa_test_subsampled", "test", 500, False),
+        ("infovqa-test", "vidore/infovqa_test_subsampled", "test", 500, False),
+        ("arxivqa-test", "vidore/arxivqa_test_subsampled", "test", 500, False),
+        ("tatdqa-test", "vidore/tatdqa_test", "test", 1663, False),
+        ("syntheticdocqa-ai", "vidore/syntheticDocQA_artificial_intelligence_test", "test", 1000, False),
+        ("syntheticdocqa-energy", "vidore/syntheticDocQA_energy_test", "test", 1000, False),
+        ("syntheticdocqa-government", "vidore/syntheticDocQA_government_reports_test", "test", 1000, False),
+        ("syntheticdocqa-healthcare", "vidore/syntheticDocQA_healthcare_industry_test", "test", 1000, False),
+        ("syntheticdocqa-shift", "vidore/shiftproject_test", "test", 1000, False),
+        ("docvqa-train", "vidore/docvqa_train", "train", 3000, True),
+        ("infovqa-train", "vidore/infovqa_train", "train", 1200, True),
+        ("arxivqa-train", "vidore/arxivqa_train", "train", 1200, True),
+        ("tatdqa-train", "vidore/tatdqa_train", "train", 1200, True),
+        ("syntheticdocqa-energy-train", "vidore/syntheticDocQA_energy_train", "train", 3000, True),
+    ]
+    steps: list[BenchmarkStep] = []
+    source_artifacts: list[str] = []
+    for slug, dataset, split, limit, streaming in sources:
+        artifact = f"benchmark-results/vidore-{slug}-colqwen2-limit{limit}.npz"
+        source_artifacts.append(artifact)
+        command = [
+            sys.executable,
+            "-m",
+            "benchmarks.build_vidore_embeddings",
+            "--dataset",
+            dataset,
+            "--split",
+            split,
+            "--limit",
+            str(limit),
+            "--model",
+            "vidore/colqwen2-v1.0-hf",
+            "--output",
+            artifact,
+        ]
+        if streaming:
+            command.append("--streaming")
+        steps.append(
+            BenchmarkStep(
+                name=f"embed-{slug}",
+                command=command,
+                artifacts=[artifact],
+                requires_cuda=True,
+                expensive=True,
+                notes="Builds a unique public ViDoRe/ColQwen2 embedding cache from raw dataset rows.",
+            )
+        )
+    steps.append(
+        BenchmarkStep(
+            name="mix-unique-10k",
+            command=[
+                sys.executable,
+                "-m",
+                "benchmarks.build_mixed_embeddings",
+                "--inputs",
+                *source_artifacts,
+                "--dataset-name",
+                "vidore/mixed_public_unique:test:10000",
+                "--output",
+                "benchmark-results/vidore-mixed-public-unique-colqwen2-limit10000.npz",
+            ],
+            artifacts=["benchmark-results/vidore-mixed-public-unique-colqwen2-limit10000.npz"],
+            requires_cuda=False,
+            expensive=True,
+            notes="Combines unique source caches. Actual doc count is recorded in the output metadata/results.",
+        )
+    )
+    return steps
+
+
 def _cuda_unique_5k_steps() -> list[BenchmarkStep]:
     return [
         BenchmarkStep(
@@ -119,6 +195,38 @@ def _cuda_unique_5k_steps() -> list[BenchmarkStep]:
             requires_cuda=True,
             expensive=True,
             notes="Requires the 5k unique mixed ColQwen2 embedding cache.",
+        )
+    ]
+
+
+def _cuda_unique_10k_steps() -> list[BenchmarkStep]:
+    return [
+        BenchmarkStep(
+            name="unique-public-10k-rich",
+            command=[
+                sys.executable,
+                "-m",
+                "benchmarks.compare_open_source",
+                "--input",
+                "benchmark-results/vidore-mixed-public-unique-colqwen2-limit10000.npz",
+                "--output",
+                "benchmark-results/unique-public-10k-rich/vidore-mixed-public-unique-colqwen2-limit10000-comparison.json",
+                "--device",
+                "cuda",
+                "--implementations",
+                "dense_fp16,faiss_pooled,cuvs_pooled,fast_plaid,bitmax_binary,bitmax_binary_q40,bitmax_int4",
+                "--limit-queries",
+                "256",
+                "--repeat",
+                "3",
+                "--metric-ks",
+                "1,5,10",
+                "--allow-unavailable",
+            ],
+            artifacts=["benchmark-results/unique-public-10k-rich/vidore-mixed-public-unique-colqwen2-limit10000-comparison.json"],
+            requires_cuda=True,
+            expensive=True,
+            notes="Requires the mixed public unique cache built by the build-unique-caches suite.",
         )
     ]
 

@@ -1,8 +1,9 @@
+import sys
 from types import SimpleNamespace
 
 import numpy as np
 
-from benchmarks.build_vidore_embeddings import _deduplicate_doc_rows, _flatten_ragged, _ignore_missing_torchvision_nms_fake_registration
+from benchmarks.build_vidore_embeddings import _deduplicate_doc_rows, _flatten_ragged, _ignore_missing_torchvision_nms_fake_registration, _load_vidore_rows
 
 
 def test_deduplicate_doc_rows_maps_multiple_queries_to_one_document():
@@ -53,3 +54,25 @@ def test_torchvision_nms_fake_registration_patch_ignores_only_missing_nms():
         return None
 
     assert fake_torch.library.register_fake("torchvision::nms")(fn) is fn
+
+
+def test_load_vidore_rows_streaming_stops_at_limit(monkeypatch):
+    calls = []
+
+    def fake_load_dataset(dataset_name, config, *, split, streaming=False):
+        calls.append((dataset_name, config, split, streaming))
+        assert streaming is True
+        return ({"query": f"q-{idx}", "image": f"image-{idx}"} for idx in range(10))
+
+    monkeypatch.setitem(sys.modules, "datasets", SimpleNamespace(load_dataset=fake_load_dataset))
+
+    rows = _load_vidore_rows(
+        dataset_name="vidore/example",
+        config="default",
+        split="train",
+        limit=3,
+        streaming=True,
+    )
+
+    assert [row["query"] for row in rows] == ["q-0", "q-1", "q-2"]
+    assert calls == [("vidore/example", "default", "train", True)]

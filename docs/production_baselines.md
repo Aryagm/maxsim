@@ -34,19 +34,22 @@ Tracked artifacts live in `docs/benchmark_results/raw/`.
 - Multi-dataset ViDoRe limit64: `multidataset-limit64-rich-summary.json`
 - DocVQA scaling 64/256: `multidataset-docvqa-scaling-rich-summary.json`
 - Mixed real doc scaling 1k/2k/3k: `mixed-syntheticdocqa-docscale-rich-summary.json`
-- Unique mixed 4,882-doc CUDA comparison:
+- Unique mixed 10,171-doc CUDA comparison:
+  `unique-public-10k-rich/vidore-mixed-public-unique-colqwen2-limit10000-comparison.json`
+- Historical unique mixed 4,882-doc CUDA comparison:
   `unique-mixed-syntheticdocqa-5k-rich/vidore-mixed-syntheticdocqa-colqwen2-limit5000-comparison.json`
 - 5k/10k/25k stress scaling: `docscale-stress-5k-10k-25k-rich-summary.json`
 
-On the unique 4,882-doc slice, `bitmax_binary` keeps 32x fp32 document
-compression, measures 627 ms P95 latency, and lands at 0.374 NDCG@10 versus
-dense fp16 exact MaxSim at 34.32 s P95 and 0.378 NDCG@10. Mean-pooled
-FAISS/cuVS are much faster at about 1-2 ms best latency, but drop to 0.211
-NDCG@10 because they are single-vector baselines rather than late-interaction
-scorers.
+On the unique 10,171-doc slice, `bitmax_binary` keeps 32x fp32 document
+compression, measures 1.29 s P95 latency, and lands at 0.491 NDCG@10 versus
+dense fp16 exact MaxSim at 77.17 s P95 and 0.510 NDCG@10. `bitmax_int4`
+keeps 8x fp32 document compression, measures 4.86 s P95, and lands at 0.503
+NDCG@10. Mean-pooled FAISS/cuVS are much faster in absolute latency, but drop
+to 0.036 NDCG@10 because they are single-vector baselines rather than
+late-interaction scorers.
 
 ## Caveats
 
-The current strongest large-doc result is a fixed-query distractor stress test.
-It is useful for scoring latency, memory pressure, and hard-negative sensitivity,
-but the next publication-grade result should use a fully unique 10k-25k corpus.
+The 25k result is still a fixed-query distractor stress test. It is useful for
+scoring latency, memory pressure, and hard-negative sensitivity, but a future
+publication-grade 25k claim should use a fully unique 25k corpus.

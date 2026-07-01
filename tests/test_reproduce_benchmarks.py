@@ -35,3 +35,24 @@ def test_unique_5k_plan_records_cuda_comparison_artifact(tmp_path):
     assert step["requires_cuda"] is True
     assert "benchmarks.compare_open_source" in " ".join(step["command"])
     assert any("unique-mixed-syntheticdocqa-5k-rich" in artifact for artifact in step["artifacts"])
+
+
+def test_build_unique_cache_plan_records_embedding_and_mix_steps(tmp_path):
+    plan = reproduce.build_plan("build-unique-caches", output_path=tmp_path / "plan.json")
+
+    commands = [" ".join(step["command"]) for step in plan["steps"]]
+    assert plan["suite"] == "build-unique-caches"
+    assert any("benchmarks.build_vidore_embeddings" in command for command in commands)
+    assert any("benchmarks.build_mixed_embeddings" in command for command in commands)
+    assert any("vidore-mixed-public-unique-colqwen2-limit10000.npz" in command for command in commands)
+
+
+def test_unique_10k_plan_records_public_unique_artifact(tmp_path):
+    plan = reproduce.build_plan("cuda-unique-10k", output_path=tmp_path / "plan.json")
+
+    assert plan["suite"] == "cuda-unique-10k"
+    assert len(plan["steps"]) == 1
+    step = plan["steps"][0]
+    assert step["requires_cuda"] is True
+    assert "benchmarks.compare_open_source" in " ".join(step["command"])
+    assert any("unique-public-10k-rich" in artifact for artifact in step["artifacts"])

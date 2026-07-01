@@ -417,13 +417,18 @@ Measured with 256 fixed queries on the same VAST RTX 4090 worker:
 
 Artifact: `benchmark-results/mixed-syntheticdocqa-docscale-rich-summary.json`.
 
-For a fully unique larger-corpus comparison, use the mixed 5k embedding cache
-directly with the open-source comparison runner:
+For a fully unique larger-corpus comparison, build the source embedding caches
+from public ViDoRe/SyntheticDocQA rows, combine them, and run the open-source
+comparison runner. The reproduce helper records the exact source-cache build
+commands, GPU info, git SHA, command output tails, and artifact paths:
 
 ```bash
+python -m benchmarks.reproduce --suite build-unique-caches
+python -m benchmarks.reproduce --suite build-unique-caches --execute
+python -m benchmarks.reproduce --suite cuda-unique-10k
 python -m benchmarks.compare_open_source \
-  --input benchmark-results/vidore-mixed-syntheticdocqa-colqwen2-limit5000.npz \
-  --output benchmark-results/unique-mixed-syntheticdocqa-5k-rich/vidore-mixed-syntheticdocqa-colqwen2-limit5000-comparison.json \
+  --input benchmark-results/vidore-mixed-public-unique-colqwen2-limit10000.npz \
+  --output benchmark-results/unique-public-10k-rich/vidore-mixed-public-unique-colqwen2-limit10000-comparison.json \
   --device cuda \
   --implementations dense_fp16,faiss_pooled,cuvs_pooled,fast_plaid,bitmax_binary,bitmax_binary_q40,bitmax_int4 \
   --limit-queries 256 \
@@ -432,19 +437,21 @@ python -m benchmarks.compare_open_source \
   --allow-unavailable
 ```
 
-Measured with 256 queries and 4,882 unique documents on the VAST RTX 4090
+Measured with 256 queries and 10,171 unique documents on the VAST RTX 4090
 worker:
 
 | implementation | fp32 doc reduction | P95 latency | speedup vs dense fp16 | recall@10 | NDCG@10 |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| dense fp16 CUDA | 2.00x | 34.32s | 1.00x | 0.383 | 0.378 |
-| fast-plaid CUDA | 3.45x | 21.76s | 1.63x | 0.387 | 0.379 |
-| bitmax binary CUDA | 32.00x | 627ms | 54.53x | 0.387 | 0.374 |
-| bitmax binary_q40 CUDA | 32.00x | 640ms | 53.38x | 0.383 | 0.375 |
-| bitmax int4 CUDA | 8.00x | 2.38s | 14.34x | 0.383 | 0.379 |
+| dense fp16 CUDA | 2.00x | 77.17s | 1.00x | 0.602 | 0.510 |
+| FAISS GPU mean-pool flat IP | 747.60x | 25.82ms | 73202.90x | 0.051 | 0.036 |
+| cuVS GPU mean-pool flat IP | 747.60x | 90.13ms | 54778.30x | 0.051 | 0.036 |
+| fast-plaid CUDA | 3.45x | 24.84s | 3.26x | 0.609 | 0.512 |
+| bitmax binary CUDA | 32.00x | 1.29s | 59.59x | 0.602 | 0.491 |
+| bitmax binary_q40 CUDA | 32.00x | 1.31s | 58.76x | 0.582 | 0.475 |
+| bitmax int4 CUDA | 8.00x | 4.86s | 15.79x | 0.617 | 0.503 |
 
 Artifact:
-`benchmark-results/unique-mixed-syntheticdocqa-5k-rich/vidore-mixed-syntheticdocqa-colqwen2-limit5000-comparison.json`.
+`benchmark-results/unique-public-10k-rich/vidore-mixed-public-unique-colqwen2-limit10000-comparison.json`.
 
 For a larger fixed-query stress sweep, start from the mixed real 5k corpus and
 expand document count with repeated non-positive real page embeddings. This is a
