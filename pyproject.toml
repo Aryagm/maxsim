@@ -15,6 +15,9 @@ bitmax-bench = "benchmarks.run_synthetic:main"
 bitmax-retrieval-bench = "benchmarks.run_retrieval:main"
 bitmax-multidataset-bench = "benchmarks.run_multidataset:main"
 bitmax-vidore-embeddings = "benchmarks.build_vidore_embeddings:main"
+bitmax-mixed-embeddings = "benchmarks.build_mixed_embeddings:main"
+bitmax-docscale-stress = "benchmarks.build_docscale_stress:main"
+bitmax-reproduce-bench = "benchmarks.reproduce:main"
 bitmax-vast = "ops.vast.vast_workflow:main"
 
 [project.optional-dependencies]

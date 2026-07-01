@@ -18,6 +18,7 @@ Important summary artifacts:
 - `raw/multidataset-limit64-rich-summary.json`
 - `raw/multidataset-docvqa-scaling-rich-summary.json`
 - `raw/mixed-syntheticdocqa-docscale-rich-summary.json`
+- `raw/unique-mixed-syntheticdocqa-5k-rich/vidore-mixed-syntheticdocqa-colqwen2-limit5000-comparison.json`
 - `raw/docscale-stress-5k-10k-25k-rich-summary.json`
 - `raw/open-source-comparison-expanded-limit256-cuda.json`
 - `raw/sdk-demo-local-search-limit256-cuda.json`
@@ -50,6 +51,18 @@ Run tests before committing the refreshed ledger:
 ```
 
 ## Headline Results
+
+The current strongest unique-corpus run uses a mixed ViDoRe/SyntheticDocQA
+embedding cache with 4,882 unique documents and 256 measured queries on a VAST
+RTX 4090.
+
+| implementation | fp32 doc reduction | P95 latency | speedup vs dense fp16 | recall@10 | NDCG@10 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| dense fp16 CUDA | 2.00x | 34.32s | 1.00x | 0.383 | 0.378 |
+| fast-plaid CUDA | 3.45x | 21.76s | 1.63x | 0.387 | 0.379 |
+| bitmax binary CUDA | 32.00x | 627ms | 54.53x | 0.387 | 0.374 |
+| bitmax binary_q40 CUDA | 32.00x | 640ms | 53.38x | 0.383 | 0.375 |
+| bitmax int4 CUDA | 8.00x | 2.38s | 14.34x | 0.383 | 0.379 |
 
 The current large fixed-query doc-scale stress run uses 256 fixed queries on a
 VAST RTX 4090. It shows binary scoring remains around 56x faster than dense

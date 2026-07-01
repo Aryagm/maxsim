@@ -9,6 +9,49 @@ This is not a vector database, RAG framework, or embedding model. The v0.1 goal
 is to provide the compressed MaxSim scoring and reranking layer that those
 systems can call.
 
+## Current CUDA Evidence
+
+Measured artifacts are committed under `docs/benchmark_results/raw/`; generated
+embedding caches are intentionally ignored.
+
+The strongest current unique-corpus result is a mixed ViDoRe/SyntheticDocQA
+slice with 4,882 unique documents and 256 measured queries on a VAST RTX 4090:
+
+| implementation | fp32 doc reduction | P95 latency | speedup vs dense fp16 | recall@10 | NDCG@10 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| dense fp16 CUDA | 2.00x | 34.32s | 1.00x | 0.383 | 0.378 |
+| fast-plaid CUDA | 3.45x | 21.76s | 1.63x | 0.387 | 0.379 |
+| bitmax binary CUDA | 32.00x | 627ms | 54.53x | 0.387 | 0.374 |
+| bitmax binary_q40 CUDA | 32.00x | 640ms | 53.38x | 0.383 | 0.375 |
+| bitmax int4 CUDA | 8.00x | 2.38s | 14.34x | 0.383 | 0.379 |
+
+Artifact:
+`docs/benchmark_results/raw/unique-mixed-syntheticdocqa-5k-rich/vidore-mixed-syntheticdocqa-colqwen2-limit5000-comparison.json`.
+
+The largest current result is a fixed-query document-count stress sweep on the
+same VAST RTX 4090:
+
+| docs | dense fp16 P95 | binary P95 | binary speedup | dense NDCG@10 | binary_q40 NDCG@10 | int4 NDCG@10 |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 5,000 | 35.62s | 645ms | 55.66x | 0.377 | 0.372 | 0.379 |
+| 10,000 | 71.75s | 1.26s | 57.06x | 0.376 | 0.371 | 0.378 |
+| 25,000 | 174.69s | 3.14s | 55.86x | 0.374 | 0.371 | 0.376 |
+
+Interpretation:
+
+- `binary` is the aggressive mode: 32x fp32 document compression and the lowest
+  latency, with a small quality loss on current ViDoRe-style sweeps.
+- `binary_q40` keeps the 32x-ish storage profile while improving the large-doc
+  NDCG result versus raw binary.
+- `int4` is the conservative mode: 8x fp32 document compression with quality
+  very close to dense fp16 in the tracked runs.
+
+The 25k row is a distractor-crowding stress test built from repeated
+non-positive real page embeddings. It validates scoring and memory scaling; it
+is not a claim that the 25k corpus contains 25k unique pages. See
+`docs/benchmarks.md` and `docs/benchmark_results/README.md` for full commands,
+artifacts, and caveats.
+
 ## Install for development
 
 ```bash
@@ -38,6 +81,18 @@ reranked = reranker.rerank(
     candidate_ids=["doc-17", "doc-03", "doc-91"],
     k=3,
 )
+```
+
+For an end-to-end example using any precomputed multi-vector embeddings:
+
+```bash
+python -m examples.rag_pipeline_sdk \
+  --embeddings benchmark-results/vidore-docvqa-colqwen2-limit256.npz \
+  --corpus benchmark-results/docvqa.binary_q40.bitmax.npz \
+  --mode binary_q40 \
+  --device cuda \
+  --query-index 0 \
+  --k 5
 ```
 
 Modes:
@@ -105,6 +160,18 @@ python benchmarks/run_retrieval.py \
 
 Those rows report recall/MRR/NDCG, top-k agreement with dense fp16 MaxSim,
 latency, speedup, and document-memory compression.
+
+To inspect or rerun benchmark plans:
+
+```bash
+python -m benchmarks.reproduce --suite smoke
+python -m benchmarks.reproduce --suite smoke --execute --refresh-ledger
+python -m benchmarks.reproduce --suite cuda-unique-5k
+python -m benchmarks.reproduce --suite cuda-docscale
+```
+
+`--execute` runs the plan; without it the command writes a dry-run JSON plan
+with git SHA, environment, GPU info, commands, and expected artifacts.
 
 Experimental Pareto variants can be measured with `--variants all`. Those rows
 include ternary documents, per-token scale, grouped scale, int4 documents,

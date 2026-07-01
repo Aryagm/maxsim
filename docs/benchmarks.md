@@ -417,6 +417,35 @@ Measured with 256 fixed queries on the same VAST RTX 4090 worker:
 
 Artifact: `benchmark-results/mixed-syntheticdocqa-docscale-rich-summary.json`.
 
+For a fully unique larger-corpus comparison, use the mixed 5k embedding cache
+directly with the open-source comparison runner:
+
+```bash
+python -m benchmarks.compare_open_source \
+  --input benchmark-results/vidore-mixed-syntheticdocqa-colqwen2-limit5000.npz \
+  --output benchmark-results/unique-mixed-syntheticdocqa-5k-rich/vidore-mixed-syntheticdocqa-colqwen2-limit5000-comparison.json \
+  --device cuda \
+  --implementations dense_fp16,faiss_pooled,cuvs_pooled,fast_plaid,bitmax_binary,bitmax_binary_q40,bitmax_int4 \
+  --limit-queries 256 \
+  --repeat 3 \
+  --metric-ks 1,5,10 \
+  --allow-unavailable
+```
+
+Measured with 256 queries and 4,882 unique documents on the VAST RTX 4090
+worker:
+
+| implementation | fp32 doc reduction | P95 latency | speedup vs dense fp16 | recall@10 | NDCG@10 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| dense fp16 CUDA | 2.00x | 34.32s | 1.00x | 0.383 | 0.378 |
+| fast-plaid CUDA | 3.45x | 21.76s | 1.63x | 0.387 | 0.379 |
+| bitmax binary CUDA | 32.00x | 627ms | 54.53x | 0.387 | 0.374 |
+| bitmax binary_q40 CUDA | 32.00x | 640ms | 53.38x | 0.383 | 0.375 |
+| bitmax int4 CUDA | 8.00x | 2.38s | 14.34x | 0.383 | 0.379 |
+
+Artifact:
+`benchmark-results/unique-mixed-syntheticdocqa-5k-rich/vidore-mixed-syntheticdocqa-colqwen2-limit5000-comparison.json`.
+
 For a larger fixed-query stress sweep, start from the mixed real 5k corpus and
 expand document count with repeated non-positive real page embeddings. This is a
 latency/memory and distractor-crowding stress test, not a claim that the 25k
