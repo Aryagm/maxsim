@@ -200,7 +200,7 @@ def _plot_marketing_scorecard(frame, metadata, output_dir: Path, formats, sns, p
         (
             "corpus_storage_mib",
             "Size",
-            "Full-corpus storage; parenthesis = reduction vs fp32",
+            "Full-corpus storage; bitmax labels include reduction vs fp32",
             (0, 2050),
             lambda value, row: _format_storage_scorecard_label(row),
         ),
@@ -268,7 +268,7 @@ def _plot_marketing_scorecard(frame, metadata, output_dir: Path, formats, sns, p
     fig.text(
         0.025,
         0.035,
-        "Latency speedup is vs dense fp16 MaxSim. Size reduction is vs fp32 document storage. "
+        "Latency speedup is vs dense fp16 MaxSim. Size reduction is shown on bitmax bars vs fp32 document storage. "
         "Pooled single-vector baselines are omitted here because they lose most "
         "late-interaction quality; see the full Pareto plots for that context.",
         fontsize=10.5,
@@ -427,10 +427,10 @@ def _format_latency_scorecard_label(row) -> str:
 
 
 def _format_storage_scorecard_label(row) -> str:
-    return (
-        f"{_format_storage_mib(float(row.corpus_storage_mib))} "
-        f"({_format_factor(float(row.doc_memory_compression_vs_fp32))} smaller)"
-    )
+    label = _format_storage_mib(float(row.corpus_storage_mib))
+    if str(row.implementation).startswith("bitmax_"):
+        return f"{label} ({_format_factor(float(row.doc_memory_compression_vs_fp32))} smaller)"
+    return label
 
 
 def _format_storage_mib(value: float) -> str:

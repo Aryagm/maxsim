@@ -63,11 +63,12 @@ Generate the committed seaborn figures from the 10k unique-corpus result with:
 The most useful release/demo figure is the marketing scorecard: it shows
 accuracy, P95 latency, and full-corpus document storage in one view with direct
 labels. The first panel should stay high; the latency and size panels should be
-short. The latency and size bar labels include the relative factors, such as
-`1.29s (60x faster)` and `116 MiB (32x smaller)`. The chart labels the benchmark
-context directly: mixed public ViDoRe/SyntheticDocQA with ColQwen2 multivector
-embeddings. The Pareto plots remain useful as supporting evidence because they
-include the pooled single-vector baselines and expose the full tradeoff surface.
+short. Latency labels include relative speedup, and bitmax size labels include
+relative storage reduction, such as `116 MiB (32x smaller)`. The chart labels
+the benchmark context directly: mixed public ViDoRe/SyntheticDocQA with ColQwen2
+multivector embeddings. The Pareto plots remain useful as supporting evidence
+because they include the pooled single-vector baselines and expose the full
+tradeoff surface.
 
 ![10k marketing scorecard](plots/unique10k_marketing_scorecard.png)
 
