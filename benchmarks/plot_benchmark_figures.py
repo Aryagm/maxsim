@@ -42,6 +42,13 @@ POINT_COLORS = {
     "bitmax_int4": "#7c3aed",
 }
 
+MARKETING_ORDER = (
+    "bitmax_binary",
+    "bitmax_int4",
+    "fast_plaid",
+    "dense_fp16_baseline",
+)
+
 ANNOTATION_OFFSETS = {
     "dense_fp16_baseline": (-72, 14),
     "faiss_gpu_mean_pool_flat_ip": (8, 12),
@@ -96,10 +103,11 @@ def main(argv: list[str] | None = None) -> None:
 
     frame, metadata = _load_frame(args.input, pd)
     _configure_theme(sns, plt)
+    _plot_marketing_scorecard(frame, metadata, output_dir, formats, sns, plt)
     _plot_latency_quality(frame, metadata, output_dir, formats, sns, plt, ticker)
     _plot_storage_quality(frame, metadata, output_dir, formats, sns, plt, ticker)
     _plot_speedup_quality_loss(frame, metadata, output_dir, formats, sns, plt, ticker)
-    print(f"wrote {len(formats) * 3} figure files to {output_dir}")
+    print(f"wrote {len(formats) * 4} figure files to {output_dir}")
 
 
 def _import_viz():
@@ -128,6 +136,7 @@ def _load_frame(path: Path, pd):
                 "latency_p95_ms": float(row["latency_p95_ms"]),
                 "latency_p95_s": float(row["latency_p95_ms"]) / 1000.0,
                 "speedup_vs_dense_fp16": float(row.get("speedup_vs_dense_fp16") or 1.0),
+                "doc_storage_kib_per_doc": float(row["doc_storage_bytes"]) / float(row["docs"]) / 1024.0,
                 "doc_memory_compression_vs_fp32": float(row["doc_memory_compression_vs_fp32"]),
                 "recall_at_10": float(row["recall_at_10"]),
                 "ndcg_at_10": float(row["ndcg_at_10"]),
@@ -136,6 +145,8 @@ def _load_frame(path: Path, pd):
             }
         )
     frame = pd.DataFrame(rows)
+    dense_ndcg = float(frame.loc[frame["implementation"] == "dense_fp16_baseline", "ndcg_at_10"].iloc[0])
+    frame["quality_retained_pct"] = frame["ndcg_at_10"] / dense_ndcg * 100.0
     metadata = {
         "docs": int(payload["dataset"]["docs"]),
         "queries": int(payload["dataset"]["queries"]),
@@ -161,8 +172,103 @@ def _configure_theme(sns, plt) -> None:
             "font.family": "DejaVu Sans",
             "savefig.bbox": "tight",
             "savefig.facecolor": "white",
+            "svg.hashsalt": "bitmax-benchmark-plots",
         }
     )
+
+
+def _plot_marketing_scorecard(frame, metadata, output_dir: Path, formats, sns, plt) -> None:
+    scorecard = _ordered_frame(frame, MARKETING_ORDER).copy()
+    binary = scorecard.loc[scorecard["implementation"] == "bitmax_binary"].iloc[0]
+    dense = scorecard.loc[scorecard["implementation"] == "dense_fp16_baseline"].iloc[0]
+    specs = (
+        (
+            "quality_retained_pct",
+            "Accuracy",
+            "NDCG@10 retained, higher is better",
+            (0, 108),
+            lambda value: f"{value:.1f}%",
+        ),
+        (
+            "latency_p95_s",
+            "Latency",
+            "P95 seconds, lower is better",
+            (0, 85),
+            lambda value: f"{value:.2f}s",
+        ),
+        (
+            "doc_storage_kib_per_doc",
+            "Size",
+            "KiB per document, lower is better",
+            (0, 210),
+            lambda value: f"{value:.1f} KiB",
+        ),
+    )
+
+    fig, axes = plt.subplots(1, 3, figsize=(16, 7.2), sharey=True)
+    labels = list(scorecard["label"])
+    for idx, (ax, (metric, title, xlabel, xlim, formatter)) in enumerate(zip(axes, specs, strict=True)):
+        sns.barplot(data=scorecard, x=metric, y="label", order=labels, color="#d1d5db", ax=ax)
+        for patch, row in zip(ax.patches, scorecard.itertuples(index=False), strict=True):
+            patch.set_facecolor(POINT_COLORS[str(row.implementation)])
+            patch.set_edgecolor("white")
+            patch.set_linewidth(1.2)
+            width = patch.get_width()
+            label_x = width + (xlim[1] - xlim[0]) * 0.018
+            ax.text(
+                label_x,
+                patch.get_y() + patch.get_height() / 2,
+                formatter(float(width)),
+                va="center",
+                ha="left",
+                fontsize=13,
+                fontweight="bold",
+                color="#111827",
+            )
+        ax.set_xlim(*xlim)
+        ax.set_title(title, loc="left", fontsize=17, fontweight="bold", pad=14)
+        ax.set_xlabel(xlabel, fontsize=12, color="#4b5563")
+        ax.set_ylabel("")
+        ax.grid(axis="x", color="#e5e7eb", linewidth=0.9)
+        ax.grid(axis="y", visible=False)
+        ax.tick_params(axis="x", labelsize=11, colors="#6b7280")
+        ax.tick_params(axis="y", labelsize=13, colors="#111827")
+        for side in ("top", "right", "left"):
+            ax.spines[side].set_visible(False)
+        if idx > 0:
+            ax.tick_params(axis="y", labelleft=False, length=0)
+
+    fig.suptitle(
+        "Near-dense quality with much lower latency and storage",
+        x=0.025,
+        y=0.965,
+        ha="left",
+        fontsize=25,
+        fontweight="bold",
+        color="#111827",
+    )
+    fig.text(
+        0.025,
+        0.905,
+        f"bitmax binary keeps {binary.quality_retained_pct:.1f}% of dense NDCG@10, while cutting P95 latency "
+        f"from {dense.latency_p95_s:.1f}s to {binary.latency_p95_s:.2f}s and storage from "
+        f"{dense.doc_storage_kib_per_doc:.1f} KiB/doc to {binary.doc_storage_kib_per_doc:.1f} KiB/doc.",
+        ha="left",
+        fontsize=15,
+        color="#374151",
+    )
+    fig.text(
+        0.025,
+        0.035,
+        f"{metadata['docs']:,} unique docs, {metadata['queries']} queries on RTX 4090. "
+        "Pooled single-vector baselines are omitted here because they lose most "
+        "late-interaction quality; see the full Pareto plots for that context.",
+        fontsize=10.5,
+        color="#6b7280",
+    )
+    fig.tight_layout(rect=(0.02, 0.09, 1.0, 0.88), w_pad=2.6)
+    _save(fig, output_dir / "unique10k_marketing_scorecard", formats)
+    plt.close(fig)
 
 
 def _plot_latency_quality(frame, metadata, output_dir: Path, formats, sns, plt, ticker) -> None:
@@ -280,6 +386,10 @@ def _plot_speedup_quality_loss(frame, metadata, output_dir: Path, formats, sns, 
     plt.close(fig)
 
 
+def _ordered_frame(frame, implementations: tuple[str, ...]):
+    return frame.set_index("implementation").loc[list(implementations)].reset_index()
+
+
 def _annotate_points(ax, frame, x_col: str, y_col: str, offsets: dict[str, tuple[int, int]] | None = None) -> None:
     for _, row in frame.iterrows():
         impl = str(row["implementation"])
@@ -303,7 +413,8 @@ def _format_latency_ms(value: float, _: int) -> str:
 
 def _save(fig, base_path: Path, formats: tuple[str, ...]) -> None:
     for fmt in formats:
-        fig.savefig(base_path.with_suffix(f".{fmt}"), dpi=220)
+        kwargs = {"metadata": {"Date": None}} if fmt == "svg" else {}
+        fig.savefig(base_path.with_suffix(f".{fmt}"), dpi=220, **kwargs)
 
 
 if __name__ == "__main__":
