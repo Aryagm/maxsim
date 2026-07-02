@@ -3,6 +3,7 @@
 
 #include <cuda_runtime.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstddef>
 #include <stdexcept>
@@ -14,6 +15,12 @@ namespace {
 
 constexpr int kBlockThreads = 128;
 constexpr int kTopkThreads = 256;
+
+// Runtime-tunable routing gate for the dim128 unrolled scoring kernel.
+// Corpora with at least this many average tokens per document use the
+// unrolled kernel even above 128 documents; shorter-doc corpora keep the
+// generic kernel (the documented rerank_512/rerank_4096 regression shapes).
+int g_dim128_unrolled_min_avg_tokens = 1 << 30;
 
 void check_cuda(cudaError_t status, const char* action) {
   if (status != cudaSuccess) {
@@ -944,7 +951,14 @@ class CudaPackedDocs {
   }
 
   bool use_dim128_unrolled() const {
-    return dim_ == 128 && num_docs_ <= 128;
+    if (dim_ != 128) {
+      return false;
+    }
+    if (num_docs_ <= 128) {
+      return true;
+    }
+    const std::int64_t avg_tokens = num_tokens_ / std::max<std::int64_t>(num_docs_, 1);
+    return avg_tokens >= g_dim128_unrolled_min_avg_tokens;
   }
 
   std::uint8_t* d_packed_ = nullptr;
@@ -1283,4 +1297,6 @@ PYBIND11_MODULE(_bitmax_cuda, m) {
       .def_property_readonly("packed_size", &CudaInt4PackedDocs::packed_size);
   m.def("maxsim_cuda", &maxsim_cuda, py::arg("query"), py::arg("packed"), py::arg("offsets"), py::arg("dim"), py::arg("scale") = 1.0F);
   m.def("maxsim_cuda_batch", &maxsim_cuda_batch, py::arg("query"), py::arg("packed"), py::arg("offsets"), py::arg("dim"), py::arg("scale") = 1.0F);
+  m.def("set_dim128_unrolled_min_avg_tokens", [](int value) { g_dim128_unrolled_min_avg_tokens = value; }, py::arg("value"));
+  m.def("get_dim128_unrolled_min_avg_tokens", []() { return g_dim128_unrolled_min_avg_tokens; });
 }
