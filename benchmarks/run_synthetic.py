@@ -203,11 +203,24 @@ def _resolve_torch_device(requested: str):
 def _torch_cuda_supports_current_device() -> bool:
     try:
         major, minor = _torch.cuda.get_device_capability()
-        current_arch = f"sm_{major}{minor}"
         supported_arches = set(_torch.cuda.get_arch_list())
     except Exception:
         return False
-    return not supported_arches or current_arch in supported_arches
+    if not supported_arches:
+        return True
+    # CUDA SASS is forward-compatible within a major architecture: kernels
+    # compiled for sm_86 run on sm_89, so wheels often omit the exact minor.
+    for arch in supported_arches:
+        if not arch.startswith("sm_"):
+            continue
+        try:
+            value = int(arch[3:])
+        except ValueError:
+            continue
+        arch_major, arch_minor = divmod(value, 10)
+        if arch_major == major and arch_minor <= minor:
+            return True
+    return False
 
 
 def _numpy_dense_baseline_maxsim(query, packed: bitmax.PackedDocs, *, storage_dtype) -> np.ndarray:
