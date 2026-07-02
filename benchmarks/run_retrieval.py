@@ -428,6 +428,28 @@ def _variant_scores(dataset: RetrievalEmbeddings, variant: str, native_device: s
         scores, latency = _time_call(lambda: _scaled_sign_scores(dataset, token_scales), repeat=repeat)
         return scores, latency, {"implementation": "binary_token_scale", "variant": variant, "requested_device": "cpu_reference"}, _packed_doc_bytes(dataset) + dataset.doc_embeddings.shape[0] * 4
 
+    if variant == "binary_token_scale_cuda":
+        packed = bitmax.pack_signs(dataset.doc_embeddings, dataset.doc_offsets, token_scale="mean_abs")
+        scoring_packed = _prepare_bitmax_packed(packed, native_device)
+        scores, latency = _time_call(lambda: _bitmax_scores(dataset, scoring_packed, device=native_device), repeat=repeat)
+        return (
+            scores,
+            latency,
+            {"implementation": "binary_token_scale_cuda", "variant": variant, "requested_device": native_device},
+            _packed_doc_bytes(dataset) + dataset.doc_embeddings.shape[0] * 4,
+        )
+
+    if variant == "binary_token_scale_fp16_cuda":
+        packed = bitmax.pack_signs(dataset.doc_embeddings, dataset.doc_offsets, token_scale="mean_abs_fp16")
+        scoring_packed = _prepare_bitmax_packed(packed, native_device)
+        scores, latency = _time_call(lambda: _bitmax_scores(dataset, scoring_packed, device=native_device), repeat=repeat)
+        return (
+            scores,
+            latency,
+            {"implementation": "binary_token_scale_fp16_cuda", "variant": variant, "requested_device": native_device},
+            _packed_doc_bytes(dataset) + dataset.doc_embeddings.shape[0] * 2,
+        )
+
     if variant == "binary_group_scale_16":
         group_size = min(16, dataset.dim)
         group_scales = _group_scales(dataset.doc_embeddings, group_size)
@@ -538,6 +560,8 @@ def _normalize_variants(variants: str | tuple[str, ...] | list[str] | None) -> t
         "binary_doc_scale",
         "ternary_threshold",
         "binary_token_scale",
+        "binary_token_scale_cuda",
+        "binary_token_scale_fp16_cuda",
         "binary_group_scale_16",
         "int4_symmetric_per_tensor",
         "binary_calibrated_threshold",

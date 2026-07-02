@@ -37,6 +37,7 @@ def save_packed(
     output = Path(path)
     output.parent.mkdir(parents=True, exist_ok=True)
     scale_kind, scale_values = _encode_scale(packed.scale)
+    token_scale_kind, token_scale_values = _encode_scale(packed.token_scale)
     arrays: dict[str, object] = {
         "schema_version": np.array(_SCHEMA_VERSION, dtype=np.int64),
         "format": np.array("bitmax_packed_docs"),
@@ -46,6 +47,8 @@ def save_packed(
         "num_docs": np.array(packed.num_docs, dtype=np.int64),
         "scale_kind": np.array(scale_kind),
         "scale_values": scale_values,
+        "token_scale_kind": np.array(token_scale_kind),
+        "token_scale_values": token_scale_values,
         "metadata_json": np.array(json.dumps({} if metadata is None else metadata, sort_keys=True)),
         "has_centroid_calibration": np.array(calibration is not None, dtype=np.bool_),
     }
@@ -69,6 +72,9 @@ def load_packed(path: str | Path) -> PackedBundle:
         if file_format != "bitmax_packed_docs":
             raise ValueError(f"unsupported packed docs format: {file_format}")
 
+        token_scale = None
+        if "token_scale_kind" in data:
+            token_scale = _decode_scale(str(np.asarray(data["token_scale_kind"]).item()), np.asarray(data["token_scale_values"]))
         packed = PackedDocs(
             data=np.ascontiguousarray(data["data"], dtype=np.uint8),
             doc_offsets=np.ascontiguousarray(data["doc_offsets"], dtype=np.int64),
@@ -76,6 +82,7 @@ def load_packed(path: str | Path) -> PackedBundle:
             num_docs=int(np.asarray(data["num_docs"]).item()),
             scale=_decode_scale(str(np.asarray(data["scale_kind"]).item()), np.asarray(data["scale_values"])),
             device="cpu",
+            token_scale=token_scale,
         )
         metadata = json.loads(str(np.asarray(data["metadata_json"]).item()))
         calibration = None

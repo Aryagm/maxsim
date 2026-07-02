@@ -24,9 +24,10 @@ class PackedDocs:
     num_docs: int
     scale: object = None
     device: Literal["cpu", "cuda"] = "cpu"
+    token_scale: object = None
 
 
-def pack_signs(doc_embeddings, doc_offsets=None, *, dim=None, scale=None, device="cpu") -> PackedDocs:
+def pack_signs(doc_embeddings, doc_offsets=None, *, dim=None, scale=None, token_scale=None, device="cpu") -> PackedDocs:
     if device not in ("cpu", "cuda"):
         raise ValueError("device must be 'cpu' or 'cuda'")
 
@@ -58,6 +59,8 @@ def pack_signs(doc_embeddings, doc_offsets=None, *, dim=None, scale=None, device
     else:
         stored_scale = _normalize_explicit_scale(scale, int(offsets.shape[0] - 1))
 
+    stored_token_scale = _resolve_pack_token_scale(token_scale, docs)
+
     packed_docs = PackedDocs(
         data=packed,
         doc_offsets=offsets,
@@ -65,8 +68,27 @@ def pack_signs(doc_embeddings, doc_offsets=None, *, dim=None, scale=None, device
         num_docs=int(offsets.shape[0] - 1),
         scale=stored_scale,
         device="cpu",
+        token_scale=stored_token_scale,
     )
     return packed_docs if device == "cpu" else to_device(packed_docs, "cuda")
+
+
+def _resolve_pack_token_scale(token_scale, docs: np.ndarray):
+    if token_scale is None:
+        return None
+    if isinstance(token_scale, str):
+        if token_scale == "mean_abs":
+            return np.mean(np.abs(docs), axis=1, dtype=np.float64).astype(np.float32)
+        if token_scale == "l2":
+            return (np.linalg.norm(docs.astype(np.float64), axis=1) / np.sqrt(docs.shape[1])).astype(np.float32)
+        if token_scale == "mean_abs_fp16":
+            scales = np.mean(np.abs(docs), axis=1, dtype=np.float64).astype(np.float32)
+            return scales.astype(np.float16).astype(np.float32)
+        raise ValueError("token_scale must be None, 'mean_abs', 'mean_abs_fp16', 'l2', or a [num_doc_tokens] vector")
+    values = np.ascontiguousarray(_as_numpy(token_scale), dtype=np.float32)
+    if values.ndim != 1 or values.shape[0] != docs.shape[0]:
+        raise ValueError("token_scale vector must have shape [num_doc_tokens]")
+    return values
 
 
 def to_device(packed: PackedDocs, device: Literal["cpu", "cuda"] = "cuda") -> PackedDocs:
@@ -86,6 +108,11 @@ def to_device(packed: PackedDocs, device: Literal["cpu", "cuda"] = "cuda") -> Pa
     stored_scale = packed.scale.copy() if isinstance(packed.scale, np.ndarray) else packed.scale
     if isinstance(stored_scale, np.ndarray) and hasattr(handle, "set_scale_vector"):
         handle.set_scale_vector(np.ascontiguousarray(stored_scale, dtype=np.float32))
+    stored_token_scale = packed.token_scale.copy() if isinstance(packed.token_scale, np.ndarray) else packed.token_scale
+    if isinstance(stored_token_scale, np.ndarray):
+        if not hasattr(handle, "set_token_scale_vector"):
+            raise NotImplementedError("token scale vectors require a CUDA build with set_token_scale_vector")
+        handle.set_token_scale_vector(np.ascontiguousarray(stored_token_scale, dtype=np.float32))
     return PackedDocs(
         data=handle,
         doc_offsets=offsets.copy(),
@@ -93,6 +120,7 @@ def to_device(packed: PackedDocs, device: Literal["cpu", "cuda"] = "cuda") -> Pa
         num_docs=packed.num_docs,
         scale=stored_scale,
         device="cuda",
+        token_scale=stored_token_scale,
     )
 
 
@@ -122,6 +150,7 @@ def maxsim(query_tokens, packed: PackedDocs, *, scale=None, device="auto"):
     result = np.empty((query_float.shape[0], packed.num_docs), dtype=np.float32)
     resolved_scale = _resolve_scale(scale, packed)
     kernel_scale = _kernel_scale(resolved_scale)
+    use_token_scale = isinstance(packed.token_scale, np.ndarray)
 
     if effective_device == "cuda" and packed.device == "cuda":
         use_resident_vector_scale = _can_use_cuda_resident_vector_scale(resolved_scale, packed)
@@ -130,11 +159,14 @@ def maxsim(query_tokens, packed: PackedDocs, *, scale=None, device="auto"):
             np.ascontiguousarray(query_float, dtype=np.float32),
             float(kernel_scale),
             use_resident_vector_scale,
+            use_token_scale,
         )
         batch_result = _apply_vector_scale(batch_result, None if use_resident_vector_scale else resolved_scale)
         return batch_result[0] if squeeze else batch_result
 
     if effective_device == "cuda":
+        if use_token_scale:
+            raise NotImplementedError("token scale scoring on CUDA requires CUDA-resident PackedDocs; call bitmax.to_device(packed, 'cuda') first")
         packed_data = np.ascontiguousarray(packed.data, dtype=np.uint8)
         offsets = np.ascontiguousarray(packed.doc_offsets, dtype=np.int64)
         batch_kernel = getattr(_bitmax_cuda, "maxsim_cuda_batch", None)
@@ -160,7 +192,7 @@ def maxsim(query_tokens, packed: PackedDocs, *, scale=None, device="auto"):
         result = _apply_vector_scale(result, resolved_scale)
         return result[0] if squeeze else result
 
-    if _bitmax_cpp is not None:
+    if _bitmax_cpp is not None and not use_token_scale:
         packed_data = np.ascontiguousarray(packed.data, dtype=np.uint8)
         offsets = np.ascontiguousarray(packed.doc_offsets, dtype=np.int64)
         for batch_idx, query in enumerate(query_float):
@@ -175,6 +207,7 @@ def maxsim(query_tokens, packed: PackedDocs, *, scale=None, device="auto"):
         return result[0] if squeeze else result
 
     signs = _unpack_signs(packed.data, packed.dim)
+    token_scales = packed.token_scale if use_token_scale else None
     for batch_idx, query in enumerate(query_float):
         for doc_idx in range(packed.num_docs):
             start = int(packed.doc_offsets[doc_idx])
@@ -183,7 +216,10 @@ def maxsim(query_tokens, packed: PackedDocs, *, scale=None, device="auto"):
             if doc.shape[0] == 0:
                 result[batch_idx, doc_idx] = 0.0
                 continue
-            score = np.max(query @ doc.T, axis=1).sum(dtype=np.float32)
+            dots = query @ doc.T
+            if token_scales is not None:
+                dots = dots * token_scales[start:end][np.newaxis, :]
+            score = np.max(dots, axis=1).sum(dtype=np.float32)
             result[batch_idx, doc_idx] = np.float32(score * kernel_scale)
 
     result = _apply_vector_scale(result, resolved_scale)
@@ -199,6 +235,7 @@ def topk_maxsim(query_tokens, packed: PackedDocs, k: int, *, scale=None, device=
     effective_device = "cuda" if device == "auto" and packed.device == "cuda" else device
     resolved_scale = _resolve_scale(scale, packed)
     use_resident_vector_scale = _can_use_cuda_resident_vector_scale(resolved_scale, packed)
+    use_token_scale = isinstance(packed.token_scale, np.ndarray)
     if (
         effective_device == "cuda"
         and packed.device == "cuda"
@@ -224,6 +261,7 @@ def topk_maxsim(query_tokens, packed: PackedDocs, k: int, *, scale=None, device=
             float(_kernel_scale(resolved_scale)),
             use_resident_vector_scale,
             prefer_lut_topk,
+            use_token_scale,
         )
         return (scores[0], indices[0]) if squeeze else (scores, indices)
 
@@ -273,6 +311,12 @@ def _validate_packed(packed: PackedDocs) -> None:
     if packed.dim % 8 != 0:
         raise ValueError("packed.dim must be divisible by 8")
     _validate_scale_value(packed.scale, packed.num_docs)
+    if packed.token_scale is not None:
+        if not isinstance(packed.token_scale, np.ndarray):
+            raise ValueError("packed.token_scale must be a [num_doc_tokens] vector or None")
+        num_tokens = int(packed.doc_offsets[-1])
+        if packed.token_scale.ndim != 1 or packed.token_scale.shape[0] != num_tokens:
+            raise ValueError("packed.token_scale must have shape [num_doc_tokens]")
     if packed.device == "cuda":
         if not hasattr(packed.data, "maxsim_batch") and not hasattr(packed.data, "topk_batch"):
             raise ValueError("CUDA PackedDocs data must expose maxsim_batch or topk_batch")
@@ -365,17 +409,23 @@ def _can_use_cuda_resident_vector_scale(scale, packed: PackedDocs) -> bool:
     return bool(has_scale_vector)
 
 
-def _cuda_resident_maxsim_batch(handle, query: np.ndarray, scale: float, use_scale_vector: bool):
+def _cuda_resident_maxsim_batch(handle, query: np.ndarray, scale: float, use_scale_vector: bool, use_token_scale: bool = False):
+    if use_token_scale:
+        return handle.maxsim_batch(query, scale, use_scale_vector, True)
     if use_scale_vector:
         return handle.maxsim_batch(query, scale, True)
     return handle.maxsim_batch(query, scale)
 
 
-def _cuda_resident_topk_batch(handle, query: np.ndarray, k: int, scale: float, use_scale_vector: bool, prefer_lut: bool = False):
+def _cuda_resident_topk_batch(handle, query: np.ndarray, k: int, scale: float, use_scale_vector: bool, prefer_lut: bool = False, use_token_scale: bool = False):
     if prefer_lut and hasattr(handle, "topk_lut_batch"):
+        if use_token_scale:
+            return handle.topk_lut_batch(query, k, scale, use_scale_vector, True)
         if use_scale_vector:
             return handle.topk_lut_batch(query, k, scale, True)
         return handle.topk_lut_batch(query, k, scale)
+    if use_token_scale:
+        return handle.topk_batch(query, k, scale, use_scale_vector, True)
     if use_scale_vector:
         return handle.topk_batch(query, k, scale, True)
     return handle.topk_batch(query, k, scale)

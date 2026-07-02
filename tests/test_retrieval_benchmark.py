@@ -130,6 +130,8 @@ def test_embedding_stage_can_emit_experimental_pareto_variants(tmp_path):
         "bitmax_binary_doc_scale",
         "ternary_threshold",
         "binary_token_scale",
+        "binary_token_scale_cuda",
+        "binary_token_scale_fp16_cuda",
         "binary_group_scale_16",
         "int4_symmetric_per_tensor",
         "binary_calibrated_threshold",
