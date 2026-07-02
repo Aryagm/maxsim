@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -406,6 +407,9 @@ def _bitmax_scores(dataset: RetrievalEmbeddings, packed: bitmax.PackedDocs, *, d
 
 
 def _variant_scores(dataset: RetrievalEmbeddings, variant: str, native_device: str, repeat: int):
+    if _POOLED_VARIANT_PATTERN.fullmatch(variant):
+        return _pooled_variant_scores(dataset, variant, native_device, repeat)
+
     if variant == "binary":
         packed = bitmax.pack_signs(dataset.doc_embeddings, dataset.doc_offsets)
         scoring_packed = _prepare_bitmax_packed(packed, native_device)
@@ -527,6 +531,54 @@ def _variant_scores(dataset: RetrievalEmbeddings, variant: str, native_device: s
     raise ValueError(f"unknown retrieval variant: {variant}")
 
 
+_POOLED_VARIANT_PATTERN = re.compile(r"pool(\d+)_(dense_fp32|binary|binary_token_scale_cuda)")
+
+
+def _pooled_variant_scores(dataset: RetrievalEmbeddings, variant: str, native_device: str, repeat: int):
+    match = _POOLED_VARIANT_PATTERN.fullmatch(variant)
+    factor = int(match.group(1))
+    inner = match.group(2)
+
+    from benchmarks.pooling import pool_doc_tokens
+
+    pooled_docs, pooled_offsets = pool_doc_tokens(dataset.doc_embeddings, dataset.doc_offsets, factor)
+    pooled = RetrievalEmbeddings(
+        name=dataset.name,
+        query_embeddings=dataset.query_embeddings,
+        doc_embeddings=pooled_docs,
+        doc_offsets=pooled_offsets,
+        qrels=dataset.qrels,
+        query_ids=dataset.query_ids,
+        doc_ids=dataset.doc_ids,
+    )
+    pooled_tokens = int(pooled_offsets[-1])
+    metadata = {
+        "implementation": variant,
+        "variant": variant,
+        "pool_factor": factor,
+        "pooled_tokens": pooled_tokens,
+        "realized_token_ratio": float(dataset.doc_embeddings.shape[0] / max(pooled_tokens, 1)),
+    }
+
+    if inner == "dense_fp32":
+        scores, latency = _time_call(lambda: _dense_scores_with_docs(pooled, pooled.doc_embeddings), repeat=repeat)
+        metadata["requested_device"] = "cpu_reference"
+        return scores, latency, metadata, pooled_tokens * dataset.dim * 4
+
+    if inner == "binary":
+        packed = bitmax.pack_signs(pooled.doc_embeddings, pooled.doc_offsets)
+        storage = pooled_tokens * (dataset.dim // 8)
+    else:
+        packed = bitmax.pack_signs(pooled.doc_embeddings, pooled.doc_offsets, token_scale="mean_abs")
+        storage = pooled_tokens * (dataset.dim // 8) + pooled_tokens * 4
+    scoring_packed = _prepare_bitmax_packed(packed, native_device)
+    scores, latency = _time_call(lambda: _bitmax_scores(pooled, scoring_packed, device=native_device), repeat=repeat)
+    metadata["requested_device"] = native_device
+    if native_device == "cuda" and hasattr(scoring_packed.data, "maxsim_kernel_variant"):
+        metadata["maxsim_kernel_variant"] = scoring_packed.data.maxsim_kernel_variant
+    return scores, latency, metadata, storage
+
+
 def _prepare_bitmax_packed(packed: bitmax.PackedDocs, device: str):
     return bitmax.to_device(packed, "cuda") if device == "cuda" else packed
 
@@ -575,7 +627,9 @@ def _normalize_variants(variants: str | tuple[str, ...] | list[str] | None) -> t
         values = tuple(value.strip() for value in variants.split(",") if value.strip())
     else:
         values = tuple(str(value) for value in variants)
-    unknown = sorted(set(values) - set(all_variants))
+    unknown = sorted(
+        value for value in set(values) if value not in all_variants and not _POOLED_VARIANT_PATTERN.fullmatch(value)
+    )
     if unknown:
         raise ValueError(f"unknown retrieval variants: {unknown}")
     return values
