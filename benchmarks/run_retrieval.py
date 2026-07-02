@@ -702,6 +702,7 @@ def _result_row(
         f"ndcg_at_{requested_top_k}": float(metrics["ndcg_at_k"]),
         f"topk_agreement_vs_dense_at_{requested_top_k}": float(_topk_agreement(scores, dense_reference_scores, effective_top_k)),
         f"quality_delta_vs_dense_ndcg_at_{requested_top_k}": float(metrics["ndcg_at_k"] - dense_metrics["ndcg_at_k"]),
+        f"per_query_ndcg_at_{requested_top_k}": _per_query_ndcg(scores, qrels, k=effective_top_k),
     }
     if baseline_row is not None:
         row["baseline_latency_ms"] = {"dense_fp16_baseline": baseline_row["latency_ms"]}
@@ -734,6 +735,17 @@ def _ranking_metrics(scores: np.ndarray, qrels: np.ndarray, *, k: int) -> dict[s
         "mrr_at_k": float(np.mean(reciprocal_ranks)),
         "ndcg_at_k": float(np.mean(ndcgs)),
     }
+
+
+def _per_query_ndcg(scores: np.ndarray, qrels: np.ndarray, *, k: int) -> list[float | None]:
+    values: list[float | None] = []
+    for query_scores, query_relevance in zip(scores, qrels):
+        if float(np.sum(query_relevance > 0)) == 0:
+            values.append(None)
+            continue
+        order = _rank_indices(query_scores, k)
+        values.append(round(_ndcg(query_relevance, order, k), 6))
+    return values
 
 
 def _rank_indices(scores: np.ndarray, k: int) -> np.ndarray:
