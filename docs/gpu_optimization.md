@@ -662,3 +662,39 @@ second embedding model.
 Also measured and rejected: cluster-mass-aware scales for the pooled tier
 (size or sqrt(size) weighting collapses NDCG to 0.29-0.80 — under MaxSim a
 large background cluster must not amplify its match score).
+
+## 2026-07-03: Standardized Paper Suite (Full ViDoRe, 10k Corpus, 25k Scale, ColPali)
+
+Full-scale run across 6 parallel RTX 4090s (embedding builds) + 2 benchmark
+lanes. All artifacts: benchmark-results/paper-*.json (14 per-dataset tables at
+repeat 3 with per-query vectors, pool3 companions, 10k comparison, 25k
+docscale). Harness fixes shipped during the run: gate baselines on CUDA,
+dense-reference caching per (cache, repeat, device), skip-guards, integrity
+glob scoping. Known infra findings: build_vidore_embeddings is NOT
+batch-faithful (batch-4 vs batch-1 mean cosine 0.19 — batch-1 is load-bearing
+until fixed); one Vast host family routes HF downloads through a broken proxy.
+
+ColQwen2, 10 datasets, full test splits (mean NDCG@10): dense 0.4559 |
+int4+dp4a 0.4545 | binary 0.4497 | pool2 0.4485 | balanced fp16-scales 0.4484
+| compact u4 0.4482 | pool3 0.4473. ColPali (4 datasets): same ordering.
+
+Mixed unique 10k corpus (256 queries, repeat 3): dense 0.5079 @ 148s |
+int4+dp4a 0.4980 @ 1.15s (vs 4.77s fp32-query int4) | pool3 0.4888 @ 0.47s @
+95.9x | binary 0.4868 @ 0.71s | pool2 0.4801 | token scales 0.4752/0.4739
+(HURT at this scale) | fast-plaid 0.5103 @ 820s (default args — committed
+runs used tuned nbits/probe args and were much faster; do not cite this
+fast-plaid latency without rerunning tuned) | FAISS mean-pool collapses
+(0.036). Docscale 25k: pool3 0.4659 > pool2 0.4460 > binary 0.4421 >
+token scales 0.4286-0.4301; dense 0.4992 @ 89s vs pool3 @ 0.29s.
+
+Revised guidance from standardized scale:
+
+1. Token-scale variants are a SMALL/MID-corpus optimization (<~500 docs).
+   At 10k+ mixed corpora they lose to plain binary. The SDK "balanced"
+   default is only right for small corpora; corpus-size-aware routing or an
+   int4+dp4a default is the better product story.
+2. int4 + dp4a is the strongest all-scale quality tier: within -0.010 of
+   dense everywhere measured, 60-130x dense latency, 8x storage.
+3. Pooling IMPROVES relatively with scale and corpus heterogeneity; pool3 at
+   95.9x beats pool2 and plain binary on both 10k and 25k corpora — the
+   max_compression tier is stronger than any dev-slice suggested.
