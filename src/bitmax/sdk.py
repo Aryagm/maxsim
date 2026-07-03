@@ -20,7 +20,16 @@ from bitmax.experimental import (
     topk_int4_maxsim,
 )
 
-CorpusMode = Literal["binary", "binary_token_scale", "binary_q40", "int4"]
+CorpusMode = Literal["binary", "binary_token_scale", "binary_token_scale_u8", "binary_q40", "int4"]
+
+# Named accuracy/size/latency tiers over the measured pareto frontier
+# (docs/gpu_optimization.md, 2026-07-02). "balanced" is the default.
+MODE_PRESETS = {
+    "balanced": "binary_token_scale",
+    "max_quality": "int4",
+    "max_compression": "binary_token_scale_u8",
+    "max_speed": "binary",
+}
 
 
 @dataclass(frozen=True)
@@ -46,9 +55,10 @@ class Corpus:
         embeddings,
         offsets,
         *,
-        mode: CorpusMode = "binary",
+        mode: str = "balanced",
         metadata: dict[str, Any] | None = None,
     ) -> "Corpus":
+        mode = MODE_PRESETS.get(mode, mode)
         doc_id_values = _normalize_doc_ids(doc_ids)
         docs = _as_numpy(embeddings).astype(np.float32, copy=False)
         offsets_array = _normalize_sdk_offsets(offsets, docs.shape[0])
@@ -65,6 +75,13 @@ class Corpus:
                 doc_ids=doc_id_values,
                 mode=mode,
                 packed=pack_signs(docs, offsets_array, token_scale="mean_abs_fp16"),
+                metadata={} if metadata is None else dict(metadata),
+            )
+        if mode == "binary_token_scale_u8":
+            return cls(
+                doc_ids=doc_id_values,
+                mode=mode,
+                packed=pack_signs(docs, offsets_array, token_scale="mean_abs_u8"),
                 metadata={} if metadata is None else dict(metadata),
             )
         if mode == "binary_q40":
@@ -111,7 +128,12 @@ class Corpus:
                 }
             )
             if self.packed.token_scale is not None:
-                arrays["token_scale_fp16"] = np.ascontiguousarray(self.packed.token_scale, dtype=np.float16)
+                if self.mode == "binary_token_scale_u8":
+                    codes, params = _encode_log_u8(self.packed.token_scale)
+                    arrays["token_scale_u8_codes"] = codes
+                    arrays["token_scale_u8_params"] = params
+                else:
+                    arrays["token_scale_fp16"] = np.ascontiguousarray(self.packed.token_scale, dtype=np.float16)
             if self.calibration is not None:
                 arrays.update(
                     {
@@ -147,7 +169,7 @@ class Corpus:
             metadata = json.loads(str(np.asarray(data["metadata_json"]).item()))
             offsets = np.ascontiguousarray(data["doc_offsets"], dtype=np.int64)
             dim = int(np.asarray(data["dim"]).item())
-            if mode in {"binary", "binary_token_scale", "binary_q40"}:
+            if mode in {"binary", "binary_token_scale", "binary_token_scale_u8", "binary_q40"}:
                 calibration = None
                 if mode == "binary_q40":
                     calibration = DimCentroidCalibration(
@@ -158,6 +180,8 @@ class Corpus:
                 token_scale = None
                 if "token_scale_fp16" in data:
                     token_scale = np.ascontiguousarray(data["token_scale_fp16"]).astype(np.float32)
+                elif "token_scale_u8_codes" in data:
+                    token_scale = _decode_log_u8(np.asarray(data["token_scale_u8_codes"]), np.asarray(data["token_scale_u8_params"]))
                 return cls(
                     doc_ids=doc_ids,
                     mode=mode,
@@ -211,7 +235,8 @@ class Corpus:
         if self.packed is not None:
             extra = 0 if self.calibration is None else int(self.calibration.metadata_bytes)
             if self.packed.token_scale is not None:
-                extra += int(self.packed.token_scale.shape[0]) * 2
+                per_token = 1 if self.mode == "binary_token_scale_u8" else 2
+                extra += int(self.packed.token_scale.shape[0]) * per_token + (16 if per_token == 1 else 0)
             if isinstance(self.packed.data, np.ndarray):
                 return int(self.packed.data.size + extra)
             return int(self.packed.doc_offsets[-1] * (self.packed.dim // 8) + extra)
@@ -239,7 +264,7 @@ class Reranker:
     def search(self, query_embeddings, *, k: int = 10):
         _validate_k(k, self.corpus.num_docs)
         actual_k = min(k, self.corpus.num_docs)
-        if self.corpus.mode in {"binary", "binary_token_scale"}:
+        if self.corpus.mode in {"binary", "binary_token_scale", "binary_token_scale_u8"}:
             scores, indices = topk_maxsim(query_embeddings, self.corpus.packed, actual_k, device="auto")
         elif self.corpus.mode == "binary_q40":
             scores, indices = topk_dim_centroid_maxsim(query_embeddings, self.corpus.packed, self.corpus.calibration, actual_k, device="auto")
@@ -258,7 +283,7 @@ class Reranker:
         return _format_candidate_results(scores, candidate_indices, candidates, min(k, len(candidates)))
 
     def _score_all(self, query_embeddings):
-        if self.corpus.mode in {"binary", "binary_token_scale"}:
+        if self.corpus.mode in {"binary", "binary_token_scale", "binary_token_scale_u8"}:
             return maxsim(query_embeddings, self.corpus.packed, device="auto")
         if self.corpus.mode == "binary_q40":
             return dim_centroid_maxsim(query_embeddings, self.corpus.packed, self.corpus.calibration, device="auto")
@@ -303,8 +328,11 @@ def _validate_corpus_inputs(doc_ids: tuple[str, ...], docs: np.ndarray, offsets:
         raise ValueError("embedding dim must be divisible by 8")
     if offsets.shape[0] != len(doc_ids) + 1:
         raise ValueError("offsets must have one more entry than doc_ids")
-    if mode not in {"binary", "binary_token_scale", "binary_q40", "int4"}:
-        raise ValueError("mode must be 'binary', 'binary_token_scale', 'binary_q40', or 'int4'")
+    if mode not in {"binary", "binary_token_scale", "binary_token_scale_u8", "binary_q40", "int4"}:
+        raise ValueError(
+            "mode must be one of 'binary', 'binary_token_scale', 'binary_token_scale_u8', 'binary_q40', 'int4', "
+            f"or a preset in {sorted(MODE_PRESETS)}"
+        )
 
 
 def _move_corpus(corpus: Corpus, device: str) -> Corpus:
@@ -347,6 +375,24 @@ def _decode_scale(kind: str, values: np.ndarray):
     if kind == "vector":
         return np.ascontiguousarray(values, dtype=np.float32)
     raise ValueError(f"unknown scale kind: {kind}")
+
+
+def _encode_log_u8(values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    logs = np.log(np.maximum(values.astype(np.float64), 1e-12))
+    lo = float(logs.min())
+    hi = float(logs.max())
+    if hi <= lo:
+        return np.zeros(values.shape[0], dtype=np.uint8), np.array([lo, lo], dtype=np.float64)
+    codes = np.clip(np.rint((logs - lo) * (255.0 / (hi - lo))), 0, 255).astype(np.uint8)
+    return codes, np.array([lo, hi], dtype=np.float64)
+
+
+def _decode_log_u8(codes: np.ndarray, params: np.ndarray) -> np.ndarray:
+    lo = float(params[0])
+    hi = float(params[1])
+    if hi <= lo:
+        return np.full(codes.shape[0], np.exp(lo), dtype=np.float32)
+    return np.exp(lo + codes.astype(np.float64) * ((hi - lo) / 255.0)).astype(np.float32)
 
 
 def _unpack_signed_int4_data(data: np.ndarray, dim: int) -> np.ndarray:

@@ -174,3 +174,42 @@ def test_sdk_binary_token_scale_corpus_round_trip(tmp_path):
     reference = bitmax.maxsim(query, corpus.packed, device="cpu")
     order = np.lexsort((np.arange(reference.shape[0], dtype=np.int64), -reference))[:3]
     assert [r.doc_id for r in results] == [doc_ids[int(i)] for i in order]
+
+
+def test_sdk_mode_presets_resolve():
+    from bitmax.sdk import Corpus, MODE_PRESETS
+
+    docs, offsets = _ragged_fixture(4, 16, seed=109)
+    doc_ids = [f"doc-{i}" for i in range(4)]
+    assert MODE_PRESETS["balanced"] == "binary_token_scale"
+    default_corpus = Corpus.from_embeddings(doc_ids, docs, offsets)
+    assert default_corpus.mode == "binary_token_scale"
+    quality = Corpus.from_embeddings(doc_ids, docs, offsets, mode="max_quality")
+    assert quality.mode == "int4"
+    compression = Corpus.from_embeddings(doc_ids, docs, offsets, mode="max_compression")
+    assert compression.mode == "binary_token_scale_u8"
+    speed = Corpus.from_embeddings(doc_ids, docs, offsets, mode="max_speed")
+    assert speed.mode == "binary"
+
+
+def test_sdk_u8_corpus_round_trip(tmp_path):
+    from bitmax.sdk import Corpus, Reranker
+
+    docs, offsets = _ragged_fixture(6, 16, seed=113)
+    doc_ids = [f"doc-{i}" for i in range(6)]
+    corpus = Corpus.from_embeddings(doc_ids, docs, offsets, mode="max_compression")
+    plain = Corpus.from_embeddings(doc_ids, docs, offsets, mode="binary")
+    assert corpus.storage_bytes == plain.storage_bytes + docs.shape[0] * 1 + 16
+
+    path = tmp_path / "corpus-u8.npz"
+    corpus.save(path)
+    loaded = Corpus.load(path)
+    assert loaded.mode == "binary_token_scale_u8"
+    np.testing.assert_allclose(loaded.packed.token_scale, corpus.packed.token_scale, rtol=5e-3)
+
+    rng = np.random.default_rng(127)
+    query = rng.standard_normal((3, 16)).astype(np.float32)
+    results = Reranker.from_corpus(loaded).search(query, k=3)
+    reference = bitmax.maxsim(query, loaded.packed, device="cpu")
+    order = np.lexsort((np.arange(reference.shape[0], dtype=np.int64), -reference))[:3]
+    assert [r.doc_id for r in results] == [doc_ids[int(i)] for i in order]

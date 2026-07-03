@@ -320,3 +320,30 @@ def test_cuda_device_request_fails_clearly_without_cuda_build():
 
         with pytest.raises(NotImplementedError, match="CUDA maxsim is not available"):
             bitmax.maxsim(query, packed, device="cuda")
+
+
+@pytest.mark.cuda
+def test_cuda_qtile_kernel_matches_unrolled_kernel():
+    pytest.importorskip("bitmax._bitmax_cuda")
+    from bitmax import _bitmax_cuda
+
+    rng = np.random.default_rng(139)
+    lengths = rng.integers(0, 12, size=300)
+    offsets = np.concatenate([[0], np.cumsum(lengths)]).astype(np.int64)
+    docs = rng.standard_normal((int(offsets[-1]), 128)).astype(np.float32)
+    query = rng.standard_normal((3, 19, 128)).astype(np.float32)
+
+    packed = bitmax.pack_signs(docs, offsets, token_scale="mean_abs_fp16")
+    cuda_packed = bitmax.to_device(packed, "cuda")
+    previous = _bitmax_cuda.get_dim128_qtile_min_packed_bytes()
+    try:
+        _bitmax_cuda.set_dim128_qtile_min_packed_bytes(1 << 62)
+        baseline_scores, baseline_indices = bitmax.topk_maxsim(query, cuda_packed, 10, device="cuda")
+        _bitmax_cuda.set_dim128_qtile_min_packed_bytes(1)
+        assert cuda_packed.data.maxsim_kernel_variant == "dim128_qtile"
+        qtile_scores, qtile_indices = bitmax.topk_maxsim(query, cuda_packed, 10, device="cuda")
+    finally:
+        _bitmax_cuda.set_dim128_qtile_min_packed_bytes(previous)
+
+    np.testing.assert_array_equal(qtile_indices, baseline_indices)
+    np.testing.assert_allclose(qtile_scores, baseline_scores, rtol=1e-5, atol=1e-3)

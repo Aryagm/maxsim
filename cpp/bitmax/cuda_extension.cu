@@ -25,6 +25,101 @@ constexpr int kTopkThreads = 256;
 // (0.71-0.86x) at 32-128 tokens/doc.
 int g_dim128_unrolled_min_avg_tokens = 256;
 
+// Packed corpora at least this large route to the q-tiled one-pass kernel,
+// which reads each packed row once per 8 query tokens instead of once per
+// query token. Only pays when the corpus spills the L2 cache (72MB on Ada);
+// smaller corpora stay on the unrolled kernel.
+std::size_t g_dim128_qtile_min_packed_bytes = 48ULL << 20;
+
+constexpr int kQTile = 8;
+
+__global__ void maxsim_batched_dim128_qtile_kernel(
+    const float* query,
+    const std::uint8_t* packed,
+    const std::int64_t* offsets,
+    float* output,
+    int batch,
+    int query_tokens,
+    int num_docs,
+    float scale,
+    const float* scale_vector,
+    const float* token_scales) {
+  const int doc_idx = blockIdx.x;
+  const int batch_idx = blockIdx.y;
+  const int tid = threadIdx.x;
+  __shared__ float reductions[kBlockThreads];
+  __shared__ float query_tile[kQTile][128];
+
+  if (doc_idx >= num_docs || batch_idx >= batch) {
+    return;
+  }
+
+  const std::int64_t start = offsets[doc_idx];
+  const std::int64_t end = offsets[doc_idx + 1];
+  float doc_score = 0.0F;
+
+  for (int tile_start = 0; tile_start < query_tokens; tile_start += kQTile) {
+    for (int idx = tid; idx < kQTile * 128; idx += blockDim.x) {
+      const int q = tile_start + idx / 128;
+      query_tile[idx / 128][idx % 128] =
+          q < query_tokens
+              ? query[(static_cast<std::int64_t>(batch_idx) * query_tokens + q) * 128 + (idx % 128)]
+              : 0.0F;
+    }
+    __syncthreads();
+
+    float best[kQTile];
+#pragma unroll
+    for (int slot = 0; slot < kQTile; ++slot) {
+      best[slot] = -3.402823466e+38F;
+    }
+
+    for (std::int64_t token = start + tid; token < end; token += blockDim.x) {
+      const uint4 row = *reinterpret_cast<const uint4*>(packed + token * 16);
+      const std::uint32_t words[4] = {row.x, row.y, row.z, row.w};
+      const float token_scale = token_scales != nullptr ? token_scales[token] : 1.0F;
+#pragma unroll
+      for (int slot = 0; slot < kQTile; ++slot) {
+        float dot = 0.0F;
+#pragma unroll
+        for (int word = 0; word < 4; ++word) {
+          const std::uint32_t bits = words[word];
+#pragma unroll
+          for (int bit = 0; bit < 32; ++bit) {
+            const float value = query_tile[slot][32 * word + bit];
+            dot += ((bits >> bit) & 1U) ? value : -value;
+          }
+        }
+        dot *= token_scale;
+        best[slot] = dot > best[slot] ? dot : best[slot];
+      }
+    }
+
+#pragma unroll
+    for (int slot = 0; slot < kQTile; ++slot) {
+      __syncthreads();
+      reductions[tid] = best[slot];
+      __syncthreads();
+      for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+          const float other = reductions[tid + stride];
+          reductions[tid] = other > reductions[tid] ? other : reductions[tid];
+        }
+        __syncthreads();
+      }
+      if (tid == 0 && start != end) {
+        doc_score += reductions[0];
+      }
+    }
+    __syncthreads();
+  }
+
+  if (tid == 0) {
+    const float doc_scale = scale_vector == nullptr ? scale : scale_vector[doc_idx];
+    output[static_cast<std::int64_t>(batch_idx) * num_docs + doc_idx] = doc_score * doc_scale;
+  }
+}
+
 void check_cuda(cudaError_t status, const char* action) {
   if (status != cudaSuccess) {
     throw std::runtime_error(std::string(action) + ": " + cudaGetErrorString(status));
@@ -1187,6 +1282,9 @@ class CudaPackedDocs {
   bool has_token_scale_vector() const { return has_token_scale_vector_; }
   std::size_t token_scale_vector_size() const { return has_token_scale_vector_ ? static_cast<std::size_t>(num_tokens_) : 0; }
   const char* maxsim_kernel_variant() const {
+    if (dim_ == 128 && packed_size_ >= g_dim128_qtile_min_packed_bytes) {
+      return "dim128_qtile";
+    }
     return use_dim128_unrolled() ? "dim128_unrolled" : "generic";
   }
 
@@ -1225,6 +1323,11 @@ class CudaPackedDocs {
 
   void launch_maxsim(float* d_query, float* d_output, int batch, int query_tokens, float scale, const float* d_scale_vector, const float* d_token_scales, const char* label) {
     dim3 grid(num_docs_, batch);
+    if (dim_ == 128 && packed_size_ >= g_dim128_qtile_min_packed_bytes) {
+      maxsim_batched_dim128_qtile_kernel<<<grid, kBlockThreads>>>(d_query, d_packed_, d_offsets_, d_output, batch, query_tokens, num_docs_, scale, d_scale_vector, d_token_scales);
+      check_cuda(cudaGetLastError(), (std::string("launch ") + label + " dim128 qtile kernel").c_str());
+      return;
+    }
     if (use_dim128_unrolled()) {
       maxsim_batched_dim128_unrolled_kernel<<<grid, kBlockThreads>>>(d_query, d_packed_, d_offsets_, d_output, batch, query_tokens, num_docs_, scale, d_scale_vector, d_token_scales);
       check_cuda(cudaGetLastError(), (std::string("launch ") + label + " dim128 unrolled kernel").c_str());
@@ -1735,4 +1838,6 @@ PYBIND11_MODULE(_bitmax_cuda, m) {
   m.def("maxsim_cuda_batch", &maxsim_cuda_batch, py::arg("query"), py::arg("packed"), py::arg("offsets"), py::arg("dim"), py::arg("scale") = 1.0F);
   m.def("set_dim128_unrolled_min_avg_tokens", [](int value) { g_dim128_unrolled_min_avg_tokens = value; }, py::arg("value"));
   m.def("get_dim128_unrolled_min_avg_tokens", []() { return g_dim128_unrolled_min_avg_tokens; });
+  m.def("set_dim128_qtile_min_packed_bytes", [](std::size_t value) { g_dim128_qtile_min_packed_bytes = value; }, py::arg("value"));
+  m.def("get_dim128_qtile_min_packed_bytes", []() { return g_dim128_qtile_min_packed_bytes; });
 }
