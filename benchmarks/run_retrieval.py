@@ -468,6 +468,17 @@ def _variant_scores(dataset: RetrievalEmbeddings, variant: str, native_device: s
             _packed_doc_bytes(dataset) + dataset.doc_embeddings.shape[0] * 2,
         )
 
+    if variant == "binary_token_scale_u4_cuda":
+        packed = bitmax.pack_signs(dataset.doc_embeddings, dataset.doc_offsets, token_scale="mean_abs_u4")
+        scoring_packed = _prepare_bitmax_packed(packed, native_device)
+        scores, latency = _time_call(lambda: _bitmax_scores(dataset, scoring_packed, device=native_device), repeat=repeat)
+        return (
+            scores,
+            latency,
+            {"implementation": "binary_token_scale_u4_cuda", "variant": variant, "requested_device": native_device},
+            _packed_doc_bytes(dataset) + (dataset.doc_embeddings.shape[0] + 1) // 2 + 16,
+        )
+
     if variant == "binary_token_scale_u8_cuda":
         packed = bitmax.pack_signs(dataset.doc_embeddings, dataset.doc_offsets, token_scale="mean_abs_u8")
         scoring_packed = _prepare_bitmax_packed(packed, native_device)
@@ -676,6 +687,7 @@ def _normalize_variants(variants: str | tuple[str, ...] | list[str] | None) -> t
         "binary_token_scale_cuda",
         "binary_token_scale_fp16_cuda",
         "binary_token_scale_u8_cuda",
+        "binary_token_scale_u4_cuda",
         "binary_group_scale_16",
         "int4_symmetric_per_tensor",
         "binary_calibrated_threshold",

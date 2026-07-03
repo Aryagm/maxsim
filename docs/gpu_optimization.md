@@ -640,3 +640,25 @@ packing swaps (int4-on-pooled), and rotation have all been measured. The
 remaining gaps are the information cost of the bit budget; the paths that
 remain are spending bytes (tier up) or quantization-aware embedding training
 (model-side, out of library scope).
+
+## 2026-07-03: Coarse Magnitude Codes — 16 Levels Are Enough (u4 Tier)
+
+Sweep across all four 256-query slices
+(`benchmark-results/coarse-scale-*-limit256.json`): quantizing per-token
+mean-abs scales to k log-spaced levels shows 16 levels (4 bits/token, 31.0x)
+is the sweet spot — NDCG@10 vs the fp16-scale default: docvqa +0.0034
+(0.6617, above dense), infovqa +0.0018, arxivqa -0.0008, tabfquad +0.0005;
+paired per-query stats show single-digit win/loss counts (statistical tie in
+quality at strictly better compression). 2 levels lose measurably; 256 levels
+(u8) buy nothing over 16. Coarse log-quantization of magnitudes acts as mild
+regularization.
+
+Adopted: `token_scale="mean_abs_u4"` in pack_signs, SDK mode
+`binary_token_scale_u4` with true 4-bit nibble-packed codes on disk, and the
+`compact` preset now maps to it (retiring u8 from the presets; the mode
+remains). `balanced` (fp16 scales) stays the default pending validation on a
+second embedding model.
+
+Also measured and rejected: cluster-mass-aware scales for the pooled tier
+(size or sqrt(size) weighting collapses NDCG to 0.29-0.80 — under MaxSim a
+large background cluster must not amplify its match score).
