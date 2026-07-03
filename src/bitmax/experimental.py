@@ -303,6 +303,31 @@ def int4_maxsim(query_tokens, packed: Int4PackedDocs, *, device="auto") -> np.nd
     return result[0] if squeeze else result
 
 
+def int4_maxsim_int8q(query_tokens, packed: Int4PackedDocs, *, device="auto") -> np.ndarray:
+    """Score with the dp4a int8-query x int4-doc CUDA kernel (dim=128 only)."""
+    _validate_int4_packed(packed)
+    effective_device = "cuda" if device == "auto" and packed.device == "cuda" else device
+    if effective_device == "cuda" and packed.device == "cpu":
+        return int4_maxsim_int8q(query_tokens, int4_to_device(packed), device="cuda")
+    if packed.device != "cuda" or not hasattr(packed.data, "maxsim_batch_int8q"):
+        raise NotImplementedError("int8-query int4 scoring requires a CUDA build with maxsim_batch_int8q")
+
+    query = _as_numpy(query_tokens).astype(np.float32, copy=False)
+    if query.ndim == 2:
+        batches = query[np.newaxis, :, :]
+        squeeze = True
+    elif query.ndim == 3:
+        batches = query
+        squeeze = False
+    else:
+        raise ValueError("query_tokens must have shape [query_tokens, dim] or [batch, query_tokens, dim]")
+    if batches.shape[2] != packed.dim:
+        raise ValueError(f"query dim={batches.shape[2]} does not match packed dim={packed.dim}")
+
+    result = packed.data.maxsim_batch_int8q(np.ascontiguousarray(batches, dtype=np.float32))
+    return result[0] if squeeze else result
+
+
 def topk_int4_maxsim(query_tokens, packed: Int4PackedDocs, k: int, *, device="auto"):
     if k < 1:
         raise ValueError("k must be >= 1")

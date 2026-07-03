@@ -340,6 +340,121 @@ __global__ void maxsim_int4_batched_kernel(
   }
 }
 
+// Quantize fp32 query rows to int8 with one symmetric scale per (batch, q)
+// row, permuted to match the int4 nibble interleave: output word w in [0,16)
+// holds dims {8w, 8w+2, 8w+4, 8w+6} (low nibbles) and word 16+w holds dims
+// {8w+1, 8w+3, 8w+5, 8w+7} (high nibbles).
+__global__ void quantize_query_int8_dim128_kernel(
+    const float* query,
+    std::int32_t* query_int8_words,
+    float* query_scales,
+    int batch,
+    int query_tokens) {
+  const int row = blockIdx.x * blockDim.x + threadIdx.x;
+  const int total_rows = batch * query_tokens;
+  if (row >= total_rows) {
+    return;
+  }
+
+  const float* query_row = query + static_cast<std::int64_t>(row) * 128;
+  float max_abs = 0.0F;
+  for (int dim_idx = 0; dim_idx < 128; ++dim_idx) {
+    const float value = fabsf(query_row[dim_idx]);
+    max_abs = value > max_abs ? value : max_abs;
+  }
+  const float scale = max_abs == 0.0F ? 1.0F : max_abs / 127.0F;
+  const float inv_scale = 1.0F / scale;
+  query_scales[row] = scale;
+
+  std::int32_t* out = query_int8_words + static_cast<std::int64_t>(row) * 32;
+  for (int word = 0; word < 16; ++word) {
+    std::int32_t even_word = 0;
+    std::int32_t odd_word = 0;
+    for (int lane = 0; lane < 4; ++lane) {
+      const int even_dim = 8 * word + 2 * lane;
+      const int odd_dim = even_dim + 1;
+      const int even_q = max(-127, min(127, __float2int_rn(query_row[even_dim] * inv_scale)));
+      const int odd_q = max(-127, min(127, __float2int_rn(query_row[odd_dim] * inv_scale)));
+      even_word |= (even_q & 0xFF) << (8 * lane);
+      odd_word |= (odd_q & 0xFF) << (8 * lane);
+    }
+    out[word] = even_word;
+    out[16 + word] = odd_word;
+  }
+}
+
+__device__ __forceinline__ int dot_int4_int8q_dim128(const std::int32_t* q_words, const std::uint32_t* doc_words) {
+  int acc = 0;
+#pragma unroll
+  for (int word = 0; word < 16; ++word) {
+    const std::uint32_t packed_word = doc_words[word];
+    const std::int32_t lo = __vsub4((packed_word & 0x0F0F0F0FU) ^ 0x08080808U, 0x08080808U);
+    const std::int32_t hi = __vsub4(((packed_word >> 4) & 0x0F0F0F0FU) ^ 0x08080808U, 0x08080808U);
+    acc = __dp4a(lo, q_words[word], acc);
+    acc = __dp4a(hi, q_words[16 + word], acc);
+  }
+  return acc;
+}
+
+__global__ void maxsim_int4_int8q_dim128_kernel(
+    const std::int32_t* query_int8_words,
+    const float* query_scales,
+    const std::uint8_t* packed,
+    const std::int64_t* offsets,
+    float* output,
+    int batch,
+    int query_tokens,
+    int num_docs,
+    float scale) {
+  const int doc_idx = blockIdx.x;
+  const int batch_idx = blockIdx.y;
+  const int tid = threadIdx.x;
+  __shared__ int reductions_int[kBlockThreads];
+
+  if (doc_idx >= num_docs || batch_idx >= batch) {
+    return;
+  }
+
+  const std::int64_t start = offsets[doc_idx];
+  const std::int64_t end = offsets[doc_idx + 1];
+  float doc_score = 0.0F;
+
+  for (int q = 0; q < query_tokens; ++q) {
+    const std::int64_t row = static_cast<std::int64_t>(batch_idx) * query_tokens + q;
+    const std::int32_t* q_words_global = query_int8_words + row * 32;
+    std::int32_t q_words[32];
+#pragma unroll
+    for (int word = 0; word < 32; ++word) {
+      q_words[word] = q_words_global[word];
+    }
+
+    int local_best = -2147483647 - 1;
+    for (std::int64_t token = start + tid; token < end; token += blockDim.x) {
+      const std::uint32_t* doc_words = reinterpret_cast<const std::uint32_t*>(packed + token * 64);
+      const int dot = dot_int4_int8q_dim128(q_words, doc_words);
+      local_best = dot > local_best ? dot : local_best;
+    }
+
+    reductions_int[tid] = local_best;
+    __syncthreads();
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+      if (tid < stride) {
+        const int other = reductions_int[tid + stride];
+        reductions_int[tid] = other > reductions_int[tid] ? other : reductions_int[tid];
+      }
+      __syncthreads();
+    }
+    if (tid == 0 && start != end) {
+      doc_score += static_cast<float>(reductions_int[0]) * query_scales[row];
+    }
+    __syncthreads();
+  }
+
+  if (tid == 0) {
+    output[static_cast<std::int64_t>(batch_idx) * num_docs + doc_idx] = doc_score * scale;
+  }
+}
+
 __global__ void topk_kernel(
     const float* scores,
     float* top_scores,
@@ -1047,6 +1162,8 @@ class CudaInt4PackedDocs {
     cudaFree(d_packed_);
     cudaFree(d_offsets_);
     cudaFree(d_query_);
+    cudaFree(d_query_words_);
+    cudaFree(d_query_scales_);
     cudaFree(d_scores_);
     cudaFree(d_top_scores_);
     cudaFree(d_top_indices_);
@@ -1113,6 +1230,48 @@ class CudaInt4PackedDocs {
     return py::make_tuple(output_scores, output_indices);
   }
 
+  py::array_t<float> maxsim_batch_int8q(py::array_t<float, py::array::c_style | py::array::forcecast> query) {
+    const auto shape = validate_int8q_query(query);
+    const int batch = shape.first;
+    const int query_tokens = shape.second;
+    const std::size_t output_bytes = static_cast<std::size_t>(batch) * static_cast<std::size_t>(num_docs_) * sizeof(float);
+
+    ensure_device_capacity(&d_scores_, &scores_capacity_, output_bytes, "cudaMalloc int8q score cache");
+    launch_int8q_maxsim(query, batch, query_tokens, "int4 int8q maxsim");
+    check_cuda(cudaDeviceSynchronize(), "synchronize int4 int8q maxsim");
+
+    py::array_t<float> output({batch, num_docs_});
+    check_cuda(cudaMemcpy(output.mutable_data(), d_scores_, output_bytes, cudaMemcpyDeviceToHost), "copy int8q output to host");
+    return output;
+  }
+
+  py::tuple topk_batch_int8q(py::array_t<float, py::array::c_style | py::array::forcecast> query, int k) {
+    if (k < 1 || k > num_docs_) {
+      throw std::invalid_argument("k must be between 1 and num_docs");
+    }
+    const auto shape = validate_int8q_query(query);
+    const int batch = shape.first;
+    const int query_tokens = shape.second;
+    const std::size_t scores_bytes = static_cast<std::size_t>(batch) * static_cast<std::size_t>(num_docs_) * sizeof(float);
+    const std::size_t top_scores_bytes = static_cast<std::size_t>(batch) * static_cast<std::size_t>(k) * sizeof(float);
+    const std::size_t top_indices_bytes = static_cast<std::size_t>(batch) * static_cast<std::size_t>(k) * sizeof(std::int64_t);
+
+    ensure_device_capacity(&d_scores_, &scores_capacity_, scores_bytes, "cudaMalloc int8q full score cache");
+    ensure_device_capacity(&d_top_scores_, &top_scores_capacity_, top_scores_bytes, "cudaMalloc int8q top score cache");
+    ensure_device_capacity(&d_top_indices_, &top_indices_capacity_, top_indices_bytes, "cudaMalloc int8q top index cache");
+
+    launch_int8q_maxsim(query, batch, query_tokens, "int4 int8q topk maxsim");
+    topk_kernel<<<batch, kTopkThreads>>>(d_scores_, d_top_scores_, d_top_indices_, batch, num_docs_, k);
+    check_cuda(cudaGetLastError(), "launch int8q topk selection kernel");
+    check_cuda(cudaDeviceSynchronize(), "synchronize int8q topk kernels");
+
+    py::array_t<float> output_scores({batch, k});
+    py::array_t<std::int64_t> output_indices({batch, k});
+    check_cuda(cudaMemcpy(output_scores.mutable_data(), d_top_scores_, top_scores_bytes, cudaMemcpyDeviceToHost), "copy int8q top scores to host");
+    check_cuda(cudaMemcpy(output_indices.mutable_data(), d_top_indices_, top_indices_bytes, cudaMemcpyDeviceToHost), "copy int8q top indices to host");
+    return py::make_tuple(output_scores, output_indices);
+  }
+
   int dim() const { return dim_; }
   int num_docs() const { return num_docs_; }
   float scale() const { return scale_; }
@@ -1137,9 +1296,46 @@ class CudaInt4PackedDocs {
     check_cuda(cudaGetLastError(), (std::string("launch ") + label + " kernel").c_str());
   }
 
+  std::pair<int, int> validate_int8q_query(const py::array_t<float, py::array::c_style | py::array::forcecast>& query) const {
+    if (dim_ != 128) {
+      throw std::invalid_argument("int8 query scoring currently requires dim=128");
+    }
+    if (query.ndim() != 3) {
+      throw std::invalid_argument("query must have shape [batch, query_tokens, dim]");
+    }
+    if (query.shape(2) != dim_) {
+      throw std::invalid_argument("query shape does not match dim");
+    }
+    return {static_cast<int>(query.shape(0)), static_cast<int>(query.shape(1))};
+  }
+
+  void launch_int8q_maxsim(const py::array_t<float, py::array::c_style | py::array::forcecast>& query, int batch, int query_tokens, const char* label) {
+    const std::size_t query_bytes = static_cast<std::size_t>(query.size()) * sizeof(float);
+    const std::size_t rows = static_cast<std::size_t>(batch) * static_cast<std::size_t>(query_tokens);
+    const std::size_t words_bytes = rows * 32U * sizeof(std::int32_t);
+    const std::size_t scales_bytes = rows * sizeof(float);
+
+    ensure_device_capacity(&d_query_, &query_capacity_, query_bytes, "cudaMalloc int8q query cache");
+    ensure_device_capacity(&d_query_words_, &query_words_capacity_, words_bytes, "cudaMalloc int8q word cache");
+    ensure_device_capacity(&d_query_scales_, &query_scales_capacity_, scales_bytes, "cudaMalloc int8q scale cache");
+    check_cuda(cudaMemcpy(d_query_, query.data(), query_bytes, cudaMemcpyHostToDevice), "copy int8q query to device");
+
+    const int quantize_blocks = static_cast<int>((rows + kBlockThreads - 1) / kBlockThreads);
+    quantize_query_int8_dim128_kernel<<<quantize_blocks > 0 ? quantize_blocks : 1, kBlockThreads>>>(
+        d_query_, d_query_words_, d_query_scales_, batch, query_tokens);
+    check_cuda(cudaGetLastError(), "launch int8 query quantize kernel");
+
+    dim3 grid(num_docs_, batch);
+    maxsim_int4_int8q_dim128_kernel<<<grid, kBlockThreads>>>(
+        d_query_words_, d_query_scales_, d_packed_, d_offsets_, d_scores_, batch, query_tokens, num_docs_, scale_);
+    check_cuda(cudaGetLastError(), (std::string("launch ") + label + " kernel").c_str());
+  }
+
   std::uint8_t* d_packed_ = nullptr;
   std::int64_t* d_offsets_ = nullptr;
   float* d_query_ = nullptr;
+  std::int32_t* d_query_words_ = nullptr;
+  float* d_query_scales_ = nullptr;
   float* d_scores_ = nullptr;
   float* d_top_scores_ = nullptr;
   std::int64_t* d_top_indices_ = nullptr;
@@ -1149,6 +1345,8 @@ class CudaInt4PackedDocs {
   std::size_t packed_size_ = 0;
   std::size_t offsets_size_ = 0;
   std::size_t query_capacity_ = 0;
+  std::size_t query_words_capacity_ = 0;
+  std::size_t query_scales_capacity_ = 0;
   std::size_t scores_capacity_ = 0;
   std::size_t top_scores_capacity_ = 0;
   std::size_t top_indices_capacity_ = 0;
@@ -1294,6 +1492,8 @@ PYBIND11_MODULE(_bitmax_cuda, m) {
 	           float>())
       .def("maxsim_batch", &CudaInt4PackedDocs::maxsim_batch, py::arg("query"))
       .def("topk_batch", &CudaInt4PackedDocs::topk_batch, py::arg("query"), py::arg("k"))
+      .def("maxsim_batch_int8q", &CudaInt4PackedDocs::maxsim_batch_int8q, py::arg("query"))
+      .def("topk_batch_int8q", &CudaInt4PackedDocs::topk_batch_int8q, py::arg("query"), py::arg("k"))
       .def_property_readonly("dim", &CudaInt4PackedDocs::dim)
       .def_property_readonly("num_docs", &CudaInt4PackedDocs::num_docs)
       .def_property_readonly("scale", &CudaInt4PackedDocs::scale)

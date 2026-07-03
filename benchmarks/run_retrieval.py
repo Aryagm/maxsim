@@ -14,6 +14,7 @@ import bitmax
 from bitmax.experimental import (
     fit_dim_centroid_calibration,
     int4_maxsim,
+    int4_maxsim_int8q,
     int4_to_device,
     pack_dim_centroid_signs,
     pack_int4_symmetric,
@@ -490,6 +491,20 @@ def _variant_scores(dataset: RetrievalEmbeddings, variant: str, native_device: s
             packed.storage_bytes + 4,
         )
 
+    if variant == "int4_int8q_dp4a":
+        packed = pack_int4_symmetric(dataset.doc_embeddings, dataset.doc_offsets)
+        scoring_packed = int4_to_device(packed)
+        scores, latency = _time_call(
+            lambda: int4_maxsim_int8q(_padded_query_batch(dataset.query_embeddings), scoring_packed, device="cuda").astype(np.float32, copy=False),
+            repeat=repeat,
+        )
+        return (
+            scores,
+            latency,
+            {"implementation": "int4_int8q_dp4a", "variant": variant, "requested_device": "cuda", "scale": packed.scale},
+            packed.storage_bytes + 4,
+        )
+
     if variant == "binary_calibrated_threshold":
         thresholds = _calibrated_thresholds(dataset.doc_embeddings)
         scores, latency = _time_call(lambda: _threshold_sign_scores(dataset, thresholds), repeat=repeat)
@@ -640,8 +655,11 @@ def _normalize_variants(variants: str | tuple[str, ...] | list[str] | None) -> t
         values = tuple(value.strip() for value in variants.split(",") if value.strip())
     else:
         values = tuple(str(value) for value in variants)
+    cuda_only_variants = {"int4_int8q_dp4a"}
     unknown = sorted(
-        value for value in set(values) if value not in all_variants and not _POOLED_VARIANT_PATTERN.fullmatch(value)
+        value
+        for value in set(values)
+        if value not in all_variants and value not in cuda_only_variants and not _POOLED_VARIANT_PATTERN.fullmatch(value)
     )
     if unknown:
         raise ValueError(f"unknown retrieval variants: {unknown}")
