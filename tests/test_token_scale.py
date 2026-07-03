@@ -141,3 +141,36 @@ def test_cuda_token_scale_empty_doc_scores_zero():
     packed = bitmax.pack_signs(docs, offsets, token_scale="mean_abs")
     cuda_scores = bitmax.maxsim(query, bitmax.to_device(packed, "cuda"), device="cuda")
     assert cuda_scores[0, empty_doc] == 0.0
+
+
+def test_pack_signs_token_scale_u8_uses_log_levels():
+    docs, offsets = _ragged_fixture(5, 16, seed=101)
+    packed = bitmax.pack_signs(docs, offsets, token_scale="mean_abs_u8")
+    full = np.mean(np.abs(docs), axis=1, dtype=np.float64).astype(np.float32)
+    assert packed.token_scale.shape == full.shape
+    ratio = packed.token_scale / full
+    assert np.all(ratio > 0.99) and np.all(ratio < 1.01)
+
+
+def test_sdk_binary_token_scale_corpus_round_trip(tmp_path):
+    from bitmax.sdk import Corpus, Reranker
+
+    docs, offsets = _ragged_fixture(6, 16, seed=103)
+    doc_ids = [f"doc-{i}" for i in range(6)]
+    corpus = Corpus.from_embeddings(doc_ids, docs, offsets, mode="binary_token_scale")
+    assert corpus.packed.token_scale is not None
+    plain = Corpus.from_embeddings(doc_ids, docs, offsets, mode="binary")
+    assert corpus.storage_bytes == plain.storage_bytes + docs.shape[0] * 2
+
+    path = tmp_path / "corpus.npz"
+    corpus.save(path)
+    loaded = Corpus.load(path)
+    assert loaded.mode == "binary_token_scale"
+    np.testing.assert_array_equal(loaded.packed.token_scale, corpus.packed.token_scale)
+
+    rng = np.random.default_rng(107)
+    query = rng.standard_normal((4, 16)).astype(np.float32)
+    results = Reranker.from_corpus(loaded).search(query, k=3)
+    reference = bitmax.maxsim(query, corpus.packed, device="cpu")
+    order = np.lexsort((np.arange(reference.shape[0], dtype=np.int64), -reference))[:3]
+    assert [r.doc_id for r in results] == [doc_ids[int(i)] for i in order]

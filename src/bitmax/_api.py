@@ -84,11 +84,26 @@ def _resolve_pack_token_scale(token_scale, docs: np.ndarray):
         if token_scale == "mean_abs_fp16":
             scales = np.mean(np.abs(docs), axis=1, dtype=np.float64).astype(np.float32)
             return scales.astype(np.float16).astype(np.float32)
-        raise ValueError("token_scale must be None, 'mean_abs', 'mean_abs_fp16', 'l2', or a [num_doc_tokens] vector")
+        if token_scale == "mean_abs_u8":
+            scales = np.mean(np.abs(docs), axis=1, dtype=np.float64).astype(np.float32)
+            return _log_u8_dequantized(scales)
+        raise ValueError("token_scale must be None, 'mean_abs', 'mean_abs_fp16', 'mean_abs_u8', 'l2', or a [num_doc_tokens] vector")
     values = np.ascontiguousarray(_as_numpy(token_scale), dtype=np.float32)
     if values.ndim != 1 or values.shape[0] != docs.shape[0]:
         raise ValueError("token_scale vector must have shape [num_doc_tokens]")
     return values
+
+
+def _log_u8_dequantized(scales: np.ndarray) -> np.ndarray:
+    """Quantize positive scales to 256 log-spaced levels (1 byte/token on disk)."""
+    positive = np.maximum(scales.astype(np.float64), 1e-12)
+    log_values = np.log(positive)
+    lo = float(log_values.min())
+    hi = float(log_values.max())
+    if hi <= lo:
+        return scales.astype(np.float32)
+    codes = np.clip(np.rint((log_values - lo) * (255.0 / (hi - lo))), 0, 255)
+    return np.exp(lo + codes * ((hi - lo) / 255.0)).astype(np.float32)
 
 
 def to_device(packed: PackedDocs, device: Literal["cpu", "cuda"] = "cuda") -> PackedDocs:

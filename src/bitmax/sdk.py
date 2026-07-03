@@ -20,7 +20,7 @@ from bitmax.experimental import (
     topk_int4_maxsim,
 )
 
-CorpusMode = Literal["binary", "binary_q40", "int4"]
+CorpusMode = Literal["binary", "binary_token_scale", "binary_q40", "int4"]
 
 
 @dataclass(frozen=True)
@@ -60,6 +60,13 @@ class Corpus:
                 packed=pack_signs(docs, offsets_array),
                 metadata={} if metadata is None else dict(metadata),
             )
+        if mode == "binary_token_scale":
+            return cls(
+                doc_ids=doc_id_values,
+                mode=mode,
+                packed=pack_signs(docs, offsets_array, token_scale="mean_abs_fp16"),
+                metadata={} if metadata is None else dict(metadata),
+            )
         if mode == "binary_q40":
             thresholds = np.percentile(docs, 40.0, axis=0).astype(np.float32)
             calibration = fit_dim_centroid_calibration(docs, thresholds=thresholds)
@@ -78,7 +85,7 @@ class Corpus:
                 int4_packed=pack_int4_symmetric(docs, offsets_array),
                 metadata={} if metadata is None else dict(metadata),
             )
-        raise ValueError("mode must be 'binary', 'binary_q40', or 'int4'")
+        raise ValueError("mode must be 'binary', 'binary_token_scale', 'binary_q40', or 'int4'")
 
     def save(self, path) -> None:
         output = Path(path)
@@ -103,6 +110,8 @@ class Corpus:
                     "scale_values": scale_values,
                 }
             )
+            if self.packed.token_scale is not None:
+                arrays["token_scale_fp16"] = np.ascontiguousarray(self.packed.token_scale, dtype=np.float16)
             if self.calibration is not None:
                 arrays.update(
                     {
@@ -138,7 +147,7 @@ class Corpus:
             metadata = json.loads(str(np.asarray(data["metadata_json"]).item()))
             offsets = np.ascontiguousarray(data["doc_offsets"], dtype=np.int64)
             dim = int(np.asarray(data["dim"]).item())
-            if mode in {"binary", "binary_q40"}:
+            if mode in {"binary", "binary_token_scale", "binary_q40"}:
                 calibration = None
                 if mode == "binary_q40":
                     calibration = DimCentroidCalibration(
@@ -146,6 +155,9 @@ class Corpus:
                         negative_centroids=np.ascontiguousarray(data["centroid_negative"], dtype=np.float32),
                         positive_centroids=np.ascontiguousarray(data["centroid_positive"], dtype=np.float32),
                     )
+                token_scale = None
+                if "token_scale_fp16" in data:
+                    token_scale = np.ascontiguousarray(data["token_scale_fp16"]).astype(np.float32)
                 return cls(
                     doc_ids=doc_ids,
                     mode=mode,
@@ -156,6 +168,7 @@ class Corpus:
                         num_docs=len(doc_ids),
                         scale=_decode_scale(str(np.asarray(data["scale_kind"]).item()), np.asarray(data["scale_values"])),
                         device="cpu",
+                        token_scale=token_scale,
                     ),
                     calibration=calibration,
                     metadata=metadata,
@@ -197,6 +210,8 @@ class Corpus:
     def storage_bytes(self) -> int:
         if self.packed is not None:
             extra = 0 if self.calibration is None else int(self.calibration.metadata_bytes)
+            if self.packed.token_scale is not None:
+                extra += int(self.packed.token_scale.shape[0]) * 2
             if isinstance(self.packed.data, np.ndarray):
                 return int(self.packed.data.size + extra)
             return int(self.packed.doc_offsets[-1] * (self.packed.dim // 8) + extra)
@@ -224,7 +239,7 @@ class Reranker:
     def search(self, query_embeddings, *, k: int = 10):
         _validate_k(k, self.corpus.num_docs)
         actual_k = min(k, self.corpus.num_docs)
-        if self.corpus.mode == "binary":
+        if self.corpus.mode in {"binary", "binary_token_scale"}:
             scores, indices = topk_maxsim(query_embeddings, self.corpus.packed, actual_k, device="auto")
         elif self.corpus.mode == "binary_q40":
             scores, indices = topk_dim_centroid_maxsim(query_embeddings, self.corpus.packed, self.corpus.calibration, actual_k, device="auto")
@@ -243,7 +258,7 @@ class Reranker:
         return _format_candidate_results(scores, candidate_indices, candidates, min(k, len(candidates)))
 
     def _score_all(self, query_embeddings):
-        if self.corpus.mode == "binary":
+        if self.corpus.mode in {"binary", "binary_token_scale"}:
             return maxsim(query_embeddings, self.corpus.packed, device="auto")
         if self.corpus.mode == "binary_q40":
             return dim_centroid_maxsim(query_embeddings, self.corpus.packed, self.corpus.calibration, device="auto")
@@ -288,8 +303,8 @@ def _validate_corpus_inputs(doc_ids: tuple[str, ...], docs: np.ndarray, offsets:
         raise ValueError("embedding dim must be divisible by 8")
     if offsets.shape[0] != len(doc_ids) + 1:
         raise ValueError("offsets must have one more entry than doc_ids")
-    if mode not in {"binary", "binary_q40", "int4"}:
-        raise ValueError("mode must be 'binary', 'binary_q40', or 'int4'")
+    if mode not in {"binary", "binary_token_scale", "binary_q40", "int4"}:
+        raise ValueError("mode must be 'binary', 'binary_token_scale', 'binary_q40', or 'int4'")
 
 
 def _move_corpus(corpus: Corpus, device: str) -> Corpus:
