@@ -183,6 +183,11 @@ def _stage_repeat(stage: str) -> int:
 def _stage_devices(stage: str) -> tuple[str, str]:
     if stage == "embeddings-cuda-smoke":
         return "cuda", "cuda"
+    if stage == "embeddings-smoke":
+        # Gate runs are pass/fail smoke checks; their latency is never cited.
+        # Use the CUDA dense path when available so large-corpus gates do not
+        # spend an hour in numpy loops (falls back to CPU without a GPU).
+        return "auto", "cuda"
     return "auto", "cpu"
 
 
