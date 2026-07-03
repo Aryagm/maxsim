@@ -9,12 +9,15 @@ stage() { echo "=== STAGE:$1 $(date -u +%H:%M:%S) ==="; }
 stage setup
 pip install --quiet --upgrade pip
 pip install --quiet scikit-build-core pybind11 numpy pytest scipy
-# torchaudio/torchvision in the image are built for torch 2.4 and poison the
-# transformers import chain after any torch upgrade; we never use them.
-pip uninstall --quiet -y torchaudio torchvision 2>/dev/null || true
-# transformers 5.13.0 downgrades torch; 5.12.1 is the validated combo.
+# torchaudio in the image is built for torch 2.4 and poisons the transformers
+# import chain after the torch upgrade; nothing here uses it. torchvision is
+# upgraded in lockstep with torch instead (transformers image utils want it).
+pip uninstall --quiet -y torchaudio 2>/dev/null || true
+pip install --quiet -U torch torchvision --index-url https://download.pytorch.org/whl/cu126
+pip install --quiet -U nvidia-nccl-cu12
+# transformers 5.13.0 force-downgrades torch; 5.12.1 is the validated combo
+# and must install AFTER torch so the cu126 build is left untouched.
 pip install --quiet "transformers==5.12.1" datasets accelerate pillow
-pip install --quiet -U torch --index-url https://download.pytorch.org/whl/cu126
 BITMAX_BUILD_CUDA=1 pip install -e . --no-build-isolation --config-settings build-dir=/root/bitmax-build --quiet 2>&1 | tail -1
 pytest -m cuda -q || { echo SUITE_FAILED_TESTS; exit 1; }
 python -c "import torch, transformers; transformers.ColQwen2ForRetrieval; print('encoder stack ok:', torch.__version__, transformers.__version__)"   || { echo SUITE_FAILED_ENCODER_STACK; exit 1; }
