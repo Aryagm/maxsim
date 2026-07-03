@@ -69,10 +69,7 @@ def run_stage(
     native_device, baseline_device = _stage_devices(stage)
     output = Path(output_path) if output_path is not None else Path("benchmark-results") / f"{stage}.json"
 
-    dense_scores, dense_latency = _time_call(
-        lambda: _dense_fp16_scores(dataset, device=baseline_device),
-        repeat=actual_repeat,
-    )
+    dense_scores, dense_latency = _cached_dense_scores(dataset, input_path, baseline_device, actual_repeat)
     dense_row = _result_row(
         stage,
         dataset,
@@ -144,6 +141,27 @@ def run_stage(
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
     return result
+
+
+def _cached_dense_scores(dataset: RetrievalEmbeddings, input_path, baseline_device: str, repeat: int):
+    """Reuse the dense reference across runs of the same cache/repeat/device.
+
+    The dense fp16 baseline dominates benchmark wall-clock; single-variant
+    re-runs (e.g. pool3 columns) reuse the identical measurement instead of
+    recomputing it. Keyed by input stem, repeat, and device so all cited
+    numbers keep the same methodology.
+    """
+    cache_path = None
+    if input_path is not None:
+        stem = Path(input_path).stem
+        cache_path = Path("benchmark-results") / f"dense-cache-{stem}-{baseline_device}-r{repeat}.npz"
+        if cache_path.exists():
+            with np.load(cache_path, allow_pickle=False) as data:
+                return np.ascontiguousarray(data["scores"], dtype=np.float32), float(data["latency_ms"])
+    scores, latency = _time_call(lambda: _dense_fp16_scores(dataset, device=baseline_device), repeat=repeat)
+    if cache_path is not None:
+        np.savez(cache_path, scores=np.ascontiguousarray(scores, dtype=np.float32), latency_ms=np.array(latency))
+    return scores, latency
 
 
 def _check_stage_gate(stage: str, gate_path: Path | str | None) -> None:
