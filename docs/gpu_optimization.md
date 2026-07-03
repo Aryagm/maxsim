@@ -600,3 +600,17 @@ L1-resident across query tokens, while q-tiling moves the query out of
 registers into shared memory and pays a shared-memory read per FMA. Not
 routed (threshold defaults to never); kept for evidence and future
 architectures where the balance differs.
+
+## 2026-07-03: Pooled-Tier Accuracy Rescue Attempts (Negative)
+
+CPU sweep (`benchmark-results/pooling-quality-*.json`) testing whether
+pooled-corpus accuracy can be bought back: norm-weighted cluster means
+(identical to plain means, delta 0.0000), adaptive cosine-threshold pooling
+(strictly worse than fixed-factor ward at equal compression: 0.6231 vs 0.6417
+at ~62-64x — unbounded merging of "redundant" patches creates large washed-out
+clusters, bounded maxclust clusters are better), and int4-packed pooled tokens
+(0.6477 at 16x — dominated by binary_token_scale_u8 at 0.6570/30.1x). The
+pooled tier's -0.018 NDCG is the real information cost of halving tokens, not
+a pooling-algorithm artifact. pool_factor=3 is a valid extreme point:
+0.6358 (-0.024) at 95.9x, reachable via
+Corpus.from_embeddings(..., mode="max_compression", pool_factor=3).
