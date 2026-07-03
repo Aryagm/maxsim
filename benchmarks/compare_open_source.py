@@ -88,8 +88,12 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
 
         if implementation.startswith("bitmax_"):
             mode = implementation.removeprefix("bitmax_")
+            int4_query = "fp32"
+            if mode == "int4_dp4a":
+                mode = "int4"
+                int4_query = "int8"
             corpus = bitmax.Corpus.from_embeddings(dataset["doc_ids"], dataset["doc_embeddings"], dataset["doc_offsets"], mode=mode)
-            reranker = bitmax.Reranker.from_corpus(corpus, device=args.device)
+            reranker = bitmax.Reranker.from_corpus(corpus, device=args.device, int4_query=int4_query)
             scores, latency, latency_stats = _time_call(lambda: _scores_from_sdk(reranker, dataset["query_embeddings"], dataset["doc_ids"], score_k), repeat=args.repeat)
             rows.append(
                 _result_row(

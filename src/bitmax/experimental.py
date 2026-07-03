@@ -328,7 +328,7 @@ def int4_maxsim_int8q(query_tokens, packed: Int4PackedDocs, *, device="auto") ->
     return result[0] if squeeze else result
 
 
-def topk_int4_maxsim(query_tokens, packed: Int4PackedDocs, k: int, *, device="auto"):
+def topk_int4_maxsim(query_tokens, packed: Int4PackedDocs, k: int, *, device="auto", prefer_int8_query: bool = False):
     if k < 1:
         raise ValueError("k must be >= 1")
     if k > packed.num_docs:
@@ -336,7 +336,27 @@ def topk_int4_maxsim(query_tokens, packed: Int4PackedDocs, k: int, *, device="au
     _validate_int4_packed(packed)
     effective_device = "cuda" if device == "auto" and packed.device == "cuda" else device
     if effective_device == "cuda" and packed.device == "cpu":
-        return topk_int4_maxsim(query_tokens, int4_to_device(packed), k, device="cuda")
+        return topk_int4_maxsim(query_tokens, int4_to_device(packed), k, device="cuda", prefer_int8_query=prefer_int8_query)
+    if (
+        prefer_int8_query
+        and effective_device == "cuda"
+        and packed.device == "cuda"
+        and packed.dim == 128
+        and hasattr(packed.data, "topk_batch_int8q")
+    ):
+        query = _as_numpy(query_tokens).astype(np.float32, copy=False)
+        if query.ndim == 2:
+            batches = query[np.newaxis, :, :]
+            squeeze = True
+        elif query.ndim == 3:
+            batches = query
+            squeeze = False
+        else:
+            raise ValueError("query_tokens must have shape [query_tokens, dim] or [batch, query_tokens, dim]")
+        if batches.shape[2] != packed.dim:
+            raise ValueError(f"query dim={batches.shape[2]} does not match packed dim={packed.dim}")
+        scores, indices = packed.data.topk_batch_int8q(np.ascontiguousarray(batches, dtype=np.float32), int(k))
+        return (scores[0], indices[0]) if squeeze else (scores, indices)
     if effective_device == "cuda" and packed.device == "cuda" and hasattr(packed.data, "topk_batch"):
         query = _as_numpy(query_tokens).astype(np.float32, copy=False)
         if query.ndim == 2:

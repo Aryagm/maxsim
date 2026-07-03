@@ -296,16 +296,19 @@ class Corpus:
 
 
 class Reranker:
-    def __init__(self, corpus: Corpus, *, device: Literal["cpu", "cuda"] = "cpu"):
+    def __init__(self, corpus: Corpus, *, device: Literal["cpu", "cuda"] = "cpu", int4_query: Literal["fp32", "int8"] = "fp32"):
         if device not in {"cpu", "cuda"}:
             raise ValueError("device must be 'cpu' or 'cuda'")
+        if int4_query not in {"fp32", "int8"}:
+            raise ValueError("int4_query must be 'fp32' or 'int8'")
         self.corpus = _move_corpus(corpus, device)
         self.device = device
+        self.int4_query = int4_query
         self._doc_index = {doc_id: idx for idx, doc_id in enumerate(self.corpus.doc_ids)}
 
     @classmethod
-    def from_corpus(cls, corpus: Corpus, *, device: Literal["cpu", "cuda"] = "cpu") -> "Reranker":
-        return cls(corpus, device=device)
+    def from_corpus(cls, corpus: Corpus, *, device: Literal["cpu", "cuda"] = "cpu", int4_query: Literal["fp32", "int8"] = "fp32") -> "Reranker":
+        return cls(corpus, device=device, int4_query=int4_query)
 
     @classmethod
     def load(cls, path, *, device: Literal["cpu", "cuda"] = "cpu") -> "Reranker":
@@ -319,7 +322,9 @@ class Reranker:
         elif self.corpus.mode == "binary_q40":
             scores, indices = topk_dim_centroid_maxsim(query_embeddings, self.corpus.packed, self.corpus.calibration, actual_k, device="auto")
         elif self.corpus.mode == "int4":
-            scores, indices = topk_int4_maxsim(query_embeddings, self.corpus.int4_packed, actual_k, device="auto")
+            scores, indices = topk_int4_maxsim(
+                query_embeddings, self.corpus.int4_packed, actual_k, device="auto", prefer_int8_query=self.int4_query == "int8"
+            )
         else:
             raise ValueError(f"unsupported corpus mode: {self.corpus.mode}")
         return _format_topk_results(scores, indices, self.corpus.doc_ids)
