@@ -471,3 +471,78 @@ Interpretation:
 3. The default remains raw binary because it is stable, fastest, and preserves
    the 32x fp32 document-size reduction. q40 centroid and int4 are opt-in
    experimental paths for users choosing different Pareto points.
+
+## 2026-07-02: Token-Scale Kernel, Tokens/Doc Gate, and dp4a Int4
+
+Measured on a project-owned VAST RTX 4090 (instance 43649709, driver 590.48.01,
+torch 2.12.1+cu126), freshly built `vidore/colqwen2-v1.0-hf` caches that
+reproduce the committed dense/binary NDCG@10 exactly. Branch
+`experiments/gpu-pareto-v2`.
+
+Changes:
+
+1. **Per-token scale restoration on GPU** (`pack_signs(..., token_scale=...)`,
+   `CudaPackedDocs.set_token_scale_vector`, applied to the dot before the
+   per-query-token max in the generic/unrolled/LUT kernels). The 2026-06-30
+   "do not write a per-token scale kernel" decision was based on the
+   underpowered limit64 slice; on docvqa limit256 the CPU reference was
+   already the best accuracy/size point in the repo and the CUDA path
+   reproduces it with zero added latency. fp16-quantized scales
+   (`mean_abs_fp16`) are strictly better than fp32 scales (28.4x vs 25.6x,
+   same NDCG).
+2. **Tokens/doc routing gate for the dim128 unrolled kernel** (was
+   `num_docs <= 128`; now also routes corpora with >=256 average tokens/doc,
+   runtime-tunable via `set_dim128_unrolled_min_avg_tokens`). The documented
+   rerank_512/rerank_4096 regressions are short-doc shapes; long-doc corpora
+   win ~2x at every corpus size tested (256/1000/5000 docs,
+   `benchmark-results/dim128-gate-sweep.json`, warmup+median).
+3. **dp4a int8-query x int4-doc kernel** (`CudaInt4PackedDocs.
+   maxsim_batch_int8q`/`topk_batch_int8q`): device-side per-query-token
+   symmetric int8 quantization with the query permuted to match the int4
+   nibble interleave, `__vsub4` nibble sign-extension, `__dp4a` accumulation,
+   integer max per query token, scales applied after the max. A CPU
+   simulation with exact kernel semantics
+   (`benchmark-results/int8q-int4-sim-limit{64,256}.json`) showed int8 query
+   quantization is quality-free and per-token int4 doc scales hurt
+   (-0.0107 at limit64), so only the per-tensor arm was built.
+4. **Token pooling probe** (`benchmarks/pooling.py`, ward clustering per doc,
+   `pool{N}_*` variants): pool2+binary is a usable far-compression point;
+   pooling composes poorly with token scales (cluster means lose the
+   magnitude signal the scales rely on).
+5. Build: `CMAKE_CUDA_ARCHITECTURES` defaults to native (override with
+   `BITMAX_CUDA_ARCH`), `-O3 -lineinfo`, static cudart (avoids a
+   `libcudart.so.12` soname clash that made `import bitmax; import torch`
+   fail with torch >= 2.12). The torch arch check in the benchmarks now
+   honors CUDA same-major SASS compatibility (sm_86 kernels run on sm_89);
+   before this fix the dense baseline silently fell back to CPU on RTX 4090
+   with current torch wheels.
+
+docvqa limit256 (256 queries / 256 docs / 192,565 doc tokens, repeat 5,
+`benchmark-results/r256-pareto-v2-gated-r5.json` and `r256-int4-dp4a-r5.json`):
+
+| implementation | NDCG@10 | delta vs dense | latency | fp32 compression |
+| --- | ---: | ---: | ---: | ---: |
+| dense fp16 | 0.6598 | — | ~4.0 s | 2.0x |
+| binary (previous default) | 0.6491 | -0.0107 | 27.4 ms (was 49.0) | 32.0x |
+| **binary + fp16 token scale** | **0.6583** | **-0.0015** | **26.7 ms** | **28.4x** |
+| int4 dp4a int8-query | 0.6584 | -0.0014 | 43.2 ms (was 192) | 8.0x |
+| pool2 binary | 0.6417 | -0.0180 | 19.4 ms | 63.9x |
+
+Multi-slice (limit64, repeat 5, paired per-query NDCG vs raw binary):
+docvqa -0.0116, infovqa +0.0042, arxivqa +0.0020, tabfquad -0.0031 — mixed at
+64-query slices (inside noise), decisively positive (+0.0091) at 256 queries.
+Unlike q40 calibration (arxivqa -0.0158), token scale never collapses on any
+slice.
+
+Decisions:
+
+1. Promote `binary_token_scale_fp16` as the recommended >=256-doc
+   configuration: it recovers ~86% of the binary-to-dense NDCG gap for
+   +12.5% storage and no latency cost.
+2. Keep raw binary for small (<~128 doc) or short-page corpora.
+3. int4 + dp4a replaces fp32-query int4 as the conservative point (4.3x
+   faster, quality identical to 4 decimals).
+4. Do not compose pooling with token scales; pool2+binary is the documented
+   far-compression option.
+5. Per-token int4 scales are rejected with evidence this time
+   (sim: -0.0107 NDCG at limit64).

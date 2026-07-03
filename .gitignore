@@ -10,3 +10,4 @@ __pycache__/
 .vast/
 benchmark-results/
 
+caches/
