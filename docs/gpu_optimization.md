@@ -546,3 +546,28 @@ Decisions:
    far-compression option.
 5. Per-token int4 scales are rejected with evidence this time
    (sim: -0.0107 NDCG at limit64).
+
+## 2026-07-02: Round 2 — SDK Promotion, uint8 Scales, dp4a-Binary Verdict
+
+Same-day follow-up, measured on a fresh VAST RTX 4090 (instance 43664134,
+destroyed after) with caches identical to round 1
+(`benchmark-results/r2-round2-limit256-r5.json`, `r2-round2-limit64-r5.json`).
+
+1. `binary_token_scale` is now a first-class SDK corpus mode (fp16 scales on
+   disk, counted in `Corpus.storage_bytes`, routed through the existing CUDA
+   kernels by `Reranker`).
+2. uint8 log-encoded token scales (`token_scale="mean_abs_u8"`, 256 log-spaced
+   levels, 1 byte/token): NDCG@10 0.6570 (delta -0.0028) at 30.1x and 26.3 ms
+   on docvqa limit256 — a valid intermediate point; fp16 scales (0.6583 at
+   28.4x) remain the recommended default.
+3. dp4a int8-query kernel for the BINARY path (shared byte->0/1-spread LUT,
+   2*dot01 - qsum identity): quality is query-quantization-clean (0.6490 vs
+   0.6491 fp32-query; 0.6582 with token scales) but latency does not improve
+   (30.8 ms vs 29.3 ms plain, 31.0 ms vs 26.4 ms with token scales) — the
+   post-gate unrolled fp32 kernel is already bandwidth-limited, so the ALU
+   saving does not pay for the quantize pass and shared-memory gathers.
+   Decision: kernel and parity tests stay in-tree
+   (`maxsim_batch_int8q`/`topk_batch_int8q` on `CudaPackedDocs`,
+   tests/test_binary_int8q.py) but the path is NOT routed by the public API,
+   same status as streaming top-k. dp4a remains routed for int4, where it is
+   a 4.3x win (reproduced at 43.2 ms on this second instance).
