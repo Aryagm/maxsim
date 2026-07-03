@@ -89,10 +89,16 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         if implementation.startswith("bitmax_"):
             mode = implementation.removeprefix("bitmax_")
             int4_query = "fp32"
+            pool_factor = 2
             if mode == "int4_dp4a":
                 mode = "int4"
                 int4_query = "int8"
-            corpus = bitmax.Corpus.from_embeddings(dataset["doc_ids"], dataset["doc_embeddings"], dataset["doc_offsets"], mode=mode)
+            if mode == "pooled_binary3":
+                mode = "pooled_binary"
+                pool_factor = 3
+            corpus = bitmax.Corpus.from_embeddings(
+                dataset["doc_ids"], dataset["doc_embeddings"], dataset["doc_offsets"], mode=mode, pool_factor=pool_factor
+            )
             reranker = bitmax.Reranker.from_corpus(corpus, device=args.device, int4_query=int4_query)
             scores, latency, latency_stats = _time_call(lambda: _scores_from_sdk(reranker, dataset["query_embeddings"], dataset["doc_ids"], score_k), repeat=args.repeat)
             rows.append(

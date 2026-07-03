@@ -16,6 +16,7 @@ TIERS = [
     ("binary_token_scale_u4_cuda", "compact (u4 scales)"),
     ("int4_int8q_dp4a", "max_quality (int4 dp4a)"),
     ("pool2_binary", "max_compression (pool2)"),
+    ("pool3_binary", "pool3 (96x)"),
 ]
 
 
@@ -32,6 +33,9 @@ def per_dataset(paths: list[Path]) -> None:
     print("|" + "---|" * len(header))
     for path in sorted(paths):
         rows = _rows(path)
+        pool3_path = path.with_name(path.name.replace("paper-", "paper-pool3-", 1))
+        if pool3_path.exists():
+            rows.update({k: v for k, v in _rows(pool3_path).items() if k != "dense_fp16_baseline"})
         name = path.stem.replace("paper-vidore-", "").replace("-r3", "")
         cells = [name]
         for key, _ in TIERS:
