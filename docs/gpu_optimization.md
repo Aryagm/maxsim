@@ -571,3 +571,32 @@ destroyed after) with caches identical to round 1
    tests/test_binary_int8q.py) but the path is NOT routed by the public API,
    same status as streaming top-k. dp4a remains routed for int4, where it is
    a 4.3x win (reproduced at 43.2 ms on this second instance).
+
+## 2026-07-03: Round 3 — Refinement Sweeps, Tier Presets, q-Tile Verdict
+
+CPU quality sweeps on the cached ViDoRe slices
+(`benchmark-results/sweep-r3-*.json`) tested eight refinements of the
+token-scale default: alpha-tempered scales (sigma^alpha, alpha 0.25-0.75),
+quantile clipping (q05-q95, q10-q90), the dim-centroid combination, and
+salience-protected pooling (keep top-norm tokens, pool the rest). None beat
+plain mean-abs fp16 token scales on limit256 (tempering degrades
+monotonically, clipping is neutral, the centroid combo loses 0.003, salient
+pooling only matches uniform pool2). The default stands, now with evidence.
+
+SDK tiers (src/bitmax/sdk.py): `Corpus.from_embeddings` now defaults to
+`binary_token_scale` and accepts presets — `balanced` (binary_token_scale,
+0.6583 / 26.5ms / 28.4x), `max_quality` (int4 + dp4a search, 0.6584 / 43ms /
+8x), `max_compression` (binary_token_scale_u8 with true 1-byte log-coded
+scales on disk, 0.6570 / 26.6ms / 30.1x), `max_speed` (binary, 0.6491 /
+26.6ms / 32x). Headline numbers reconfirmed on a third instance
+(`benchmark-results/r3-headline-confirm-r5.json`).
+
+q-tiled one-pass kernel: built, exact (parity tests in
+tests/test_cuda_extension.py), and ~9x SLOWER than the unrolled kernel at
+every scale from 12MB to 300MB packed (`benchmark-results/qtile-sweep-*.json`,
+warmup+median). Root cause: the presumed corpus re-streaming does not happen —
+each (doc, batch) block re-reads only its own ~12KB of packed rows, which stay
+L1-resident across query tokens, while q-tiling moves the query out of
+registers into shared memory and pays a shared-memory read per FMA. Not
+routed (threshold defaults to never); kept for evidence and future
+architectures where the balance differs.

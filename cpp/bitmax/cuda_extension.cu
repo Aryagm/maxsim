@@ -25,11 +25,14 @@ constexpr int kTopkThreads = 256;
 // (0.71-0.86x) at 32-128 tokens/doc.
 int g_dim128_unrolled_min_avg_tokens = 256;
 
-// Packed corpora at least this large route to the q-tiled one-pass kernel,
-// which reads each packed row once per 8 query tokens instead of once per
-// query token. Only pays when the corpus spills the L2 cache (72MB on Ada);
-// smaller corpora stay on the unrolled kernel.
-std::size_t g_dim128_qtile_min_packed_bytes = 48ULL << 20;
+// The q-tiled one-pass kernel is NOT routed by default: measured on RTX 4090
+// (benchmark-results/qtile-sweep-*.json) it is ~9x slower than the unrolled
+// kernel at every corpus size (12MB-300MB packed), because each block's
+// document rows are already L1-resident across query-token iterations while
+// q-tiling forces per-FMA shared-memory reads instead of register-held query
+// values. Kept for evidence and future architectures; enable via
+// set_dim128_qtile_min_packed_bytes.
+std::size_t g_dim128_qtile_min_packed_bytes = ~static_cast<std::size_t>(0);
 
 constexpr int kQTile = 8;
 
