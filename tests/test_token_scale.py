@@ -186,8 +186,8 @@ def test_sdk_mode_presets_resolve():
     assert default_corpus.mode == "binary_token_scale"
     quality = Corpus.from_embeddings(doc_ids, docs, offsets, mode="max_quality")
     assert quality.mode == "int4"
-    compression = Corpus.from_embeddings(doc_ids, docs, offsets, mode="max_compression")
-    assert compression.mode == "binary_token_scale_u8"
+    compact = Corpus.from_embeddings(doc_ids, docs, offsets, mode="compact")
+    assert compact.mode == "binary_token_scale_u8"
     speed = Corpus.from_embeddings(doc_ids, docs, offsets, mode="max_speed")
     assert speed.mode == "binary"
 
@@ -197,7 +197,7 @@ def test_sdk_u8_corpus_round_trip(tmp_path):
 
     docs, offsets = _ragged_fixture(6, 16, seed=113)
     doc_ids = [f"doc-{i}" for i in range(6)]
-    corpus = Corpus.from_embeddings(doc_ids, docs, offsets, mode="max_compression")
+    corpus = Corpus.from_embeddings(doc_ids, docs, offsets, mode="compact")
     plain = Corpus.from_embeddings(doc_ids, docs, offsets, mode="binary")
     assert corpus.storage_bytes == plain.storage_bytes + docs.shape[0] * 1 + 16
 
@@ -211,5 +211,36 @@ def test_sdk_u8_corpus_round_trip(tmp_path):
     query = rng.standard_normal((3, 16)).astype(np.float32)
     results = Reranker.from_corpus(loaded).search(query, k=3)
     reference = bitmax.maxsim(query, loaded.packed, device="cpu")
+    order = np.lexsort((np.arange(reference.shape[0], dtype=np.int64), -reference))[:3]
+    assert [r.doc_id for r in results] == [doc_ids[int(i)] for i in order]
+
+
+def test_sdk_pooled_binary_corpus(tmp_path):
+    pytest.importorskip("scipy")
+    from bitmax.sdk import Corpus, Reranker
+
+    rng = np.random.default_rng(151)
+    lengths = rng.integers(6, 14, size=6)
+    offsets = np.concatenate([[0], np.cumsum(lengths)]).astype(np.int64)
+    docs = rng.standard_normal((int(offsets[-1]), 16)).astype(np.float32)
+    doc_ids = [f"doc-{i}" for i in range(6)]
+
+    corpus = Corpus.from_embeddings(doc_ids, docs, offsets, mode="max_compression")
+    assert corpus.mode == "pooled_binary"
+    assert corpus.metadata["pool_factor"] == 2
+    assert corpus.metadata["pooled_tokens"] < corpus.metadata["original_tokens"]
+    plain = Corpus.from_embeddings(doc_ids, docs, offsets, mode="binary")
+    assert corpus.storage_bytes < plain.storage_bytes
+
+    path = tmp_path / "corpus-pooled.npz"
+    corpus.save(path)
+    loaded = Corpus.load(path)
+    assert loaded.mode == "pooled_binary"
+    assert loaded.metadata["pool_factor"] == 2
+
+    rng2 = np.random.default_rng(157)
+    query = rng2.standard_normal((3, 16)).astype(np.float32)
+    results = Reranker.from_corpus(loaded).search(query, k=3)
+    reference = bitmax.maxsim(query, corpus.packed, device="cpu")
     order = np.lexsort((np.arange(reference.shape[0], dtype=np.int64), -reference))[:3]
     assert [r.doc_id for r in results] == [doc_ids[int(i)] for i in order]

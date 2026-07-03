@@ -20,14 +20,17 @@ from bitmax.experimental import (
     topk_int4_maxsim,
 )
 
-CorpusMode = Literal["binary", "binary_token_scale", "binary_token_scale_u8", "binary_q40", "int4"]
+CorpusMode = Literal["binary", "binary_token_scale", "binary_token_scale_u8", "pooled_binary", "binary_q40", "int4"]
 
 # Named accuracy/size/latency tiers over the measured pareto frontier
-# (docs/gpu_optimization.md, 2026-07-02). "balanced" is the default.
+# (docs/gpu_optimization.md, 2026-07-02/03). "balanced" is the default.
+# max_compression trades NDCG@10 ~-0.018 vs dense for ~64x compression via
+# token pooling (requires scipy); "compact" keeps near-dense quality at ~30x.
 MODE_PRESETS = {
     "balanced": "binary_token_scale",
     "max_quality": "int4",
-    "max_compression": "binary_token_scale_u8",
+    "max_compression": "pooled_binary",
+    "compact": "binary_token_scale_u8",
     "max_speed": "binary",
 }
 
@@ -56,6 +59,7 @@ class Corpus:
         offsets,
         *,
         mode: str = "balanced",
+        pool_factor: int = 2,
         metadata: dict[str, Any] | None = None,
     ) -> "Corpus":
         mode = MODE_PRESETS.get(mode, mode)
@@ -63,6 +67,24 @@ class Corpus:
         docs = _as_numpy(embeddings).astype(np.float32, copy=False)
         offsets_array = _normalize_sdk_offsets(offsets, docs.shape[0])
         _validate_corpus_inputs(doc_id_values, docs, offsets_array, mode)
+        if mode == "pooled_binary":
+            from bitmax.pooling import pool_doc_tokens
+
+            original_tokens = int(docs.shape[0])
+            docs, offsets_array = pool_doc_tokens(docs, offsets_array, pool_factor)
+            pool_metadata = {
+                "pool_factor": int(pool_factor),
+                "original_tokens": original_tokens,
+                "pooled_tokens": int(docs.shape[0]),
+            }
+            merged = {} if metadata is None else dict(metadata)
+            merged.update(pool_metadata)
+            return cls(
+                doc_ids=doc_id_values,
+                mode=mode,
+                packed=pack_signs(docs, offsets_array),
+                metadata=merged,
+            )
         if mode == "binary":
             return cls(
                 doc_ids=doc_id_values,
@@ -102,7 +124,10 @@ class Corpus:
                 int4_packed=pack_int4_symmetric(docs, offsets_array),
                 metadata={} if metadata is None else dict(metadata),
             )
-        raise ValueError("mode must be 'binary', 'binary_token_scale', 'binary_q40', or 'int4'")
+        raise ValueError(
+            "mode must be one of 'binary', 'binary_token_scale', 'binary_token_scale_u8', 'pooled_binary', 'binary_q40', 'int4', "
+            f"or a preset in {sorted(MODE_PRESETS)}"
+        )
 
     def save(self, path) -> None:
         output = Path(path)
@@ -169,7 +194,7 @@ class Corpus:
             metadata = json.loads(str(np.asarray(data["metadata_json"]).item()))
             offsets = np.ascontiguousarray(data["doc_offsets"], dtype=np.int64)
             dim = int(np.asarray(data["dim"]).item())
-            if mode in {"binary", "binary_token_scale", "binary_token_scale_u8", "binary_q40"}:
+            if mode in {"binary", "binary_token_scale", "binary_token_scale_u8", "pooled_binary", "binary_q40"}:
                 calibration = None
                 if mode == "binary_q40":
                     calibration = DimCentroidCalibration(
@@ -264,7 +289,7 @@ class Reranker:
     def search(self, query_embeddings, *, k: int = 10):
         _validate_k(k, self.corpus.num_docs)
         actual_k = min(k, self.corpus.num_docs)
-        if self.corpus.mode in {"binary", "binary_token_scale", "binary_token_scale_u8"}:
+        if self.corpus.mode in {"binary", "binary_token_scale", "binary_token_scale_u8", "pooled_binary"}:
             scores, indices = topk_maxsim(query_embeddings, self.corpus.packed, actual_k, device="auto")
         elif self.corpus.mode == "binary_q40":
             scores, indices = topk_dim_centroid_maxsim(query_embeddings, self.corpus.packed, self.corpus.calibration, actual_k, device="auto")
@@ -283,7 +308,7 @@ class Reranker:
         return _format_candidate_results(scores, candidate_indices, candidates, min(k, len(candidates)))
 
     def _score_all(self, query_embeddings):
-        if self.corpus.mode in {"binary", "binary_token_scale", "binary_token_scale_u8"}:
+        if self.corpus.mode in {"binary", "binary_token_scale", "binary_token_scale_u8", "pooled_binary"}:
             return maxsim(query_embeddings, self.corpus.packed, device="auto")
         if self.corpus.mode == "binary_q40":
             return dim_centroid_maxsim(query_embeddings, self.corpus.packed, self.corpus.calibration, device="auto")
@@ -328,9 +353,9 @@ def _validate_corpus_inputs(doc_ids: tuple[str, ...], docs: np.ndarray, offsets:
         raise ValueError("embedding dim must be divisible by 8")
     if offsets.shape[0] != len(doc_ids) + 1:
         raise ValueError("offsets must have one more entry than doc_ids")
-    if mode not in {"binary", "binary_token_scale", "binary_token_scale_u8", "binary_q40", "int4"}:
+    if mode not in {"binary", "binary_token_scale", "binary_token_scale_u8", "pooled_binary", "binary_q40", "int4"}:
         raise ValueError(
-            "mode must be one of 'binary', 'binary_token_scale', 'binary_token_scale_u8', 'binary_q40', 'int4', "
+            "mode must be one of 'binary', 'binary_token_scale', 'binary_token_scale_u8', 'pooled_binary', 'binary_q40', 'int4', "
             f"or a preset in {sorted(MODE_PRESETS)}"
         )
 
