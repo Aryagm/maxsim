@@ -42,7 +42,12 @@ if(BITMAX_BUILD_CUDA)
   find_package(CUDAToolkit REQUIRED)
 
   pybind11_add_module(_bitmax_cuda MODULE cpp/bitmax/cuda_extension.cu)
-  target_link_libraries(_bitmax_cuda PRIVATE Python::NumPy CUDA::cudart)
+  if(TARGET CUDA::cudart_static)
+    # Static cudart avoids libcudart.so soname clashes with torch's bundled runtime.
+    target_link_libraries(_bitmax_cuda PRIVATE Python::NumPy CUDA::cudart_static)
+  else()
+    target_link_libraries(_bitmax_cuda PRIVATE Python::NumPy CUDA::cudart)
+  endif()
   target_compile_definitions(_bitmax_cuda PRIVATE VERSION_INFO="${PROJECT_VERSION}")
   set_target_properties(_bitmax_cuda PROPERTIES CUDA_STANDARD 17 CUDA_STANDARD_REQUIRED ON)
   target_compile_options(_bitmax_cuda PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-O3;-lineinfo>)
