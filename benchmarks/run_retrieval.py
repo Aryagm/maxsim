@@ -502,6 +502,28 @@ def _variant_scores(dataset: RetrievalEmbeddings, variant: str, native_device: s
             packed.storage_bytes + 4,
         )
 
+    if variant == "binary_int8q_dp4a":
+        packed = bitmax.pack_signs(dataset.doc_embeddings, dataset.doc_offsets)
+        scoring_packed = bitmax.to_device(packed, "cuda")
+        scores, latency = _time_call(lambda: _binary_int8q_scores(dataset, scoring_packed), repeat=repeat)
+        return (
+            scores,
+            latency,
+            {"implementation": "binary_int8q_dp4a", "variant": variant, "requested_device": "cuda"},
+            _packed_doc_bytes(dataset),
+        )
+
+    if variant == "binary_token_scale_fp16_int8q_dp4a":
+        packed = bitmax.pack_signs(dataset.doc_embeddings, dataset.doc_offsets, token_scale="mean_abs_fp16")
+        scoring_packed = bitmax.to_device(packed, "cuda")
+        scores, latency = _time_call(lambda: _binary_int8q_scores(dataset, scoring_packed), repeat=repeat)
+        return (
+            scores,
+            latency,
+            {"implementation": "binary_token_scale_fp16_int8q_dp4a", "variant": variant, "requested_device": "cuda"},
+            _packed_doc_bytes(dataset) + dataset.doc_embeddings.shape[0] * 2,
+        )
+
     if variant == "int4_int8q_dp4a":
         packed = pack_int4_symmetric(dataset.doc_embeddings, dataset.doc_offsets)
         scoring_packed = int4_to_device(packed)
@@ -667,7 +689,7 @@ def _normalize_variants(variants: str | tuple[str, ...] | list[str] | None) -> t
         values = tuple(value.strip() for value in variants.split(",") if value.strip())
     else:
         values = tuple(str(value) for value in variants)
-    cuda_only_variants = {"int4_int8q_dp4a"}
+    cuda_only_variants = {"int4_int8q_dp4a", "binary_int8q_dp4a", "binary_token_scale_fp16_int8q_dp4a"}
     unknown = sorted(
         value
         for value in set(values)
@@ -681,6 +703,12 @@ def _normalize_variants(variants: str | tuple[str, ...] | list[str] | None) -> t
 def _ternary_scores(dataset: RetrievalEmbeddings, packed) -> np.ndarray:
     rows = [ternary_maxsim(query, packed) for query in dataset.query_embeddings]
     return np.stack(rows, axis=0).astype(np.float32, copy=False)
+
+
+def _binary_int8q_scores(dataset: RetrievalEmbeddings, cuda_packed) -> np.ndarray:
+    query = _padded_query_batch(dataset.query_embeddings)
+    use_token_scale = isinstance(cuda_packed.token_scale, np.ndarray)
+    return cuda_packed.data.maxsim_batch_int8q(query, 1.0, False, use_token_scale).astype(np.float32, copy=False)
 
 
 def _int4_scores(dataset: RetrievalEmbeddings, packed, *, device: str) -> np.ndarray:
