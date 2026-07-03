@@ -92,7 +92,7 @@ def main() -> int:
     parser.add_argument("--results-dir", type=Path, default=Path("benchmark-results"))
     args = parser.parse_args()
     colqwen = sorted(args.results_dir.glob("paper-vidore-*colqwen2*-r3.json"))
-    colpali = sorted(args.results_dir.glob("paper-colpali-*-r3.json"))
+    colpali = sorted(args.results_dir.glob("paper-vidore-*colpali*-r3.json"))
     if colqwen:
         print("# ColQwen2 (primary model)")
         per_dataset(colqwen)
