@@ -9,14 +9,20 @@ stage() { echo "=== STAGE:$1 $(date -u +%H:%M:%S) ==="; }
 stage setup
 pip install --quiet --upgrade pip
 pip install --quiet scikit-build-core pybind11 numpy pytest scipy
+# torchaudio/torchvision in the image are built for torch 2.4 and poison the
+# transformers import chain after any torch upgrade; we never use them.
+pip uninstall --quiet -y torchaudio torchvision 2>/dev/null || true
+# transformers 5.13.0 downgrades torch; 5.12.1 is the validated combo.
+pip install --quiet "transformers==5.12.1" datasets accelerate pillow
 pip install --quiet -U torch --index-url https://download.pytorch.org/whl/cu126
 BITMAX_BUILD_CUDA=1 pip install -e . --no-build-isolation --config-settings build-dir=/root/bitmax-build --quiet 2>&1 | tail -1
 pytest -m cuda -q || { echo SUITE_FAILED_TESTS; exit 1; }
-pip install --quiet transformers datasets accelerate pillow
+python -c "import torch, transformers; transformers.ColQwen2ForRetrieval; print('encoder stack ok:', torch.__version__, transformers.__version__)"   || { echo SUITE_FAILED_ENCODER_STACK; exit 1; }
 pip install --quiet faiss-gpu==1.14.3 fast-plaid 2>&1 | tail -1 || echo "oss deps partial (allow-unavailable)"
 
 stage build-caches
 python -m benchmarks.reproduce --suite build-unique-caches --execute || { echo SUITE_FAILED_CACHES; exit 1; }
+[ -f benchmark-results/vidore-mixed-public-unique-colqwen2-limit10000.npz ] || { echo SUITE_FAILED_CACHES_MISSING; exit 1; }
 python benchmarks/build_vidore_embeddings.py --dataset vidore/tabfquad_test_subsampled --split test --limit 500 \
   --model vidore/colqwen2-v1.0-hf --batch-size 1 --output benchmark-results/vidore-tabfquad-test-colqwen2-limit500.npz
 
