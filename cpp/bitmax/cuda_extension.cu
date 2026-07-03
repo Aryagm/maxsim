@@ -20,7 +20,10 @@ constexpr int kTopkThreads = 256;
 // Corpora with at least this many average tokens per document use the
 // unrolled kernel even above 128 documents; shorter-doc corpora keep the
 // generic kernel (the documented rerank_512/rerank_4096 regression shapes).
-int g_dim128_unrolled_min_avg_tokens = 1 << 30;
+// Threshold from benchmark-results/dim128-gate-sweep.json on RTX 4090:
+// unrolled wins ~2x at 750 tokens/doc for 256/1000/5000 docs and loses
+// (0.71-0.86x) at 32-128 tokens/doc.
+int g_dim128_unrolled_min_avg_tokens = 256;
 
 void check_cuda(cudaError_t status, const char* action) {
   if (status != cudaSuccess) {

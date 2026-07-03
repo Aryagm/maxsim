@@ -1,0 +1,53 @@
+{
+  "benchmark": "blog_shape_gpu_topk",
+  "gpu": "NVIDIA GeForce RTX 4090",
+  "rows": [
+    {
+      "doc_storage_bytes_per_doc": 402432,
+      "implementation": "torch_fp32_docs_fp32_query_topk",
+      "latency_best_ms": 0.718194991350174,
+      "latency_median_ms": 0.7227961905300617,
+      "max_abs_topk_score_delta_vs_fp32": 0.0,
+      "speedup_vs_torch_fp32_median": 1.0,
+      "topk_agreement_vs_fp32": 1.0
+    },
+    {
+      "doc_storage_bytes_per_doc": 201216,
+      "implementation": "torch_fp16_docs_fp16_query_topk",
+      "latency_best_ms": 0.37298398092389107,
+      "latency_median_ms": 0.3813020884990692,
+      "max_abs_topk_score_delta_vs_fp32": 1.8076171875,
+      "speedup_vs_torch_fp32_median": 1.8955998729910606,
+      "topk_agreement_vs_fp32": 1.0
+    },
+    {
+      "doc_storage_bytes_per_doc": 12576,
+      "implementation": "bitmax_cuda_int8_query_binary_docs_lut_topk",
+      "latency_best_ms": 0.450831837952137,
+      "latency_median_ms": 0.4625620786100626,
+      "max_abs_topk_score_delta_vs_fp32": 2601.80712890625,
+      "speedup_vs_blog_int8_binary_latency_3_71ms": 8.020545071805401,
+      "speedup_vs_torch_fp32_median": 1.562592836624152,
+      "topk_agreement_vs_fp32": 0.1
+    },
+    {
+      "doc_storage_bytes_per_doc": 12580,
+      "implementation": "bitmax_cuda_int8_query_binary_docs_doc_scale_lut_topk",
+      "latency_best_ms": 0.45890198089182377,
+      "latency_median_ms": 0.4797619767487049,
+      "max_abs_topk_score_delta_vs_fp32": 1101.92138671875,
+      "speedup_vs_blog_int8_binary_latency_3_71ms": 7.7330013210764825,
+      "speedup_vs_torch_fp32_median": 1.506572478770355,
+      "topk_agreement_vs_fp32": 0.1
+    }
+  ],
+  "schema_version": 1,
+  "shape": {
+    "batch": 1,
+    "dim": 128,
+    "doc_tokens": 786,
+    "docs": 1000,
+    "k": 10,
+    "query_tokens": 33
+  }
+}

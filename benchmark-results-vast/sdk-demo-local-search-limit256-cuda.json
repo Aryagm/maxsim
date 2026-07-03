@@ -1,0 +1,81 @@
+{
+  "benchmark": "sdk_local_multivector_search",
+  "dataset": {
+    "dim": 128,
+    "doc_tokens": 192565,
+    "docs": 256,
+    "name": "vidore/docvqa_test_subsampled:test:256",
+    "queries": 256
+  },
+  "device": "cuda",
+  "repeat": 5,
+  "results": [
+    {
+      "doc_memory_compression_vs_fp16": 1.0,
+      "doc_memory_compression_vs_fp32": 2.0,
+      "doc_storage_bytes": 49296640,
+      "docs": 256,
+      "implementation": "dense_fp16_baseline",
+      "latency_ms": 1906.0834869742393,
+      "mrr_at_10": 0.6227368551587302,
+      "ndcg_at_10": 0.6597611817129709,
+      "quality_delta_vs_dense_ndcg_at_10": 0.0,
+      "query_count": 256,
+      "recall_at_1": 0.55078125,
+      "recall_at_10": 0.77734375
+    },
+    {
+      "device": "cuda",
+      "doc_memory_compression_vs_fp16": 16.0,
+      "doc_memory_compression_vs_fp32": 32.0,
+      "doc_storage_bytes": 3081040,
+      "docs": 256,
+      "implementation": "bitmax_binary",
+      "latency_ms": 58.79335291683674,
+      "mode": "binary",
+      "mrr_at_10": 0.6153304811507936,
+      "ndcg_at_10": 0.6490518677103908,
+      "quality_delta_vs_dense_ndcg_at_10": -0.010709314002580128,
+      "query_count": 256,
+      "recall_at_1": 0.546875,
+      "recall_at_10": 0.75390625,
+      "speedup_vs_dense_fp16": 32.42005077802582
+    },
+    {
+      "device": "cuda",
+      "doc_memory_compression_vs_fp16": 15.992027447174053,
+      "doc_memory_compression_vs_fp32": 31.984054894348105,
+      "doc_storage_bytes": 3082576,
+      "docs": 256,
+      "implementation": "bitmax_binary_q40",
+      "latency_ms": 64.34883293695748,
+      "mode": "binary_q40",
+      "mrr_at_10": 0.6165411086309525,
+      "ndcg_at_10": 0.6515156548987857,
+      "quality_delta_vs_dense_ndcg_at_10": -0.008245526814185222,
+      "query_count": 256,
+      "recall_at_1": 0.546875,
+      "recall_at_10": 0.76171875,
+      "speedup_vs_dense_fp16": 29.62110422175999
+    },
+    {
+      "device": "cuda",
+      "doc_memory_compression_vs_fp16": 3.999998701737497,
+      "doc_memory_compression_vs_fp32": 7.999997403474994,
+      "doc_storage_bytes": 12324164,
+      "docs": 256,
+      "implementation": "bitmax_int4",
+      "latency_ms": 144.19282088056207,
+      "mode": "int4",
+      "mrr_at_10": 0.6224066840277778,
+      "ndcg_at_10": 0.6583848320786803,
+      "quality_delta_vs_dense_ndcg_at_10": -0.0013763496342906745,
+      "query_count": 256,
+      "recall_at_1": 0.5546875,
+      "recall_at_10": 0.7734375,
+      "speedup_vs_dense_fp16": 13.218990205851428
+    }
+  ],
+  "schema_version": 1,
+  "top_k": 10
+}

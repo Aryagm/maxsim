@@ -1,0 +1,59 @@
+{
+  "created_at": "2026-06-30T23:52:20.102373+00:00",
+  "environment": {
+    "cwd": "/Users/aryagm/code/bitmax",
+    "git_branch": "pareto-retrieval-research",
+    "git_dirty": true,
+    "git_sha": "3a8a0ba20502d41b6a9cb63815844ab9264cff31",
+    "gpu": null,
+    "platform": "macOS-26.3-arm64-arm-64bit-Mach-O",
+    "python": "3.14.0"
+  },
+  "executed": false,
+  "ledger_refresh_command": [
+    "rsync",
+    "-av",
+    "--include=*/",
+    "--include=*.json",
+    "--include=*.png",
+    "--exclude=*",
+    "benchmark-results/",
+    "docs/benchmark_results/raw/"
+  ],
+  "output_path": "benchmark-results/reproduce-smoke-plan.json",
+  "schema_version": 1,
+  "steps": [
+    {
+      "artifacts": [],
+      "command": [
+        "/Users/aryagm/code/bitmax/.venv/bin/python",
+        "-m",
+        "pytest",
+        "-q"
+      ],
+      "expensive": false,
+      "name": "unit-tests",
+      "notes": "Runs local unit tests; CUDA tests are skipped automatically when unavailable.",
+      "requires_cuda": false
+    },
+    {
+      "artifacts": [
+        "benchmark-results/stage0.json"
+      ],
+      "command": [
+        "/Users/aryagm/code/bitmax/.venv/bin/python",
+        "-m",
+        "benchmarks.run_synthetic",
+        "--stage",
+        "stage0",
+        "--output",
+        "benchmark-results/stage0.json"
+      ],
+      "expensive": false,
+      "name": "stage0-synthetic",
+      "notes": "",
+      "requires_cuda": false
+    }
+  ],
+  "suite": "smoke"
+}
