@@ -52,11 +52,15 @@ def _scores(
 ) -> np.ndarray:
     per_token_doc_scale = isinstance(doc_scale, np.ndarray)
     scores = np.empty((dataset.num_queries, dataset.num_docs), dtype=np.float32)
+    # Integer dots are computed in fp32 BLAS: |dot| <= 128*127*7 < 2**24, so
+    # every intermediate integer is exactly representable and this matches
+    # int32 accumulation bit-for-bit while being ~100x faster than numpy int32.
+    docs_work = doc_values.astype(np.float32)
     for query_idx, query in enumerate(dataset.query_embeddings):
         query_float = query.astype(np.float32, copy=False)
         if quantize_query:
             q_values, q_scales = _int8_query(query_float)
-            q_work = q_values.astype(np.int32)
+            q_work = q_values.astype(np.float32)
         else:
             q_work = query_float
             q_scales = None
@@ -66,7 +70,7 @@ def _scores(
             if start == end:
                 scores[query_idx, doc_idx] = 0.0
                 continue
-            doc = doc_values[start:end].astype(np.int32 if quantize_query else np.float32)
+            doc = docs_work[start:end]
             dots = q_work @ doc.T
             if per_token_doc_scale:
                 dots = dots.astype(np.float64) * doc_scale[start:end][np.newaxis, :]
