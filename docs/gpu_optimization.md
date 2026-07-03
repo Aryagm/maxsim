@@ -614,3 +614,29 @@ pooled tier's -0.018 NDCG is the real information cost of halving tokens, not
 a pooling-algorithm artifact. pool_factor=3 is a valid extreme point:
 0.6358 (-0.024) at 95.9x, reachable via
 Corpus.from_embeddings(..., mode="max_compression", pool_factor=3).
+
+## 2026-07-03: Learned Rotation (ITQ) Verdict — Not Robust at Scale
+
+ITQ-style orthogonal rotation (optionally mean-centered; ranking-neutral
+center term) was swept over binary / token-scale / pooled packing on all four
+ViDoRe slices at 256-query scale (`benchmark-results/rotation-sweep-*.json`;
+infovqa/arxivqa/tabfquad limit256 caches built for this test). Pooled-tier
+delta from centered ITQ: docvqa +0.006, infovqa +0.003, arxivqa -0.005,
+tabfquad -0.007 — mean ~0, sign flips per corpus (the q40 failure mode).
+The large limit64 gains (up to +0.047) did not replicate; they were
+small-slice overfit. Rotation also hurts the token-scale default on 3 of 4
+slices. Decision: not adopted on any tier.
+
+Useful side-finding from the new 256-query caches: the pooled tier's quality
+cost is docvqa-specific worst-case. Across the four datasets pooled-vs-dense
+deltas are -0.0180 / -0.0080 / -0.0038 / -0.0038, and pooled actually beats
+the token-scale tier on infovqa-256 and arxivqa-256. The tier table's docvqa
+numbers are conservative.
+
+Accuracy-at-fixed-compression is now exhausted for post-hoc methods: scales
+(per-doc/token/group, tempered, clipped, u8/fp16), calibration (centroids,
+thresholds, q40), pooling algorithms (ward/norm-weighted/threshold/salient),
+packing swaps (int4-on-pooled), and rotation have all been measured. The
+remaining gaps are the information cost of the bit budget; the paths that
+remain are spending bytes (tier up) or quantization-aware embedding training
+(model-side, out of library scope).
