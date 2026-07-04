@@ -1,270 +1,149 @@
 # bitmax
 
-`bitmax` is a Python SDK and kernel library for compressed late-interaction
-multi-vector search. Query tokens stay `int8`/`float16`/`float32`; document
-tokens can be stored as 1-bit signs, q40 centroid-calibrated signs, or signed
-int4 values.
+**Exact compressed MaxSim scoring for late-interaction retrieval, with CUDA kernels.**
 
-This is not a vector database, RAG framework, or embedding model. The v0.1 goal
-is to provide the compressed MaxSim scoring and reranking layer that those
-systems can call.
+`bitmax` stores ColBERT/ColPali-style multi-vector document embeddings at
+**8×–96× less storage than fp32** and scores them with exact (not approximate)
+MaxSim kernels — within 0.002–0.010 NDCG@10 of full dense scoring on the
+complete ViDoRe benchmark, at 5–13× the speed of a vectorized dense fp16
+baseline on the same GPU.
 
-## Current CUDA Evidence
+This is not a vector database, RAG framework, or embedding model. It is the
+compressed scoring and reranking layer those systems can call: bring
+`[tokens × dim]` embeddings and document offsets, get ranked results.
 
-Measured artifacts are committed under `docs/benchmark_results/raw/`; generated
-embedding caches are intentionally ignored.
+## Headline results
 
-The strongest current unique-corpus result is a mixed public ViDoRe/SyntheticDocQA
-slice with 10,171 unique documents and 256 measured queries on a VAST RTX 4090:
+Mixed unique corpus, **10,171 documents / 256 queries**, ColQwen2 embeddings,
+one RTX 4090, repeat 3
+(`docs/benchmark_results/raw/paper-unique-10k-final.json`):
 
-| implementation | fp32 doc reduction | P95 latency | speedup vs dense fp16 | recall@10 | NDCG@10 |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| dense fp16 CUDA | 2.00x | 77.17s | 1.00x | 0.602 | 0.510 |
-| fast-plaid CUDA | 3.45x | 24.84s | 3.26x | 0.609 | 0.512 |
-| bitmax binary CUDA | 32.00x | 1.29s | 59.59x | 0.602 | 0.491 |
-| bitmax binary_q40 CUDA | 32.00x | 1.31s | 58.76x | 0.582 | 0.475 |
-| bitmax int4 CUDA | 8.00x | 4.86s | 15.79x | 0.617 | 0.503 |
+| tier | NDCG@10 | recall@10 | latency (256 q) | compression vs fp32 |
+| --- | ---: | ---: | ---: | ---: |
+| dense fp16 (vectorized) | 0.5068 | 0.6016 | 6.04 s | 2× |
+| **int4 + dp4a** (`max_quality`) | **0.5008** | 0.6055 | **1.12 s** | 8× |
+| binary (`max_speed`) | 0.4856 | 0.5898 | 0.68 s | 32× |
+| pool2 binary | 0.4864 | 0.5938 | 0.45 s | 63.9× |
+| **pool3 binary** (`max_compression`) | **0.4968** | **0.6133** | **0.46 s** | **95.9×** |
 
-Artifact:
-`docs/benchmark_results/raw/unique-public-10k-rich/vidore-mixed-public-unique-colqwen2-limit10000-comparison.json`.
+For calibration: FAISS GPU mean-pooling (single-vector) collapses to NDCG@10
+0.036 on this corpus, and a PLAID-style baseline (`fast-plaid`) matches dense
+quality at 3.4× compression — pool3 ties its recall@10 at 28× less storage.
 
-The largest current result is a fixed-query document-count stress sweep on the
-same VAST RTX 4090:
+Full ViDoRe suite (10 datasets, complete test splits, 8,443 queries), paired
+per-query analysis with bootstrap CIs
+(`benchmark-results/significance-suite.json`):
 
-| docs | dense fp16 P95 | binary P95 | binary speedup | dense NDCG@10 | binary_q40 NDCG@10 | int4 NDCG@10 |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 5,000 | 35.62s | 645ms | 55.66x | 0.377 | 0.372 | 0.379 |
-| 10,000 | 71.75s | 1.26s | 57.06x | 0.376 | 0.371 | 0.378 |
-| 25,000 | 174.69s | 3.14s | 55.86x | 0.374 | 0.371 | 0.376 |
+| tier | paired ΔNDCG@10 vs dense | 95% CI |
+| --- | ---: | ---: |
+| int4 + dp4a | −0.0018 | [−0.0030, −0.0006] |
+| binary | −0.0052 | [−0.0071, −0.0033] |
+| pool3 binary | −0.0089 | [−0.0112, −0.0066] |
 
-Interpretation:
+All numbers derive from committed JSON artifacts with stored per-query
+metrics; see `paper/` for the full write-up and `docs/gpu_optimization.md`
+for the complete measurement history, including negative results.
 
-- `binary` is the aggressive mode: 32x fp32 document compression and the lowest
-  latency, with a small quality loss on current ViDoRe-style sweeps.
-- `binary_q40` keeps the 32x-ish storage profile while improving the large-doc
-  NDCG result versus raw binary.
-- `int4` is the conservative mode: 8x fp32 document compression with quality
-  very close to dense fp16 in the tracked runs.
-
-The 25k row is a distractor-crowding stress test built from repeated
-non-positive real page embeddings. It validates scoring and memory scaling; it
-is not a claim that the 25k corpus contains 25k unique pages. See
-`docs/benchmarks.md` and `docs/benchmark_results/README.md` for full commands,
-artifacts, and caveats.
-
-## Install for development
+## Quickstart
 
 ```bash
-python -m venv .venv
-.venv/bin/python -m pip install -e ".[dev]"
+# CPU-only
+pip install -e .
+
+# with CUDA kernels (requires the CUDA toolkit; arch auto-detected,
+# override with BITMAX_CUDA_ARCH)
+BITMAX_BUILD_CUDA=1 pip install -e .
 ```
-
-## CUDA Build
-
-CUDA kernels are built from source when `BITMAX_BUILD_CUDA=1` is set and a CUDA
-toolchain is available:
-
-```bash
-BITMAX_BUILD_CUDA=1 python -m pip install -e ".[dev,torch,oss-bench]"
-python -m pytest -m cuda
-```
-
-The committed benchmark numbers were measured on a project-owned VAST RTX 4090
-worker. There are no published prebuilt CUDA wheels yet; build from source for
-CUDA benchmark work.
-
-## SDK Use
 
 ```python
 import bitmax
 
-corpus = bitmax.Corpus.from_embeddings(
-    doc_ids=doc_ids,
-    embeddings=doc_embeddings,
-    offsets=doc_offsets,
-    mode="binary_q40",
-    metadata={"model": "vidore/colqwen2-v1.0-hf"},
-)
+# embeddings: [total_doc_tokens, dim] float32; offsets: [num_docs + 1] int64
+corpus = bitmax.Corpus.from_embeddings(doc_ids, embeddings, offsets)   # mode="balanced"
 corpus.save("docs.bitmax.npz")
 
 reranker = bitmax.Reranker.load("docs.bitmax.npz", device="cuda")
-results = reranker.search(query_embeddings, k=10)
+results = reranker.search(query_embeddings, k=10)   # [SearchResult(doc_id, score, rank), ...]
 
-reranked = reranker.rerank(
-    query_embeddings,
-    candidate_ids=["doc-17", "doc-03", "doc-91"],
-    k=3,
-)
+# or rerank an external candidate set (ids from your ANN/BM25/DB stage)
+reranked = reranker.rerank(query_embeddings, candidate_ids=["doc-17", "doc-03"], k=3)
 ```
 
-For an end-to-end example using any precomputed multi-vector embeddings:
+## Choosing a tier
+
+`Corpus.from_embeddings(..., mode=...)` accepts explicit modes or presets:
+
+| preset | recipe | pick when |
+| --- | --- | --- |
+| `max_quality` | int4 + dp4a int8-query scoring (`Reranker(..., int4_query="int8")`) | quality SLAs at any corpus size — the strongest all-scale tier |
+| `balanced` *(default)* | binary + fp16 per-token scales | small corpora (≲500 docs), where magnitude restoration measurably helps |
+| `compact` | binary + 4-bit log per-token scales | as `balanced`, 9% smaller index, statistically identical quality |
+| `max_speed` | binary signs | large corpora when storage is tight and latency is king |
+| `max_compression` | pooled binary (`pool_factor=2\|3`, needs `pip install -e ".[pooling]"`) | 10k+ docs where size dominates — pool3 *beats* plain binary at scale |
+
+**The tier ranking is corpus-size-dependent** (the paper's central finding):
+per-token scales help below ~500 documents and hurt at 10k+; pooling
+strengthens with scale. When in doubt at scale, use `max_quality` or
+`max_compression`; on small corpora, `balanced`.
+
+## What's inside
+
+- **Formats**: packed 1-bit signs (16 B/token at dim 128), optional per-token
+  scales (fp16 / 4-bit log / 8-bit log, applied pre-max), per-dimension
+  centroid calibration (`binary_q40`), symmetric int4, and Ward-clustered
+  token pooling.
+- **CUDA kernels** (`cpp/bitmax/cuda_extension.cu`): GPU-resident packed
+  corpora; generic + unrolled dim-128 scoring (routed by a measured
+  tokens/doc gate); query-byte LUT top-k for integer queries; a dp4a
+  int8-query × int4-doc kernel (4.2× over fp32-query int4, rank-identical);
+  fused top-k with deterministic tie-breaking. All parity-tested against CPU
+  references (`pytest -m cuda`).
+- **Kept but unrouted, with evidence**: streaming top-k, dp4a-for-binary, and
+  a one-pass q-tiled kernel — each measured slower than what ships, each
+  documented in `docs/gpu_optimization.md` so nobody rebuilds them on a hunch.
+
+## Benchmarks & reproduction
+
+- `benchmarks/run_retrieval.py` — quality/latency ladder over embedding caches
+  (per-query NDCG vectors persisted for paired statistics).
+- `benchmarks/compare_open_source.py` — same-footing comparison vs dense fp16
+  (loop **and** vectorized implementations), FAISS, fast-plaid; bitmax rows go
+  through the public SDK.
+- `benchmarks/significance.py` — paired bootstrap CIs + sign tests from the
+  stored per-query vectors.
+- `paper/make_figures.py` — regenerates the paper's figures from the committed
+  ledger (`docs/benchmark_results/raw/`).
+- `python -m benchmarks.reproduce --suite ...` — canonical cache-building and
+  comparison recipes. Embedding caches must be built at `--batch-size 1`
+  (the builder is not batch-faithful; see docs). For fast rebuilds, run many
+  batch-1 builder processes concurrently on one large-memory GPU.
+
+Two honesty notes baked into the methodology: speedups are cited against the
+**vectorized** dense baseline (the naïve per-document loop overstates dense
+cost 27×), and fast-plaid latency is not cited because it varied 23–820 s
+across configurations in our environment while its quality stayed at parity.
+
+## Paper
+
+`paper/main.tex` (+ `paper/make_figures.py`) — *Compression Tiers for
+Late-Interaction Visual Document Retrieval: A Measured Accuracy–Size–Latency
+Frontier*. Compiles with `tectonic main.tex` from `paper/`.
+
+## Status & limitations
+
+- Latency validated on RTX 4090 (kernel findings may shift on other
+  architectures); dim-128 embeddings are the tested path (dim must be
+  divisible by 8; several fast paths are dim-128-specific).
+- Visual-document (ColPali-family) corpora are the evaluated domain;
+  text-only ColBERT corpora are unverified.
+- No prebuilt CUDA wheels yet; build from source.
+- **No license file yet** — do not redistribute until one is added.
+
+## Development
 
 ```bash
-python -m examples.rag_pipeline_sdk \
-  --embeddings benchmark-results/vidore-docvqa-colqwen2-limit256.npz \
-  --corpus benchmark-results/docvqa.binary_q40.bitmax.npz \
-  --mode binary_q40 \
-  --device cuda \
-  --query-index 0 \
-  --k 5
+python -m venv .venv
+.venv/bin/python -m pip install -e ".[dev]"
+pytest -m "not cuda"                                      # CPU suite
+BITMAX_BUILD_CUDA=1 pip install -e ".[dev]" && pytest -m cuda   # kernel parity suite
 ```
-
-Modes:
-
-- `binary`: fastest, 32x fp32 document compression.
-- `binary_q40`: experimental 32x-ish accuracy mode using q40 centroid calibration.
-- `int4`: experimental accuracy-first mode, 8x fp32 compression.
-
-Lower-level kernels remain available when you need direct packed scoring:
-
-```python
-packed = bitmax.pack_signs(doc_embeddings, doc_offsets)
-scores = bitmax.maxsim(query_embeddings, packed)
-top_scores, top_indices = bitmax.topk_maxsim(query_embeddings, packed, k=10)
-```
-
-## API contract
-
-- Query shapes: `[query_tokens, dim]` or `[batch, query_tokens, dim]`.
-- Query dtypes: `int8`, `float16`, or `float32`; output scores are `float32`.
-- Packed signs use little-endian bits inside each byte: `1 = +1`, `0 = -1`.
-- `dim` must be divisible by 8. The current native CPU kernel is an exact
-  scalar byte-LUT implementation; CUDA is optional with `BITMAX_BUILD_CUDA=1`.
-
-## Benchmarks
-
-Run the cheap signal-first benchmark ladder before any expensive GPU work:
-
-```bash
-python benchmarks/run_synthetic.py --stage stage0
-python benchmarks/run_synthetic.py --stage cpu-smoke
-```
-
-Benchmark JSON uses schema version 2 and includes:
-
-- `python_reference` correctness rows;
-- `torch_fp16_baseline` and `torch_int8_baseline` rows;
-- `bitmax_native` or `bitmax_cuda` rows with speedups vs the torch-style
-  baselines;
-- packed-document memory compression vs dense fp16/fp32 storage.
-
-If PyTorch is installed, the baseline rows use PyTorch. Otherwise they use a
-NumPy implementation of the same vectorized dense MaxSim formulas and mark
-`baseline_backend` as `numpy_torch_equivalent`.
-
-CUDA and larger VAST runs are gated by the earlier JSON results:
-`cuda-smoke` unlocks `cuda-sweep`, and `cuda-sweep` unlocks `vast-large`.
-Benchmark tables in this README should only contain measured numbers from
-`benchmark-results/`.
-
-Retrieval-level benchmarks consume multi-vector embedding `.npz` files and qrels
-without building an index:
-
-```bash
-python benchmarks/run_retrieval.py --stage fixture-smoke
-python benchmarks/build_vidore_embeddings.py \
-  --dataset vidore/docvqa_test_subsampled \
-  --limit 16 \
-  --model vidore/colqwen2-v1.0-hf \
-  --output benchmark-results/vidore-docvqa-colqwen2.npz
-python benchmarks/run_retrieval.py \
-  --stage embeddings-smoke \
-  --input benchmark-results/vidore-docvqa-colqwen2.npz
-```
-
-Those rows report recall/MRR/NDCG, top-k agreement with dense fp16 MaxSim,
-latency, speedup, and document-memory compression.
-
-To inspect or rerun benchmark plans:
-
-```bash
-python -m benchmarks.reproduce --suite smoke
-python -m benchmarks.reproduce --suite smoke --execute --refresh-ledger
-python -m benchmarks.reproduce --suite cuda-unique-5k
-python -m benchmarks.reproduce --suite cuda-docscale
-```
-
-`--execute` runs the plan; without it the command writes a dry-run JSON plan
-with git SHA, environment, GPU info, commands, and expected artifacts.
-
-Experimental Pareto variants can be measured with `--variants all`. Those rows
-include ternary documents, per-token scale, grouped scale, int4 documents,
-calibrated threshold references, and per-dimension centroid-calibrated binary
-docs. Most are benchmark probes, not stable public kernels. The centroid and
-int4 paths are exposed under `bitmax.experimental`:
-
-```python
-from bitmax.experimental import (
-    dim_centroid_maxsim,
-    fit_dim_centroid_calibration,
-    int4_maxsim,
-    int4_to_device,
-    pack_dim_centroid_signs,
-    pack_int4_symmetric,
-)
-
-calibration = fit_dim_centroid_calibration(docs)
-packed, calibration = pack_dim_centroid_signs(docs, doc_offsets, calibration=calibration)
-scores = dim_centroid_maxsim(query, packed, calibration)
-
-packed_i4 = pack_int4_symmetric(docs, doc_offsets)
-scores_i4 = int4_maxsim(query, int4_to_device(packed_i4), device="cuda")
-```
-
-CUDA top-k kernel experiments are available on CUDA workers:
-
-```bash
-python -m benchmarks.run_cuda_topk --stage lut-sweep
-python -m benchmarks.run_cuda_topk --stage blog-shape
-```
-
-On a project-owned VAST RTX 4090, the dim128 int8-query LUT path measured
-`0.463 ms` median latency on the blog-style 33 x 1000 x 786 x 128 top-k shape
-with 12,576 bytes/doc, versus `0.723 ms` for torch fp32 dense top-k on the same
-worker.
-
-The SDK CUDA demo on `vidore/docvqa_test_subsampled:test:256` with ColQwen2
-embeddings measured:
-
-| implementation | fp32 doc reduction | latency | speedup vs dense fp16 | recall@10 | NDCG@10 |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| dense fp16 CUDA | 2.00x | 1906.08 ms | 1.00x | 0.777 | 0.660 |
-| SDK binary CUDA | 32.00x | 58.79 ms | 32.42x | 0.754 | 0.649 |
-| SDK binary_q40 CUDA | 31.98x | 64.35 ms | 29.62x | 0.762 | 0.652 |
-| SDK int4 CUDA | 8.00x | 144.19 ms | 13.22x | 0.773 | 0.658 |
-
-Artifact: `benchmark-results/sdk-demo-local-search-limit256-cuda.json`.
-
-Against open-source baselines on the same slice:
-
-| implementation | fp32 doc reduction | latency | recall@10 | NDCG@10 |
-| --- | ---: | ---: | ---: | ---: |
-| dense fp16 CUDA | 2.00x | 1926.10 ms | 0.777 | 0.660 |
-| FAISS GPU mean-pool flat IP | 752.21x | 0.75 ms | 0.414 | 0.290 |
-| cuVS GPU mean-pool flat IP | 752.21x | 0.98 ms | 0.414 | 0.290 |
-| FAISS GPU token candidates + dense rerank | 0.67x | 2884.28 ms | 0.777 | 0.660 |
-| Qdrant in-memory multivector | 1.00x | 33660.60 ms | 0.777 | 0.660 |
-| fast-plaid CUDA | 3.37x | 1856.76 ms | 0.766 | 0.660 |
-| SDK binary_q40 CUDA | 31.98x | 64.73 ms | 0.762 | 0.652 |
-| SDK int4 CUDA | 8.00x | 144.24 ms | 0.773 | 0.658 |
-
-Artifact: `benchmark-results/open-source-comparison-expanded-limit256-cuda.json`.
-
-Across four ViDoRe datasets at limit64 with frozen ColQwen2 embeddings:
-
-| implementation | datasets | fp32 doc reduction | mean latency | recall@10 | NDCG@10 |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| dense fp16 CUDA | 4 | 2.00x | 110.94 ms | 0.949 | 0.885 |
-| fast-plaid CUDA | 4 | 3.22x | 185.65 ms | 0.945 | 0.882 |
-| SDK int4 CUDA | 4 | 8.00x | 33.05 ms | 0.949 | 0.879 |
-| SDK binary CUDA | 4 | 32.00x | 9.19 ms | 0.941 | 0.865 |
-| FAISS pooled GPU | 4 | 707.80x | 0.27 ms | 0.809 | 0.650 |
-
-Artifact: `benchmark-results/multidataset-limit64-slow-summary.json`.
-
-## VAST
-
-VAST helpers live under `ops/vast/` and are also exposed as `bitmax-vast` after
-installation. They enforce a ledger-based cleanup rule: destroy only instances
-recorded in `.vast/bitmax-instances.jsonl` whose live label still starts with
-`bitmax-v0-`.
