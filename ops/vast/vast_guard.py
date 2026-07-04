@@ -5,7 +5,7 @@ import json
 import subprocess
 import sys
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -47,7 +47,7 @@ class InstanceRecord:
 
 
 def make_label(git_sha: str, role: str, *, now: datetime | None = None) -> str:
-    timestamp = (now or datetime.now(UTC)).strftime("%Y%m%d%H%M%S")
+    timestamp = (now or datetime.now(timezone.utc)).strftime("%Y%m%d%H%M%S")
     clean_sha = git_sha[:12] if git_sha else "nogit"
     clean_role = role.replace("_", "-")
     return f"{BITMAX_LABEL_PREFIX}{timestamp}-{clean_sha}-{clean_role}"

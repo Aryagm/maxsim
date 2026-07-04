@@ -5,7 +5,7 @@ import json
 import re
 import shlex
 import sys
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from ops.vast.vast_guard import (
@@ -65,7 +65,7 @@ def cmd_create(args: argparse.Namespace) -> int:
             label=label,
             offer_id=args.offer_id,
             hourly_cost=args.hourly_cost,
-            created_at=datetime.now(UTC).isoformat(),
+            created_at=datetime.now(timezone.utc).isoformat(),
             role=args.role,
         ),
         args.ledger,
@@ -81,7 +81,7 @@ def cmd_record_created(args: argparse.Namespace) -> int:
             label=args.label,
             offer_id=args.offer_id,
             hourly_cost=args.hourly_cost,
-            created_at=datetime.now(UTC).isoformat(),
+            created_at=datetime.now(timezone.utc).isoformat(),
             role=args.role,
         ),
         args.ledger,
