@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from bitmax._api import (
+from maxsim._api import (
     PackedDocs,
     _as_numpy,
     _normalize_offsets,
@@ -247,12 +247,12 @@ def int4_to_device(packed: Int4PackedDocs, device: str = "cuda") -> Int4PackedDo
     if packed.device == "cuda":
         return packed
     try:
-        from bitmax import _bitmax_cuda
+        from maxsim import _maxsim_cuda
     except ImportError as exc:  # pragma: no cover - depends on CUDA build
         raise NotImplementedError("CUDA int4 packed docs are not available in this build") from exc
-    if not hasattr(_bitmax_cuda, "CudaInt4PackedDocs"):
+    if not hasattr(_maxsim_cuda, "CudaInt4PackedDocs"):
         raise NotImplementedError("CUDA int4 packed docs are not available in this build")
-    handle = _bitmax_cuda.CudaInt4PackedDocs(
+    handle = _maxsim_cuda.CudaInt4PackedDocs(
         np.ascontiguousarray(packed.data, dtype=np.uint8),
         np.ascontiguousarray(packed.doc_offsets, dtype=np.int64),
         packed.dim,

@@ -1,21 +1,68 @@
-# bitmax
+# maxsim
 
-[![ci](https://github.com/Aryagm/bitmax/actions/workflows/ci.yml/badge.svg)](https://github.com/Aryagm/bitmax/actions/workflows/ci.yml)
+[![ci](https://github.com/Aryagm/maxsim/actions/workflows/ci.yml/badge.svg)](https://github.com/Aryagm/maxsim/actions/workflows/ci.yml)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**Exact compressed MaxSim scoring for late-interaction retrieval, with CUDA kernels.**
+**Run ColPali/ColBERT-style retrieval with 8–96× less storage.**
 
-`bitmax` stores ColBERT/ColPali-style multi-vector document embeddings at
-**8×–96× less storage than fp32** and scores them with exact (not approximate)
-MaxSim kernels — within 0.002–0.010 NDCG@10 of full dense scoring on the
-complete ViDoRe benchmark, at 5–13× the speed of a vectorized dense fp16
-baseline on the same GPU.
+`maxsim` is the compression and scoring layer for multi-vector retrieval: it
+compresses token/patch embeddings and scores them with **exact** (not
+approximate) CUDA MaxSim kernels. If your model produces multi-vector
+embeddings and ranks with MaxSim, `maxsim` makes your index dramatically
+smaller and faster **without changing the model or approximating the score**
+— within 0.002–0.010 NDCG@10 of full dense scoring, at 5–13× the speed of a
+vectorized dense fp16 baseline on the same GPU.
 
-This is not a vector database, RAG framework, or embedding model. It is the
-compressed scoring and reranking layer those systems can call: bring
-`[tokens × dim]` embeddings and document offsets, get ranked results.
+```python
+import maxsim
 
-## Headline results
+# embeddings: [total_doc_tokens, dim] float32; offsets: [num_docs + 1] int64
+index = maxsim.Index.from_embeddings(doc_ids, embeddings, offsets)  # mode="auto"
+index.save("docs.maxsim.npz")
+
+reranker = maxsim.Reranker.load("docs.maxsim.npz", device="cuda")
+results = reranker.search(query_embeddings, k=10)
+```
+
+It works with **any fixed-dimensional multi-vector embedding model scored
+with dot-product MaxSim** (dim divisible by 8; the fastest kernel paths are
+tuned for dim 128, the ColBERT/ColPali standard). Validated end-to-end on
+ColQwen2 and ColPali-v1.3 visual-document embeddings; designed to support
+ColBERT/ColPali/ColQwen-style late-interaction systems generally.
+
+This is not a vector database, RAG framework, or embedding model — it is the
+compressed scoring and reranking primitive those systems can call.
+
+## Choosing a tier
+
+```text
+auto      (default) picks the tier from corpus size — you rarely need more
+int4      dense-like quality, 8× smaller, dp4a-accelerated
+binary    strong all-rounder, 32× smaller
+pool3     extreme compression, 96× smaller — best at 10k+ docs
+```
+
+`Index.from_embeddings(..., mode=...)` accepts these directly or the full
+preset/mode names:
+
+| preset | recipe | pick when |
+| --- | --- | --- |
+| `auto` *(default)* | ≤500 docs → binary + fp16 token scales; larger → int4 | you want the measured-best default at your corpus size |
+| `max_quality` | int4 + dp4a int8-query scoring (`Reranker(..., int4_query="int8")`) | quality SLAs at any corpus size — the strongest all-scale tier |
+| `balanced` | binary + fp16 per-token scales | small corpora (≲500 docs), where magnitude restoration measurably helps |
+| `compact` | binary + 4-bit log per-token scales | as `balanced`, 9% smaller index, statistically identical quality |
+| `max_speed` | binary signs | large corpora when storage is tight and latency is king |
+| `max_compression` | pooled binary (`pool_factor=2\|3`, needs `pip install -e ".[pooling]"`) | 10k+ docs where size dominates — pool3 *beats* plain binary at scale |
+
+**The tier ranking is corpus-size-dependent** (the paper's central finding):
+per-token scales help below ~500 documents and hurt at 10k+; pooling
+strengthens with scale. `auto` encodes exactly this.
+
+<p align="center">
+  <img src="docs/figures/scale_flip.png" width="620" alt="Each tier's NDCG delta versus plain binary across four corpus scales: token scales invert from gain to loss, pooling strengthens monotonically">
+</p>
+
+## Measured results
 
 Mixed unique corpus, **10,171 documents / 256 queries**, ColQwen2 embeddings,
 one RTX 4090, repeat 3
@@ -50,61 +97,32 @@ per-query analysis with 10k-sample bootstrap CIs and two-sided sign tests
 | pool2 binary | −0.0073 | [−0.0095, −0.0051] | 3×10⁻¹¹ |
 | pool3 binary | −0.0089 | [−0.0112, −0.0066] | 6×10⁻¹³ |
 
+Every format's exact byte budget per stored token:
+
+<p align="center">
+  <img src="docs/figures/format_layout.png" width="620" alt="Stored bytes per 128-dim token for each format, from 512 B fp32 down to 5.33 B pool3 binary">
+</p>
+
 All numbers derive from committed JSON artifacts with stored per-query
 metrics; see `paper/` for the full write-up and `docs/gpu_optimization.md`
 for the complete measurement history, including negative results.
 
-## Quickstart
+## Install
 
 ```bash
 # CPU-only
 pip install -e .
 
 # with CUDA kernels (requires the CUDA toolkit; arch auto-detected,
-# override with BITMAX_CUDA_ARCH)
-BITMAX_BUILD_CUDA=1 pip install -e .
+# override with MAXSIM_CUDA_ARCH)
+MAXSIM_BUILD_CUDA=1 pip install -e .
 ```
+
+Reranking an external candidate set (ids from your ANN/BM25/vector-DB stage):
 
 ```python
-import bitmax
-
-# embeddings: [total_doc_tokens, dim] float32; offsets: [num_docs + 1] int64
-corpus = bitmax.Corpus.from_embeddings(doc_ids, embeddings, offsets)   # mode="balanced"
-corpus.save("docs.bitmax.npz")
-
-reranker = bitmax.Reranker.load("docs.bitmax.npz", device="cuda")
-results = reranker.search(query_embeddings, k=10)   # [SearchResult(doc_id, score, rank), ...]
-
-# or rerank an external candidate set (ids from your ANN/BM25/DB stage)
 reranked = reranker.rerank(query_embeddings, candidate_ids=["doc-17", "doc-03"], k=3)
 ```
-
-## Choosing a tier
-
-`Corpus.from_embeddings(..., mode=...)` accepts explicit modes or presets:
-
-| preset | recipe | pick when |
-| --- | --- | --- |
-| `max_quality` | int4 + dp4a int8-query scoring (`Reranker(..., int4_query="int8")`) | quality SLAs at any corpus size — the strongest all-scale tier |
-| `balanced` *(default)* | binary + fp16 per-token scales | small corpora (≲500 docs), where magnitude restoration measurably helps |
-| `compact` | binary + 4-bit log per-token scales | as `balanced`, 9% smaller index, statistically identical quality |
-| `max_speed` | binary signs | large corpora when storage is tight and latency is king |
-| `max_compression` | pooled binary (`pool_factor=2\|3`, needs `pip install -e ".[pooling]"`) | 10k+ docs where size dominates — pool3 *beats* plain binary at scale |
-
-**The tier ranking is corpus-size-dependent** (the paper's central finding):
-per-token scales help below ~500 documents and hurt at 10k+; pooling
-strengthens with scale. When in doubt at scale, use `max_quality` or
-`max_compression`; on small corpora, `balanced`.
-
-<p align="center">
-  <img src="docs/figures/scale_flip.png" width="620" alt="Each tier's NDCG delta versus plain binary across four corpus scales: token scales invert from gain to loss, pooling strengthens monotonically">
-</p>
-
-Every format's exact byte budget per stored token:
-
-<p align="center">
-  <img src="docs/figures/format_layout.png" width="620" alt="Stored bytes per 128-dim token for each format, from 512 B fp32 down to 5.33 B pool3 binary">
-</p>
 
 ## What's inside
 
@@ -112,7 +130,7 @@ Every format's exact byte budget per stored token:
   scales (fp16 / 4-bit log / 8-bit log, applied pre-max), per-dimension
   centroid calibration (`binary_q40`), symmetric int4, and Ward-clustered
   token pooling.
-- **CUDA kernels** (`cpp/bitmax/cuda_extension.cu`): GPU-resident packed
+- **CUDA kernels** (`cpp/maxsim/cuda_extension.cu`): GPU-resident packed
   corpora; generic + unrolled dim-128 scoring (routed by a measured
   tokens/doc gate); query-byte LUT top-k for integer queries; a dp4a
   int8-query × int4-doc kernel (4.2× over fp32-query int4, rank-identical);
@@ -127,7 +145,7 @@ Every format's exact byte budget per stored token:
 - `benchmarks/run_retrieval.py` — quality/latency ladder over embedding caches
   (per-query NDCG vectors persisted for paired statistics).
 - `benchmarks/compare_open_source.py` — same-footing comparison vs dense fp16
-  (loop **and** vectorized implementations), FAISS, fast-plaid; bitmax rows go
+  (loop **and** vectorized implementations), FAISS, fast-plaid; maxsim rows go
   through the public SDK.
 - `benchmarks/significance.py` — paired bootstrap CIs + sign tests from the
   stored per-query vectors.
@@ -146,12 +164,15 @@ cost 27×), and fast-plaid latency is not cited because it varied 23.5–820 s
 across three runs — two at identical tuned parameters — while its quality
 stayed at parity (0.5103–0.5119).
 
+Note on provenance: the committed benchmark artifacts predate the project's
+rename and use implementation keys prefixed `bitmax_` (the former name); the
+keys are preserved verbatim so every historical artifact stays reproducible.
+
 ## Paper
 
-`paper/main.tex` — *Compression Tiers for Late-Interaction Visual Document
-Retrieval: A Measured Accuracy–Size–Latency Frontier* — typeset on the
-arXiv preprint template, with all figures and exact-value tables generated
-from the artifact ledger by `paper/make_figures.py` and
+`paper/main.tex` — *maxsim: A Compressed Runtime for Multi-Vector Retrieval*
+— typeset on the arXiv preprint template, with all figures and exact-value
+tables generated from the artifact ledger by `paper/make_figures.py` and
 `paper/make_tables.py`. Compiles with `tectonic main.tex` from `paper/`.
 
 ## Status & limitations
@@ -160,15 +181,23 @@ from the artifact ledger by `paper/make_figures.py` and
   architectures); dim-128 embeddings are the tested path (dim must be
   divisible by 8; several fast paths are dim-128-specific).
 - Visual-document (ColPali-family) corpora are the evaluated domain;
-  text-only ColBERT corpora are unverified.
+  text-only ColBERT replication is planned and not yet published.
 - No prebuilt CUDA wheels yet; build from source.
+
+## Roadmap
+
+1. Text ColBERT replication (BEIR subsets) — extend the validated claim from
+   visual to text late-interaction.
+2. Prebuilt CUDA wheels (`pip install maxsim` with no toolkit required).
+3. Adapters for PyLate/Byaldi/Qdrant-style workflows.
+4. Batched-query serving kernels and a hosted demo.
 
 ## Citation
 
-If you use bitmax, please cite the paper (see `CITATION.cff`):
+If you use maxsim, please cite the paper (see `CITATION.cff`):
 
-> Manjaramkar, A. *Compression Tiers for Late-Interaction Visual Document
-> Retrieval: A Measured Accuracy–Size–Latency Frontier.* 2026.
+> Manjaramkar, A. *maxsim: A Compressed Runtime for Multi-Vector Retrieval.*
+> 2026.
 
 ## License
 
@@ -180,5 +209,5 @@ MIT — see [LICENSE](LICENSE).
 python -m venv .venv
 .venv/bin/python -m pip install -e ".[dev]"
 pytest -m "not cuda"                                      # CPU suite
-BITMAX_BUILD_CUDA=1 pip install -e ".[dev]" && pytest -m cuda   # kernel parity suite
+MAXSIM_BUILD_CUDA=1 pip install -e ".[dev]" && pytest -m cuda   # kernel parity suite
 ```

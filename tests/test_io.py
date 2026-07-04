@@ -1,8 +1,8 @@
 import numpy as np
 import pytest
 
-import bitmax
-from bitmax.experimental import dim_centroid_maxsim, fit_dim_centroid_calibration, pack_dim_centroid_signs
+import maxsim
+from maxsim.experimental import dim_centroid_maxsim, fit_dim_centroid_calibration, pack_dim_centroid_signs
 
 
 def test_save_load_packed_docs_roundtrips_scores_scale_and_metadata(tmp_path):
@@ -14,10 +14,10 @@ def test_save_load_packed_docs_roundtrips_scores_scale_and_metadata(tmp_path):
         dtype=np.float32,
     )
     query = np.array([[1, 2, 3, 4, 5, 6, 7, 8]], dtype=np.float32)
-    packed = bitmax.pack_signs(docs, scale="doc")
+    packed = maxsim.pack_signs(docs, scale="doc")
 
-    bitmax.save_packed(tmp_path / "docs.npz", packed, metadata={"name": "tiny"})
-    bundle = bitmax.load_packed(tmp_path / "docs.npz")
+    maxsim.save_packed(tmp_path / "docs.npz", packed, metadata={"name": "tiny"})
+    bundle = maxsim.load_packed(tmp_path / "docs.npz")
 
     assert bundle.metadata == {"name": "tiny"}
     assert bundle.centroid_calibration is None
@@ -26,7 +26,7 @@ def test_save_load_packed_docs_roundtrips_scores_scale_and_metadata(tmp_path):
     np.testing.assert_array_equal(bundle.packed.data, packed.data)
     np.testing.assert_array_equal(bundle.packed.doc_offsets, packed.doc_offsets)
     np.testing.assert_allclose(bundle.packed.scale, packed.scale)
-    np.testing.assert_allclose(bitmax.maxsim(query, bundle.packed), bitmax.maxsim(query, packed))
+    np.testing.assert_allclose(maxsim.maxsim(query, bundle.packed), maxsim.maxsim(query, packed))
 
 
 def test_save_load_centroid_bundle_roundtrips_scores(tmp_path):
@@ -43,8 +43,8 @@ def test_save_load_centroid_bundle_roundtrips_scores(tmp_path):
     calibration = fit_dim_centroid_calibration(docs)
     packed, calibration = pack_dim_centroid_signs(docs, offsets, calibration=calibration)
 
-    bitmax.save_packed(tmp_path / "centroid.npz", packed, calibration=calibration, metadata={"format": "centroid"})
-    bundle = bitmax.load_packed(tmp_path / "centroid.npz")
+    maxsim.save_packed(tmp_path / "centroid.npz", packed, calibration=calibration, metadata={"format": "centroid"})
+    bundle = maxsim.load_packed(tmp_path / "centroid.npz")
 
     assert bundle.metadata == {"format": "centroid"}
     assert bundle.centroid_calibration is not None
@@ -58,7 +58,7 @@ def test_save_load_centroid_bundle_roundtrips_scores(tmp_path):
 
 
 def test_save_packed_rejects_cuda_handles(tmp_path):
-    packed = bitmax.PackedDocs(
+    packed = maxsim.PackedDocs(
         data=object(),
         doc_offsets=np.array([0, 1], dtype=np.int64),
         dim=8,
@@ -67,4 +67,4 @@ def test_save_packed_rejects_cuda_handles(tmp_path):
     )
 
     with pytest.raises(ValueError, match="CPU PackedDocs"):
-        bitmax.save_packed(tmp_path / "cuda.npz", packed)
+        maxsim.save_packed(tmp_path / "cuda.npz", packed)

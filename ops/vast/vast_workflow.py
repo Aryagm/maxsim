@@ -106,7 +106,7 @@ def cmd_destroy_owned(args: argparse.Namespace) -> int:
     for command in commands:
         print("vastai " + " ".join(command))
     if not args.dry_run:
-        print(f"destroyed {len(commands)} owned bitmax VAST instance(s)")
+        print(f"destroyed {len(commands)} owned maxsim VAST instance(s)")
     return 0
 
 
@@ -124,7 +124,7 @@ def _extract_instance_id(output: str) -> int | None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="bitmax VAST.ai workflow helpers")
+    parser = argparse.ArgumentParser(description="maxsim VAST.ai workflow helpers")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     subparsers.add_parser("install-validate")

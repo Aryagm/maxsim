@@ -65,7 +65,7 @@ def _apply(dataset: RetrievalEmbeddings, rotation: np.ndarray | None, center: np
 
 
 def _pool2(dataset: RetrievalEmbeddings) -> RetrievalEmbeddings:
-    from bitmax.pooling import pool_doc_tokens
+    from maxsim.pooling import pool_doc_tokens
 
     pooled_docs, pooled_offsets = pool_doc_tokens(dataset.doc_embeddings, dataset.doc_offsets, 2)
     return RetrievalEmbeddings(

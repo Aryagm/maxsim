@@ -2,7 +2,7 @@ import numpy as np
 
 
 def test_pack_ternary_uses_threshold_and_two_bit_storage():
-    from bitmax.experimental import pack_ternary
+    from maxsim.experimental import pack_ternary
 
     docs = np.array(
         [
@@ -31,7 +31,7 @@ def test_pack_ternary_uses_threshold_and_two_bit_storage():
 
 
 def test_ternary_maxsim_and_topk_match_dense_ternary_reference():
-    from bitmax.experimental import pack_ternary, ternary_maxsim, topk_ternary_maxsim
+    from maxsim.experimental import pack_ternary, ternary_maxsim, topk_ternary_maxsim
 
     docs = np.array(
         [

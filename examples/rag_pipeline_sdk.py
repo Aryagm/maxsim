@@ -5,13 +5,13 @@ from pathlib import Path
 
 import numpy as np
 
-import bitmax
+import maxsim
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Minimal bitmax SDK example for precomputed RAG or multimodal embeddings.")
+    parser = argparse.ArgumentParser(description="Minimal maxsim SDK example for precomputed RAG or multimodal embeddings.")
     parser.add_argument("--embeddings", type=Path, required=True, help="NPZ with doc_embeddings, doc_offsets, query_embeddings, and doc_ids.")
-    parser.add_argument("--corpus", type=Path, default=Path("benchmark-results/example-corpus.bitmax.npz"))
+    parser.add_argument("--corpus", type=Path, default=Path("benchmark-results/example-corpus.maxsim.npz"))
     parser.add_argument("--mode", choices=["binary", "binary_q40", "int4"], default="binary_q40")
     parser.add_argument("--device", choices=["cpu", "cuda"], default="cuda")
     parser.add_argument("--query-index", type=int, default=0)
@@ -25,9 +25,9 @@ def main() -> None:
         query = _load_query(data, args.query_index)
 
     if args.corpus.exists():
-        reranker = bitmax.Reranker.load(args.corpus, device=args.device)
+        reranker = maxsim.Reranker.load(args.corpus, device=args.device)
     else:
-        corpus = bitmax.Corpus.from_embeddings(
+        corpus = maxsim.Corpus.from_embeddings(
             doc_ids=doc_ids,
             embeddings=docs,
             offsets=doc_offsets,
@@ -35,7 +35,7 @@ def main() -> None:
             metadata={"source": str(args.embeddings), "mode": args.mode},
         )
         corpus.save(args.corpus)
-        reranker = bitmax.Reranker.from_corpus(corpus, device=args.device)
+        reranker = maxsim.Reranker.from_corpus(corpus, device=args.device)
 
     for result in reranker.search(query, k=args.k):
         print(f"{result.rank}\t{result.doc_id}\t{result.score:.4f}")

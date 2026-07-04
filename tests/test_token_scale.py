@@ -1,8 +1,8 @@
 import numpy as np
 import pytest
 
-import bitmax
-from bitmax.io import load_packed, save_packed
+import maxsim
+from maxsim.io import load_packed, save_packed
 
 
 def _reference_token_scale_scores(docs, offsets, query, token_scales):
@@ -29,18 +29,18 @@ def test_pack_signs_token_scale_mean_abs_matches_reference():
     rng = np.random.default_rng(3)
     query = rng.standard_normal((4, 16)).astype(np.float32)
 
-    packed = bitmax.pack_signs(docs, offsets, token_scale="mean_abs")
+    packed = maxsim.pack_signs(docs, offsets, token_scale="mean_abs")
     expected_scales = np.mean(np.abs(docs), axis=1, dtype=np.float64).astype(np.float32)
     np.testing.assert_array_equal(packed.token_scale, expected_scales)
 
-    scores = bitmax.maxsim(query, packed, device="cpu")
+    scores = maxsim.maxsim(query, packed, device="cpu")
     reference = _reference_token_scale_scores(docs, offsets, query, expected_scales)
     np.testing.assert_allclose(scores, reference, rtol=0, atol=1e-5)
 
 
 def test_pack_signs_token_scale_fp16_quantizes_scales():
     docs, offsets = _ragged_fixture(4, 16, seed=13)
-    packed = bitmax.pack_signs(docs, offsets, token_scale="mean_abs_fp16")
+    packed = maxsim.pack_signs(docs, offsets, token_scale="mean_abs_fp16")
     full = np.mean(np.abs(docs), axis=1, dtype=np.float64).astype(np.float32)
     np.testing.assert_array_equal(packed.token_scale, full.astype(np.float16).astype(np.float32))
 
@@ -48,12 +48,12 @@ def test_pack_signs_token_scale_fp16_quantizes_scales():
 def test_pack_signs_token_scale_rejects_bad_shape():
     docs, offsets = _ragged_fixture(4, 16, seed=17)
     with pytest.raises(ValueError):
-        bitmax.pack_signs(docs, offsets, token_scale=np.ones(3, dtype=np.float32))
+        maxsim.pack_signs(docs, offsets, token_scale=np.ones(3, dtype=np.float32))
 
 
 def test_token_scale_round_trips_through_io(tmp_path):
     docs, offsets = _ragged_fixture(4, 16, seed=19)
-    packed = bitmax.pack_signs(docs, offsets, token_scale="mean_abs")
+    packed = maxsim.pack_signs(docs, offsets, token_scale="mean_abs")
     path = tmp_path / "packed.npz"
     save_packed(path, packed)
     bundle = load_packed(path)
@@ -62,8 +62,8 @@ def test_token_scale_round_trips_through_io(tmp_path):
     rng = np.random.default_rng(23)
     query = rng.standard_normal((3, 16)).astype(np.float32)
     np.testing.assert_allclose(
-        bitmax.maxsim(query, bundle.packed, device="cpu"),
-        bitmax.maxsim(query, packed, device="cpu"),
+        maxsim.maxsim(query, bundle.packed, device="cpu"),
+        maxsim.maxsim(query, packed, device="cpu"),
         rtol=0,
         atol=0,
     )
@@ -71,43 +71,43 @@ def test_token_scale_round_trips_through_io(tmp_path):
 
 @pytest.mark.cuda
 def test_cuda_token_scale_maxsim_matches_cpu_reference_small_corpus():
-    pytest.importorskip("bitmax._bitmax_cuda")
+    pytest.importorskip("maxsim._maxsim_cuda")
     docs, offsets = _ragged_fixture(6, 128, seed=29)
     rng = np.random.default_rng(31)
     query = rng.standard_normal((2, 5, 128)).astype(np.float32)
 
-    packed = bitmax.pack_signs(docs, offsets, token_scale="mean_abs")
-    cpu_scores = bitmax.maxsim(query, packed, device="cpu")
-    cuda_packed = bitmax.to_device(packed, "cuda")
+    packed = maxsim.pack_signs(docs, offsets, token_scale="mean_abs")
+    cpu_scores = maxsim.maxsim(query, packed, device="cpu")
+    cuda_packed = maxsim.to_device(packed, "cuda")
     assert cuda_packed.data.has_token_scale_vector
-    cuda_scores = bitmax.maxsim(query, cuda_packed, device="cuda")
+    cuda_scores = maxsim.maxsim(query, cuda_packed, device="cuda")
     np.testing.assert_allclose(cuda_scores, cpu_scores, rtol=0, atol=1e-3)
 
 
 @pytest.mark.cuda
 def test_cuda_token_scale_maxsim_matches_cpu_reference_large_corpus():
-    pytest.importorskip("bitmax._bitmax_cuda")
+    pytest.importorskip("maxsim._maxsim_cuda")
     docs, offsets = _ragged_fixture(200, 128, seed=37)
     rng = np.random.default_rng(41)
     query = rng.standard_normal((3, 4, 128)).astype(np.float32)
 
-    packed = bitmax.pack_signs(docs, offsets, token_scale="mean_abs")
-    cpu_scores = bitmax.maxsim(query, packed, device="cpu")
-    cuda_scores = bitmax.maxsim(query, bitmax.to_device(packed, "cuda"), device="cuda")
+    packed = maxsim.pack_signs(docs, offsets, token_scale="mean_abs")
+    cpu_scores = maxsim.maxsim(query, packed, device="cpu")
+    cuda_scores = maxsim.maxsim(query, maxsim.to_device(packed, "cuda"), device="cuda")
     np.testing.assert_allclose(cuda_scores, cpu_scores, rtol=0, atol=1e-3)
 
 
 @pytest.mark.cuda
 def test_cuda_token_scale_topk_matches_cpu_scores():
-    pytest.importorskip("bitmax._bitmax_cuda")
+    pytest.importorskip("maxsim._maxsim_cuda")
     docs, offsets = _ragged_fixture(200, 128, seed=43)
     rng = np.random.default_rng(47)
     query = rng.standard_normal((2, 4, 128)).astype(np.float32)
 
-    packed = bitmax.pack_signs(docs, offsets, token_scale="mean_abs")
-    cpu_scores = bitmax.maxsim(query, packed, device="cpu")
-    cuda_packed = bitmax.to_device(packed, "cuda")
-    top_scores, top_indices = bitmax.topk_maxsim(query, cuda_packed, 10, device="cuda")
+    packed = maxsim.pack_signs(docs, offsets, token_scale="mean_abs")
+    cpu_scores = maxsim.maxsim(query, packed, device="cpu")
+    cuda_packed = maxsim.to_device(packed, "cuda")
+    top_scores, top_indices = maxsim.topk_maxsim(query, cuda_packed, 10, device="cuda")
 
     for row_scores, row_indices, row_reference in zip(top_scores, top_indices, cpu_scores):
         order = np.lexsort((np.arange(row_reference.shape[0], dtype=np.int64), -row_reference))[:10]
@@ -117,35 +117,35 @@ def test_cuda_token_scale_topk_matches_cpu_scores():
 
 @pytest.mark.cuda
 def test_cuda_token_scale_lut_topk_matches_generic_topk_for_int8_queries():
-    pytest.importorskip("bitmax._bitmax_cuda")
+    pytest.importorskip("maxsim._maxsim_cuda")
     docs, offsets = _ragged_fixture(200, 128, seed=53)
     rng = np.random.default_rng(59)
     query = rng.integers(-4, 5, size=(2, 4, 128)).astype(np.int8)
 
-    packed = bitmax.pack_signs(docs, offsets, token_scale="mean_abs")
-    cuda_packed = bitmax.to_device(packed, "cuda")
-    lut_scores, lut_indices = bitmax.topk_maxsim(query, cuda_packed, 10, device="cuda")
-    generic_scores, generic_indices = bitmax.topk_maxsim(query.astype(np.float32), cuda_packed, 10, device="cuda")
+    packed = maxsim.pack_signs(docs, offsets, token_scale="mean_abs")
+    cuda_packed = maxsim.to_device(packed, "cuda")
+    lut_scores, lut_indices = maxsim.topk_maxsim(query, cuda_packed, 10, device="cuda")
+    generic_scores, generic_indices = maxsim.topk_maxsim(query.astype(np.float32), cuda_packed, 10, device="cuda")
     np.testing.assert_array_equal(lut_indices, generic_indices)
     np.testing.assert_allclose(lut_scores, generic_scores, rtol=0, atol=1e-3)
 
 
 @pytest.mark.cuda
 def test_cuda_token_scale_empty_doc_scores_zero():
-    pytest.importorskip("bitmax._bitmax_cuda")
+    pytest.importorskip("maxsim._maxsim_cuda")
     docs, offsets = _ragged_fixture(6, 128, seed=61)
     empty_doc = int(np.flatnonzero(np.diff(offsets) == 0)[0])
     rng = np.random.default_rng(67)
     query = rng.standard_normal((1, 3, 128)).astype(np.float32)
 
-    packed = bitmax.pack_signs(docs, offsets, token_scale="mean_abs")
-    cuda_scores = bitmax.maxsim(query, bitmax.to_device(packed, "cuda"), device="cuda")
+    packed = maxsim.pack_signs(docs, offsets, token_scale="mean_abs")
+    cuda_scores = maxsim.maxsim(query, maxsim.to_device(packed, "cuda"), device="cuda")
     assert cuda_scores[0, empty_doc] == 0.0
 
 
 def test_pack_signs_token_scale_u8_uses_log_levels():
     docs, offsets = _ragged_fixture(5, 16, seed=101)
-    packed = bitmax.pack_signs(docs, offsets, token_scale="mean_abs_u8")
+    packed = maxsim.pack_signs(docs, offsets, token_scale="mean_abs_u8")
     full = np.mean(np.abs(docs), axis=1, dtype=np.float64).astype(np.float32)
     assert packed.token_scale.shape == full.shape
     ratio = packed.token_scale / full
@@ -153,7 +153,7 @@ def test_pack_signs_token_scale_u8_uses_log_levels():
 
 
 def test_sdk_binary_token_scale_corpus_round_trip(tmp_path):
-    from bitmax.sdk import Corpus, Reranker
+    from maxsim.sdk import Corpus, Reranker
 
     docs, offsets = _ragged_fixture(6, 16, seed=103)
     doc_ids = [f"doc-{i}" for i in range(6)]
@@ -171,13 +171,13 @@ def test_sdk_binary_token_scale_corpus_round_trip(tmp_path):
     rng = np.random.default_rng(107)
     query = rng.standard_normal((4, 16)).astype(np.float32)
     results = Reranker.from_corpus(loaded).search(query, k=3)
-    reference = bitmax.maxsim(query, corpus.packed, device="cpu")
+    reference = maxsim.maxsim(query, corpus.packed, device="cpu")
     order = np.lexsort((np.arange(reference.shape[0], dtype=np.int64), -reference))[:3]
     assert [r.doc_id for r in results] == [doc_ids[int(i)] for i in order]
 
 
 def test_sdk_mode_presets_resolve():
-    from bitmax.sdk import Corpus, MODE_PRESETS
+    from maxsim.sdk import Corpus, MODE_PRESETS
 
     docs, offsets = _ragged_fixture(4, 16, seed=109)
     doc_ids = [f"doc-{i}" for i in range(4)]
@@ -193,7 +193,7 @@ def test_sdk_mode_presets_resolve():
 
 
 def test_sdk_u8_corpus_round_trip(tmp_path):
-    from bitmax.sdk import Corpus, Reranker
+    from maxsim.sdk import Corpus, Reranker
 
     docs, offsets = _ragged_fixture(6, 16, seed=113)
     doc_ids = [f"doc-{i}" for i in range(6)]
@@ -210,14 +210,14 @@ def test_sdk_u8_corpus_round_trip(tmp_path):
     rng = np.random.default_rng(127)
     query = rng.standard_normal((3, 16)).astype(np.float32)
     results = Reranker.from_corpus(loaded).search(query, k=3)
-    reference = bitmax.maxsim(query, loaded.packed, device="cpu")
+    reference = maxsim.maxsim(query, loaded.packed, device="cpu")
     order = np.lexsort((np.arange(reference.shape[0], dtype=np.int64), -reference))[:3]
     assert [r.doc_id for r in results] == [doc_ids[int(i)] for i in order]
 
 
 def test_sdk_pooled_binary_corpus(tmp_path):
     pytest.importorskip("scipy")
-    from bitmax.sdk import Corpus, Reranker
+    from maxsim.sdk import Corpus, Reranker
 
     rng = np.random.default_rng(151)
     lengths = rng.integers(6, 14, size=6)
@@ -241,14 +241,14 @@ def test_sdk_pooled_binary_corpus(tmp_path):
     rng2 = np.random.default_rng(157)
     query = rng2.standard_normal((3, 16)).astype(np.float32)
     results = Reranker.from_corpus(loaded).search(query, k=3)
-    reference = bitmax.maxsim(query, corpus.packed, device="cpu")
+    reference = maxsim.maxsim(query, corpus.packed, device="cpu")
     order = np.lexsort((np.arange(reference.shape[0], dtype=np.int64), -reference))[:3]
     assert [r.doc_id for r in results] == [doc_ids[int(i)] for i in order]
 
 
 def test_pack_signs_token_scale_u4_uses_16_log_levels():
     docs, offsets = _ragged_fixture(6, 16, seed=167)
-    packed = bitmax.pack_signs(docs, offsets, token_scale="mean_abs_u4")
+    packed = maxsim.pack_signs(docs, offsets, token_scale="mean_abs_u4")
     assert len(np.unique(packed.token_scale)) <= 16
     full = np.mean(np.abs(docs), axis=1, dtype=np.float64).astype(np.float32)
     ratio = packed.token_scale / full
@@ -256,7 +256,7 @@ def test_pack_signs_token_scale_u4_uses_16_log_levels():
 
 
 def test_sdk_u4_corpus_round_trip(tmp_path):
-    from bitmax.sdk import Corpus, Reranker
+    from maxsim.sdk import Corpus, Reranker
 
     docs, offsets = _ragged_fixture(7, 16, seed=173)
     doc_ids = [f"doc-{i}" for i in range(7)]
@@ -274,6 +274,6 @@ def test_sdk_u4_corpus_round_trip(tmp_path):
     rng = np.random.default_rng(179)
     query = rng.standard_normal((3, 16)).astype(np.float32)
     results = Reranker.from_corpus(loaded).search(query, k=3)
-    reference = bitmax.maxsim(query, loaded.packed, device="cpu")
+    reference = maxsim.maxsim(query, loaded.packed, device="cpu")
     order = np.lexsort((np.arange(reference.shape[0], dtype=np.int64), -reference))[:3]
     assert [r.doc_id for r in results] == [doc_ids[int(i)] for i in order]

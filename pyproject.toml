@@ -3,9 +3,9 @@ requires = ["scikit-build-core>=0.10", "pybind11>=2.13", "numpy>=2.0"]
 build-backend = "scikit_build_core.build"
 
 [project]
-name = "bitmax"
+name = "maxsim"
 version = "0.1.0"
-description = "Exact compressed MaxSim scoring for late-interaction retrieval, with CUDA kernels."
+description = "Compressed exact-MaxSim runtime for multi-vector retrieval: 8-96x smaller ColBERT/ColPali-style indexes with exact CUDA scoring."
 readme = "README.md"
 license = {file = "LICENSE"}
 authors = [{name = "Arya Manjaramkar", email = "arya@e3group.ai"}]
@@ -21,18 +21,18 @@ classifiers = [
 ]
 
 [project.urls]
-Repository = "https://github.com/Aryagm/bitmax"
+Repository = "https://github.com/Aryagm/maxsim"
 
 [project.scripts]
-bitmax-bench = "benchmarks.run_synthetic:main"
-bitmax-retrieval-bench = "benchmarks.run_retrieval:main"
-bitmax-multidataset-bench = "benchmarks.run_multidataset:main"
-bitmax-vidore-embeddings = "benchmarks.build_vidore_embeddings:main"
-bitmax-mixed-embeddings = "benchmarks.build_mixed_embeddings:main"
-bitmax-docscale-stress = "benchmarks.build_docscale_stress:main"
-bitmax-reproduce-bench = "benchmarks.reproduce:main"
-bitmax-plot-benchmarks = "benchmarks.plot_benchmark_figures:main"
-bitmax-vast = "ops.vast.vast_workflow:main"
+maxsim-bench = "benchmarks.run_synthetic:main"
+maxsim-retrieval-bench = "benchmarks.run_retrieval:main"
+maxsim-multidataset-bench = "benchmarks.run_multidataset:main"
+maxsim-vidore-embeddings = "benchmarks.build_vidore_embeddings:main"
+maxsim-mixed-embeddings = "benchmarks.build_mixed_embeddings:main"
+maxsim-docscale-stress = "benchmarks.build_docscale_stress:main"
+maxsim-reproduce-bench = "benchmarks.reproduce:main"
+maxsim-plot-benchmarks = "benchmarks.plot_benchmark_figures:main"
+maxsim-vast = "ops.vast.vast_workflow:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
@@ -57,4 +57,4 @@ markers = [
 
 [tool.scikit-build]
 cmake.source-dir = "."
-wheel.packages = ["src/bitmax", "benchmarks", "ops", "examples"]
+wheel.packages = ["src/maxsim", "benchmarks", "ops", "examples"]

@@ -16,8 +16,8 @@ from pathlib import Path
 
 import numpy as np
 
-import bitmax
-from bitmax import _bitmax_cuda
+import maxsim
+from maxsim import _maxsim_cuda
 
 SHAPES = [
     {"name": "docs_1000_long_12MB", "docs": 1000, "tokens_per_doc": 750, "batch": 8, "query_tokens": 24},
@@ -53,14 +53,14 @@ def main() -> int:
         offsets = np.arange(0, shape["docs"] + 1, dtype=np.int64) * shape["tokens_per_doc"]
         query = rng.standard_normal((shape["batch"], shape["query_tokens"], 128)).astype(np.float32)
         token_scale = rng.uniform(0.05, 0.4, size=tokens).astype(np.float32) if args.token_scale else None
-        packed = bitmax.PackedDocs(
+        packed = maxsim.PackedDocs(
             data=packed_data,
             doc_offsets=offsets,
             dim=128,
             num_docs=shape["docs"],
             token_scale=token_scale,
         )
-        cuda_packed = bitmax.to_device(packed, "cuda")
+        cuda_packed = maxsim.to_device(packed, "cuda")
         handle = cuda_packed.data
         k = 10
         use_token_scale = token_scale is not None
@@ -68,7 +68,7 @@ def main() -> int:
         results = {}
         scores = {}
         for label, threshold in (("unrolled", 1 << 62), ("qtile", 1)):
-            _bitmax_cuda.set_dim128_qtile_min_packed_bytes(threshold)
+            _maxsim_cuda.set_dim128_qtile_min_packed_bytes(threshold)
             expected = "dim128_qtile" if label == "qtile" else "dim128_unrolled"
             assert handle.maxsim_kernel_variant == expected, (label, handle.maxsim_kernel_variant)
             results[label] = _median_ms(
@@ -94,7 +94,7 @@ def main() -> int:
         )
         del handle, cuda_packed, packed, packed_data
 
-    _bitmax_cuda.set_dim128_qtile_min_packed_bytes(48 << 20)
+    _maxsim_cuda.set_dim128_qtile_min_packed_bytes(48 << 20)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps({"results": rows}, indent=2, sort_keys=True))
     return 0

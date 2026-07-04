@@ -2,7 +2,7 @@
 
 Pools each document's token embeddings down to ceil(tokens / factor) clusters
 by hierarchical clustering on cosine similarity, mean-pooling each cluster.
-Deterministic given the input. Requires scipy (install bitmax[pooling]).
+Deterministic given the input. Requires scipy (install maxsim[pooling]).
 Measured tradeoff on ViDoRe docvqa limit256 (docs/gpu_optimization.md):
 factor 2 + binary packing = 63.9x fp32 compression at NDCG@10 -0.018 vs dense.
 """

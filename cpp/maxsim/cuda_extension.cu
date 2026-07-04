@@ -1797,8 +1797,8 @@ py::array_t<float> maxsim_cuda_batch(
 
 }  // namespace
 
-PYBIND11_MODULE(_bitmax_cuda, m) {
-  m.doc() = "Optional CUDA kernels for bitmax";
+PYBIND11_MODULE(_maxsim_cuda, m) {
+  m.doc() = "Optional CUDA kernels for maxsim";
   py::class_<CudaPackedDocs>(m, "CudaPackedDocs")
       .def(py::init<
 	           py::array_t<std::uint8_t, py::array::c_style | py::array::forcecast>,

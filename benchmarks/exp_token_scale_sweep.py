@@ -22,7 +22,7 @@ from benchmarks.run_retrieval import (
     _ranking_metrics,
     _dense_scores_with_docs,
 )
-from bitmax.experimental import fit_dim_centroid_calibration
+from maxsim.experimental import fit_dim_centroid_calibration
 
 
 def _token_scales(docs: np.ndarray) -> np.ndarray:

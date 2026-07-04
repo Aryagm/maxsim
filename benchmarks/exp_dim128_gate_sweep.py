@@ -15,8 +15,8 @@ from pathlib import Path
 
 import numpy as np
 
-import bitmax
-from bitmax import _bitmax_cuda
+import maxsim
+from maxsim import _maxsim_cuda
 
 SHAPES = [
     {"name": "docvqa_like_256", "docs": 256, "tokens_per_doc": 750, "batch": 64, "query_tokens": 23},
@@ -50,15 +50,15 @@ def main() -> int:
         docs = rng.standard_normal((shape["docs"] * shape["tokens_per_doc"], 128)).astype(np.float32)
         offsets = np.arange(0, shape["docs"] + 1, dtype=np.int64) * shape["tokens_per_doc"]
         query = rng.standard_normal((shape["batch"], shape["query_tokens"], 128)).astype(np.float32)
-        packed = bitmax.pack_signs(docs, offsets)
-        cuda_packed = bitmax.to_device(packed, "cuda")
+        packed = maxsim.pack_signs(docs, offsets)
+        cuda_packed = maxsim.to_device(packed, "cuda")
         handle = cuda_packed.data
         k = min(10, shape["docs"])
 
         variants = {}
         scores = {}
         for label, threshold in (("generic", 1 << 30), ("unrolled", 1)):
-            _bitmax_cuda.set_dim128_unrolled_min_avg_tokens(threshold)
+            _maxsim_cuda.set_dim128_unrolled_min_avg_tokens(threshold)
             assert handle.maxsim_kernel_variant == ("generic" if label == "generic" else "dim128_unrolled") or shape["docs"] <= 128
             variants[label] = _median_ms(lambda: handle.topk_batch(query, k), repeat=args.repeat)
             scores[label] = handle.topk_batch(query, k)
@@ -80,7 +80,7 @@ def main() -> int:
             f"unrolled={variants['unrolled']:8.3f}ms speedup={rows[-1]['unrolled_speedup']:.2f}x"
         )
 
-    _bitmax_cuda.set_dim128_unrolled_min_avg_tokens(1 << 30)
+    _maxsim_cuda.set_dim128_unrolled_min_avg_tokens(1 << 30)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps({"results": rows}, indent=2, sort_keys=True))
     return 0

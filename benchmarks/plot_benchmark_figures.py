@@ -17,9 +17,9 @@ LABELS = {
     "faiss_gpu_mean_pool_flat_ip": "FAISS pooled",
     "cuvs_gpu_mean_pool_flat_ip": "cuVS pooled",
     "fast_plaid": "fast-plaid",
-    "bitmax_binary": "bitmax binary",
-    "bitmax_binary_q40": "bitmax q40",
-    "bitmax_int4": "bitmax int4",
+    "bitmax_binary": "maxsim binary",
+    "bitmax_binary_q40": "maxsim q40",
+    "bitmax_int4": "maxsim int4",
 }
 
 FAMILIES = {
@@ -27,9 +27,9 @@ FAMILIES = {
     "faiss_gpu_mean_pool_flat_ip": "Single-vector pooled",
     "cuvs_gpu_mean_pool_flat_ip": "Single-vector pooled",
     "fast_plaid": "Compressed late interaction",
-    "bitmax_binary": "bitmax",
-    "bitmax_binary_q40": "bitmax",
-    "bitmax_int4": "bitmax",
+    "bitmax_binary": "maxsim",
+    "bitmax_binary_q40": "maxsim",
+    "bitmax_int4": "maxsim",
 }
 
 POINT_COLORS = {
@@ -90,7 +90,7 @@ SPEEDUP_OFFSETS = {
 
 
 def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description="Generate seaborn benchmark figures for bitmax.")
+    parser = argparse.ArgumentParser(description="Generate seaborn benchmark figures for maxsim.")
     parser.add_argument("--input", type=Path, default=DEFAULT_INPUT)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--formats", default="png,svg", help="Comma-separated output formats.")
@@ -173,7 +173,7 @@ def _configure_theme(sns, plt) -> None:
             "font.family": "DejaVu Sans",
             "savefig.bbox": "tight",
             "savefig.facecolor": "white",
-            "svg.hashsalt": "bitmax-benchmark-plots",
+            "svg.hashsalt": "maxsim-benchmark-plots",
         }
     )
 
@@ -200,7 +200,7 @@ def _plot_marketing_scorecard(frame, metadata, output_dir: Path, formats, sns, p
         (
             "corpus_storage_mib",
             "Size",
-            "Full-corpus storage; bitmax labels include reduction vs fp32",
+            "Full-corpus storage; maxsim labels include reduction vs fp32",
             (0, 2050),
             lambda value, row: _format_storage_scorecard_label(row),
         ),
@@ -268,7 +268,7 @@ def _plot_marketing_scorecard(frame, metadata, output_dir: Path, formats, sns, p
     fig.text(
         0.025,
         0.035,
-        "Latency speedup is vs dense fp16 MaxSim. Size reduction is shown on bitmax bars vs fp32 document storage. "
+        "Latency speedup is vs dense fp16 MaxSim. Size reduction is shown on maxsim bars vs fp32 document storage. "
         "Pooled single-vector baselines are omitted here because they lose most "
         "late-interaction quality; see the full Pareto plots for that context.",
         fontsize=10.5,
@@ -304,7 +304,7 @@ def _plot_latency_quality(frame, metadata, output_dir: Path, formats, sns, plt, 
     ax.xaxis.set_major_formatter(ticker.FuncFormatter(_format_latency_ms))
     ax.set_xlabel("P95 latency, log scale")
     ax.set_ylabel("NDCG@10")
-    ax.set_title("10k unique docs: bitmax keeps late-interaction quality while cutting latency")
+    ax.set_title("10k unique docs: maxsim keeps late-interaction quality while cutting latency")
     ax.text(
         0.01,
         -0.18,

@@ -8,8 +8,8 @@ from typing import Any
 
 import numpy as np
 
-import bitmax
-from bitmax.experimental import (
+import maxsim
+from maxsim.experimental import (
     fit_dim_centroid_calibration,
     pack_dim_centroid_signs,
     topk_dim_centroid_maxsim,
@@ -73,7 +73,7 @@ def _lut_case(
     query_float = query_int8.astype(np.float32)
     doc_embeddings = rng.normal(size=(docs * doc_tokens, dim)).astype(np.float32)
     offsets = np.arange(docs + 1, dtype=np.int64) * doc_tokens
-    packed = bitmax.to_device(bitmax.pack_signs(doc_embeddings, offsets, scale="doc" if scale else None), "cuda")
+    packed = maxsim.to_device(maxsim.pack_signs(doc_embeddings, offsets, scale="doc" if scale else None), "cuda")
 
     (base_scores, base_indices), base_best, base_median = _time_call(
         lambda: packed.data.topk_batch(query_float, k, 1.0, scale),
@@ -84,7 +84,7 @@ def _lut_case(
         repeat=repeat,
     )
     (_api_scores, _api_indices), api_best, api_median = _time_call(
-        lambda: bitmax.topk_maxsim(query_int8, packed, k),
+        lambda: maxsim.topk_maxsim(query_int8, packed, k),
         repeat=repeat,
     )
     return {
@@ -219,19 +219,19 @@ def _dense_torch_topk(query: np.ndarray, docs: np.ndarray, num_docs: int, doc_to
 
 
 def _bitmax_topk(query: np.ndarray, docs: np.ndarray, offsets: np.ndarray, k: int, *, scale=None, repeat: int):
-    packed = bitmax.to_device(bitmax.pack_signs(docs, offsets, scale=scale), "cuda")
-    result, best, median = _time_call(lambda: bitmax.topk_maxsim(query, packed, k), repeat=repeat, warmup=10)
+    packed = maxsim.to_device(maxsim.pack_signs(docs, offsets, scale=scale), "cuda")
+    result, best, median = _time_call(lambda: maxsim.topk_maxsim(query, packed, k), repeat=repeat, warmup=10)
     return np.asarray(result[0]), np.asarray(result[1]), best, median
 
 
 def _bitmax_centroid_topk(query: np.ndarray, docs: np.ndarray, offsets: np.ndarray, k: int, *, repeat: int):
     calibration = fit_dim_centroid_calibration(docs)
     packed, calibration = pack_dim_centroid_signs(docs, offsets, calibration=calibration)
-    cuda_packed = bitmax.to_device(packed, "cuda")
+    cuda_packed = maxsim.to_device(packed, "cuda")
 
     def host_transform():
         transformed = transform_query_dim_centroids(query, calibration)
-        scores, indices = bitmax.topk_maxsim(transformed, cuda_packed, k)
+        scores, indices = maxsim.topk_maxsim(transformed, cuda_packed, k)
         return _restore_centroid_top_scores(scores, query, calibration), indices
 
     host_result, host_best, host_median = _time_call(host_transform, repeat=repeat, warmup=10)

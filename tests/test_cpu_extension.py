@@ -1,8 +1,8 @@
 import numpy as np
 
-import bitmax
-import bitmax._api as api
-from bitmax import _bitmax_cpp
+import maxsim
+import maxsim._api as api
+from maxsim import _maxsim_cpp
 
 
 def test_cpp_lut_maxsim_matches_python_reference_for_ragged_docs():
@@ -23,10 +23,10 @@ def test_cpp_lut_maxsim_matches_python_reference_for_ragged_docs():
         ],
         dtype=np.float32,
     )
-    packed = bitmax.pack_signs(docs, offsets)
+    packed = maxsim.pack_signs(docs, offsets)
 
-    cpp_scores = _bitmax_cpp.maxsim_lut(query, packed.data, packed.doc_offsets, packed.dim, 1.0)
-    py_scores = bitmax.maxsim(query, packed)
+    cpp_scores = _maxsim_cpp.maxsim_lut(query, packed.data, packed.doc_offsets, packed.dim, 1.0)
+    py_scores = maxsim.maxsim(query, packed)
 
     np.testing.assert_allclose(cpp_scores, py_scores, rtol=0, atol=1e-5)
 
@@ -34,16 +34,16 @@ def test_cpp_lut_maxsim_matches_python_reference_for_ragged_docs():
 def test_public_maxsim_uses_cpp_kernel_for_cpu_queries(monkeypatch):
     docs = np.ones((1, 8), dtype=np.float32)
     query = np.ones((1, 8), dtype=np.float32)
-    packed = bitmax.pack_signs(docs)
+    packed = maxsim.pack_signs(docs)
     calls = []
 
     def fake_maxsim_lut(query_arg, data_arg, offsets_arg, dim_arg, scale_arg):
         calls.append((query_arg.shape, data_arg.shape, offsets_arg.tolist(), dim_arg, scale_arg))
         return np.array([123.0], dtype=np.float32)
 
-    monkeypatch.setattr(api._bitmax_cpp, "maxsim_lut", fake_maxsim_lut)
+    monkeypatch.setattr(api._maxsim_cpp, "maxsim_lut", fake_maxsim_lut)
 
-    scores = bitmax.maxsim(query, packed)
+    scores = maxsim.maxsim(query, packed)
 
     assert scores.tolist() == [123.0]
     assert calls == [((1, 8), (1, 1), [0, 1], 8, 1.0)]

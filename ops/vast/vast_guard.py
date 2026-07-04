@@ -10,8 +10,8 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-BITMAX_LABEL_PREFIX = "bitmax-v0-"
-DEFAULT_LEDGER_PATH = Path(".vast/bitmax-instances.jsonl")
+MAXSIM_LABEL_PREFIX = "maxsim-v0-"
+DEFAULT_LEDGER_PATH = Path(".vast/maxsim-instances.jsonl")
 DEFAULT_SPEND_CAP = 25.0
 
 
@@ -50,7 +50,7 @@ def make_label(git_sha: str, role: str, *, now: datetime | None = None) -> str:
     timestamp = (now or datetime.now(timezone.utc)).strftime("%Y%m%d%H%M%S")
     clean_sha = git_sha[:12] if git_sha else "nogit"
     clean_role = role.replace("_", "-")
-    return f"{BITMAX_LABEL_PREFIX}{timestamp}-{clean_sha}-{clean_role}"
+    return f"{MAXSIM_LABEL_PREFIX}{timestamp}-{clean_sha}-{clean_role}"
 
 
 def load_ledger(path: Path = DEFAULT_LEDGER_PATH) -> list[InstanceRecord]:
@@ -90,7 +90,7 @@ def destroyable_owned_instances(
     ledger: Iterable[InstanceRecord],
     live_instances: Iterable[dict[str, Any]],
     *,
-    prefix: str = BITMAX_LABEL_PREFIX,
+    prefix: str = MAXSIM_LABEL_PREFIX,
 ) -> list[int]:
     ledger_by_id = {record.instance_id: record for record in ledger if record.label.startswith(prefix)}
     destroyable: list[int] = []
@@ -134,7 +134,7 @@ def destroy_instances(instance_ids: Iterable[int], *, dry_run: bool = True) -> l
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Safety helpers for bitmax VAST instances.")
+    parser = argparse.ArgumentParser(description="Safety helpers for maxsim VAST instances.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     label_parser = subparsers.add_parser("label")

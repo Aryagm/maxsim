@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-import bitmax
+import maxsim
 
 
 def _reference_binary_int8q_scores(docs, offsets, query, token_scales=None):
@@ -37,12 +37,12 @@ def _ragged_fixture(num_docs, seed):
 
 @pytest.mark.cuda
 def test_cuda_binary_int8q_matches_numpy_reference():
-    pytest.importorskip("bitmax._bitmax_cuda")
+    pytest.importorskip("maxsim._maxsim_cuda")
     docs, offsets = _ragged_fixture(150, seed=201)
     rng = np.random.default_rng(203)
     query = rng.standard_normal((2, 5, 128)).astype(np.float32)
 
-    packed = bitmax.to_device(bitmax.pack_signs(docs, offsets), "cuda")
+    packed = maxsim.to_device(maxsim.pack_signs(docs, offsets), "cuda")
     kernel_scores = packed.data.maxsim_batch_int8q(np.ascontiguousarray(query))
     reference = _reference_binary_int8q_scores(docs, offsets, query)
     np.testing.assert_allclose(kernel_scores, reference, rtol=1e-5, atol=1e-3)
@@ -50,13 +50,13 @@ def test_cuda_binary_int8q_matches_numpy_reference():
 
 @pytest.mark.cuda
 def test_cuda_binary_int8q_token_scale_matches_numpy_reference():
-    pytest.importorskip("bitmax._bitmax_cuda")
+    pytest.importorskip("maxsim._maxsim_cuda")
     docs, offsets = _ragged_fixture(150, seed=211)
     rng = np.random.default_rng(213)
     query = rng.standard_normal((2, 4, 128)).astype(np.float32)
     query[0, -1] = 0.0  # padded row
 
-    packed = bitmax.to_device(bitmax.pack_signs(docs, offsets, token_scale="mean_abs_fp16"), "cuda")
+    packed = maxsim.to_device(maxsim.pack_signs(docs, offsets, token_scale="mean_abs_fp16"), "cuda")
     kernel_scores = packed.data.maxsim_batch_int8q(np.ascontiguousarray(query), 1.0, False, True)
     reference = _reference_binary_int8q_scores(docs, offsets, query, token_scales=packed.token_scale)
     empty_doc = int(np.flatnonzero(np.diff(offsets) == 0)[0])
@@ -66,12 +66,12 @@ def test_cuda_binary_int8q_token_scale_matches_numpy_reference():
 
 @pytest.mark.cuda
 def test_cuda_binary_int8q_topk_matches_maxsim_ranking():
-    pytest.importorskip("bitmax._bitmax_cuda")
+    pytest.importorskip("maxsim._maxsim_cuda")
     docs, offsets = _ragged_fixture(150, seed=223)
     rng = np.random.default_rng(227)
     query = rng.standard_normal((2, 4, 128)).astype(np.float32)
 
-    packed = bitmax.to_device(bitmax.pack_signs(docs, offsets), "cuda")
+    packed = maxsim.to_device(maxsim.pack_signs(docs, offsets), "cuda")
     scores = packed.data.maxsim_batch_int8q(np.ascontiguousarray(query))
     top_scores, top_indices = packed.data.topk_batch_int8q(np.ascontiguousarray(query), 10)
 

@@ -8,7 +8,7 @@ from typing import Any
 
 import numpy as np
 
-import bitmax
+import maxsim
 
 try:
     import torch
@@ -17,7 +17,7 @@ except ImportError:  # pragma: no cover - optional CUDA baseline dependency
 
 
 def main(argv: list[str] | None = None) -> dict[str, Any]:
-    parser = argparse.ArgumentParser(description="Run the bitmax SDK local multi-vector CUDA demo.")
+    parser = argparse.ArgumentParser(description="Run the maxsim SDK local multi-vector CUDA demo.")
     parser.add_argument("--input", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--device", default="cuda", choices=["cpu", "cuda"])
@@ -42,8 +42,8 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
     rows = [dense_row]
 
     for mode in modes:
-        corpus = bitmax.Corpus.from_embeddings(dataset["doc_ids"], dataset["doc_embeddings"], dataset["doc_offsets"], mode=mode)
-        reranker = bitmax.Reranker.from_corpus(corpus, device=args.device)
+        corpus = maxsim.Corpus.from_embeddings(dataset["doc_ids"], dataset["doc_embeddings"], dataset["doc_offsets"], mode=mode)
+        reranker = maxsim.Reranker.from_corpus(corpus, device=args.device)
         scores, latency = _time_call(
             lambda: _scores_from_search(reranker, dataset["query_embeddings"], dataset["doc_ids"], args.k),
             repeat=args.repeat,

@@ -3,7 +3,7 @@ import math
 import numpy as np
 import pytest
 
-import bitmax
+import maxsim
 
 
 def unpack_reference(packed, dim):
@@ -43,7 +43,7 @@ def reference_maxsim(query, doc_embeddings, offsets, scale=None):
 def test_pack_signs_uses_little_endian_bits_and_zero_is_positive():
     docs = np.array([[-1, 0, 2, -3, 4, -5, 6, -7]], dtype=np.float32)
 
-    packed = bitmax.pack_signs(docs)
+    packed = maxsim.pack_signs(docs)
 
     assert packed.dim == 8
     assert packed.num_docs == 1
@@ -71,8 +71,8 @@ def test_maxsim_matches_reference_for_ragged_docs():
     )
     signs = np.where(docs >= 0, 1.0, -1.0)
 
-    packed = bitmax.pack_signs(docs, offsets)
-    scores = bitmax.maxsim(query, packed)
+    packed = maxsim.pack_signs(docs, offsets)
+    scores = maxsim.maxsim(query, packed)
 
     np.testing.assert_allclose(scores, reference_maxsim(query, signs, offsets), rtol=0, atol=1e-5)
 
@@ -95,8 +95,8 @@ def test_maxsim_supports_batched_queries_and_global_scale():
         dtype=np.float16,
     )
 
-    packed = bitmax.pack_signs(docs, offsets, scale="global")
-    scores = bitmax.maxsim(query, packed)
+    packed = maxsim.pack_signs(docs, offsets, scale="global")
+    scores = maxsim.maxsim(query, packed)
 
     expected_scale = float(np.mean(np.abs(docs)))
     signs = np.where(docs >= 0, 1.0, -1.0)
@@ -121,8 +121,8 @@ def test_pack_signs_doc_scale_stores_one_scale_per_document_and_scores_with_it()
     offsets = np.array([0, 1, 3], dtype=np.int64)
     query = np.array([[1, -1, 1, -1, 1, -1, 1, -1]], dtype=np.float32)
 
-    packed = bitmax.pack_signs(docs, offsets, scale="doc")
-    scores = bitmax.maxsim(query, packed)
+    packed = maxsim.pack_signs(docs, offsets, scale="doc")
+    scores = maxsim.maxsim(query, packed)
 
     expected_scale = np.array([2.0, 4.5], dtype=np.float32)
     signs = np.where(docs >= 0, 1.0, -1.0)
@@ -142,16 +142,16 @@ def test_topk_maxsim_sorts_after_doc_scale_restoration():
         dtype=np.float32,
     )
     query = np.array([[1, -1, 1, -1, 1, -1, 1, -1]], dtype=np.float32)
-    packed = bitmax.pack_signs(docs, scale="doc")
+    packed = maxsim.pack_signs(docs, scale="doc")
 
-    scores, indices = bitmax.topk_maxsim(query, packed, k=2)
+    scores, indices = maxsim.topk_maxsim(query, packed, k=2)
 
     np.testing.assert_array_equal(indices, np.array([1, 0], dtype=np.int64))
     np.testing.assert_allclose(scores, np.array([80.0, 8.0], dtype=np.float32), rtol=0, atol=1e-5)
 
 
 def test_cuda_batched_queries_dispatch_once_when_batch_kernel_is_available(monkeypatch):
-    import bitmax._api as api
+    import maxsim._api as api
 
     docs = np.array(
         [
@@ -167,7 +167,7 @@ def test_cuda_batched_queries_dispatch_once_when_batch_kernel_is_available(monke
         ],
         dtype=np.float32,
     )
-    packed = bitmax.pack_signs(docs)
+    packed = maxsim.pack_signs(docs)
     calls = []
 
     class FakeCuda:
@@ -177,9 +177,9 @@ def test_cuda_batched_queries_dispatch_once_when_batch_kernel_is_available(monke
             assert query_arg.flags.c_contiguous
             return np.array([[36.0, -36.0], [-36.0, 36.0]], dtype=np.float32)
 
-    monkeypatch.setattr(api, "_bitmax_cuda", FakeCuda())
+    monkeypatch.setattr(api, "_maxsim_cuda", FakeCuda())
 
-    scores = bitmax.maxsim(query, packed, device="cuda")
+    scores = maxsim.maxsim(query, packed, device="cuda")
 
     assert len(calls) == 1
     assert calls[0] == ((2, 1, 8), (2, 1), [0, 1, 2], 8, 1.0)
@@ -187,7 +187,7 @@ def test_cuda_batched_queries_dispatch_once_when_batch_kernel_is_available(monke
 
 
 def test_to_device_uploads_cpu_packed_docs_to_cuda_handle(monkeypatch):
-    import bitmax._api as api
+    import maxsim._api as api
 
     docs = np.array(
         [
@@ -196,7 +196,7 @@ def test_to_device_uploads_cpu_packed_docs_to_cuda_handle(monkeypatch):
         ],
         dtype=np.float32,
     )
-    packed = bitmax.pack_signs(docs, scale="global")
+    packed = maxsim.pack_signs(docs, scale="global")
     calls = []
 
     class FakeCuda:
@@ -204,9 +204,9 @@ def test_to_device_uploads_cpu_packed_docs_to_cuda_handle(monkeypatch):
             def __init__(self, data, offsets, dim):
                 calls.append((data.copy(), offsets.copy(), dim))
 
-    monkeypatch.setattr(api, "_bitmax_cuda", FakeCuda())
+    monkeypatch.setattr(api, "_maxsim_cuda", FakeCuda())
 
-    cuda_packed = bitmax.to_device(packed, "cuda")
+    cuda_packed = maxsim.to_device(packed, "cuda")
 
     assert cuda_packed.device == "cuda"
     assert cuda_packed.dim == packed.dim
@@ -220,7 +220,7 @@ def test_to_device_uploads_cpu_packed_docs_to_cuda_handle(monkeypatch):
 
 
 def test_to_device_preserves_doc_scale_vector_for_later_host_side_restoration(monkeypatch):
-    import bitmax._api as api
+    import maxsim._api as api
 
     docs = np.array(
         [
@@ -229,23 +229,23 @@ def test_to_device_preserves_doc_scale_vector_for_later_host_side_restoration(mo
         ],
         dtype=np.float32,
     )
-    packed = bitmax.pack_signs(docs, scale="doc")
+    packed = maxsim.pack_signs(docs, scale="doc")
 
     class FakeCuda:
         class CudaPackedDocs:
             def __init__(self, data, offsets, dim):
                 pass
 
-    monkeypatch.setattr(api, "_bitmax_cuda", FakeCuda())
+    monkeypatch.setattr(api, "_maxsim_cuda", FakeCuda())
 
-    cuda_packed = bitmax.to_device(packed, "cuda")
+    cuda_packed = maxsim.to_device(packed, "cuda")
 
     assert isinstance(cuda_packed.scale, np.ndarray)
     np.testing.assert_array_equal(cuda_packed.scale, packed.scale)
 
 
 def test_to_device_uploads_doc_scale_vector_to_cuda_handle_when_supported(monkeypatch):
-    import bitmax._api as api
+    import maxsim._api as api
 
     docs = np.array(
         [
@@ -254,7 +254,7 @@ def test_to_device_uploads_doc_scale_vector_to_cuda_handle_when_supported(monkey
         ],
         dtype=np.float32,
     )
-    packed = bitmax.pack_signs(docs, scale="doc")
+    packed = maxsim.pack_signs(docs, scale="doc")
     calls = []
 
     class FakeCuda:
@@ -265,9 +265,9 @@ def test_to_device_uploads_doc_scale_vector_to_cuda_handle_when_supported(monkey
             def set_scale_vector(self, scale):
                 calls.append(scale.copy())
 
-    monkeypatch.setattr(api, "_bitmax_cuda", FakeCuda())
+    monkeypatch.setattr(api, "_maxsim_cuda", FakeCuda())
 
-    bitmax.to_device(packed, "cuda")
+    maxsim.to_device(packed, "cuda")
 
     assert len(calls) == 1
     np.testing.assert_array_equal(calls[0], packed.scale)
@@ -288,7 +288,7 @@ def test_maxsim_auto_uses_cuda_resident_packed_docs_without_host_packed_copy():
             calls.append((query_arg.copy(), scale_arg))
             return np.array([[36.0, -36.0], [-36.0, 36.0]], dtype=np.float32)
 
-    cuda_packed = bitmax.PackedDocs(
+    cuda_packed = maxsim.PackedDocs(
         data=FakeCudaPacked(),
         doc_offsets=np.array([0, 1, 2], dtype=np.int64),
         dim=8,
@@ -297,7 +297,7 @@ def test_maxsim_auto_uses_cuda_resident_packed_docs_without_host_packed_copy():
         device="cuda",
     )
 
-    scores = bitmax.maxsim(query, cuda_packed)
+    scores = maxsim.maxsim(query, cuda_packed)
 
     assert len(calls) == 1
     assert calls[0][0].shape == (2, 1, 8)
@@ -319,7 +319,7 @@ def test_maxsim_uses_resident_cuda_doc_scale_without_host_rescaling():
             calls.append((query_arg.copy(), scale_arg, use_scale_vector_arg))
             return np.array([[30.0, 4.0]], dtype=np.float32)
 
-    cuda_packed = bitmax.PackedDocs(
+    cuda_packed = maxsim.PackedDocs(
         data=FakeCudaPacked(),
         doc_offsets=np.array([0, 1, 2], dtype=np.int64),
         dim=8,
@@ -328,7 +328,7 @@ def test_maxsim_uses_resident_cuda_doc_scale_without_host_rescaling():
         device="cuda",
     )
 
-    scores = bitmax.maxsim(query, cuda_packed)
+    scores = maxsim.maxsim(query, cuda_packed)
 
     assert len(calls) == 1
     assert calls[0][1:] == (1.0, True)
@@ -353,7 +353,7 @@ def test_topk_maxsim_uses_cuda_resident_fused_topk_when_available():
                 np.array([[3, 1], [2, 0]], dtype=np.int64),
             )
 
-    cuda_packed = bitmax.PackedDocs(
+    cuda_packed = maxsim.PackedDocs(
         data=FakeCudaPacked(),
         doc_offsets=np.array([0, 1, 2, 3, 4], dtype=np.int64),
         dim=8,
@@ -362,7 +362,7 @@ def test_topk_maxsim_uses_cuda_resident_fused_topk_when_available():
         device="cuda",
     )
 
-    scores, indices = bitmax.topk_maxsim(query, cuda_packed, k=2)
+    scores, indices = maxsim.topk_maxsim(query, cuda_packed, k=2)
 
     assert len(calls) == 1
     assert calls[0][0].shape == (2, 1, 8)
@@ -392,7 +392,7 @@ def test_topk_maxsim_uses_cuda_resident_fused_topk_for_stored_doc_scale():
                 np.array([[1, 2]], dtype=np.int64),
             )
 
-    cuda_packed = bitmax.PackedDocs(
+    cuda_packed = maxsim.PackedDocs(
         data=FakeCudaPacked(),
         doc_offsets=np.arange(4, dtype=np.int64),
         dim=8,
@@ -401,7 +401,7 @@ def test_topk_maxsim_uses_cuda_resident_fused_topk_for_stored_doc_scale():
         device="cuda",
     )
 
-    scores, indices = bitmax.topk_maxsim(query, cuda_packed, k=2)
+    scores, indices = maxsim.topk_maxsim(query, cuda_packed, k=2)
 
     assert len(calls) == 1
     assert calls[0][1:] == (2, 1.0, True)
@@ -424,7 +424,7 @@ def test_topk_maxsim_uses_cuda_resident_fused_topk_for_large_doc_counts():
                 np.array([[511, 510, 509]], dtype=np.int64),
             )
 
-    cuda_packed = bitmax.PackedDocs(
+    cuda_packed = maxsim.PackedDocs(
         data=FakeCudaPacked(),
         doc_offsets=np.arange(513, dtype=np.int64),
         dim=8,
@@ -432,7 +432,7 @@ def test_topk_maxsim_uses_cuda_resident_fused_topk_for_large_doc_counts():
         device="cuda",
     )
 
-    scores, indices = bitmax.topk_maxsim(query, cuda_packed, k=3)
+    scores, indices = maxsim.topk_maxsim(query, cuda_packed, k=3)
 
     assert len(calls) == 1
     assert calls[0][1] == 3
@@ -450,9 +450,9 @@ def test_topk_maxsim_sorts_by_score_descending_then_lower_doc_id():
         dtype=np.float32,
     )
     query = np.array([[1, 1, 1, 1, 1, 1, 1, 1]], dtype=np.float32)
-    packed = bitmax.pack_signs(docs)
+    packed = maxsim.pack_signs(docs)
 
-    scores, indices = bitmax.topk_maxsim(query, packed, k=2)
+    scores, indices = maxsim.topk_maxsim(query, packed, k=2)
 
     assert indices.tolist() == [0, 1]
     assert scores.tolist() == [8.0, 8.0]
@@ -463,4 +463,4 @@ def test_pack_signs_rejects_dimensions_not_divisible_by_eight(bad_dim):
     docs = np.ones((2, bad_dim), dtype=np.float32)
 
     with pytest.raises(ValueError, match="dim must be divisible by 8"):
-        bitmax.pack_signs(docs)
+        maxsim.pack_signs(docs)

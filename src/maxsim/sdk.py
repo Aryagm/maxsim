@@ -7,8 +7,8 @@ from typing import Any, Literal
 
 import numpy as np
 
-from bitmax._api import PackedDocs, _as_numpy, maxsim, pack_signs, to_device, topk_maxsim
-from bitmax.experimental import (
+from maxsim._api import PackedDocs, _as_numpy, maxsim, pack_signs, to_device, topk_maxsim
+from maxsim.experimental import (
     DimCentroidCalibration,
     dim_centroid_maxsim,
     fit_dim_centroid_calibration,
@@ -23,7 +23,10 @@ from bitmax.experimental import (
 CorpusMode = Literal["binary", "binary_token_scale", "binary_token_scale_u8", "binary_token_scale_u4", "pooled_binary", "binary_q40", "int4"]
 
 # Named accuracy/size/latency tiers over the measured pareto frontier
-# (docs/gpu_optimization.md, 2026-07-02/03). "balanced" is the default.
+# (docs/gpu_optimization.md, 2026-07-02/03; paper section 5.2). "auto" is the
+# default: the tier ranking is corpus-size-dependent, so it picks per-token
+# scales below AUTO_SMALL_CORPUS_DOCS documents (where magnitude restoration
+# measurably helps) and int4 above (the strongest all-scale quality tier).
 # max_compression trades NDCG@10 ~-0.018 vs dense for ~64x compression via
 # token pooling (requires scipy); "compact" keeps near-dense quality at ~30x.
 MODE_PRESETS = {
@@ -33,6 +36,13 @@ MODE_PRESETS = {
     "compact": "binary_token_scale_u4",
     "max_speed": "binary",
 }
+
+AUTO_SMALL_CORPUS_DOCS = 500
+
+
+def resolve_auto_mode(num_docs: int) -> str:
+    """Corpus-size-aware tier choice, per the measured scale-flip finding."""
+    return "binary_token_scale" if num_docs <= AUTO_SMALL_CORPUS_DOCS else "int4"
 
 
 @dataclass(frozen=True)
@@ -58,17 +68,19 @@ class Corpus:
         embeddings,
         offsets,
         *,
-        mode: str = "balanced",
+        mode: str = "auto",
         pool_factor: int = 2,
         metadata: dict[str, Any] | None = None,
     ) -> "Corpus":
         mode = MODE_PRESETS.get(mode, mode)
         doc_id_values = _normalize_doc_ids(doc_ids)
+        if mode == "auto":
+            mode = resolve_auto_mode(len(doc_id_values))
         docs = _as_numpy(embeddings).astype(np.float32, copy=False)
         offsets_array = _normalize_sdk_offsets(offsets, docs.shape[0])
         _validate_corpus_inputs(doc_id_values, docs, offsets_array, mode)
         if mode == "pooled_binary":
-            from bitmax.pooling import pool_doc_tokens
+            from maxsim.pooling import pool_doc_tokens
 
             original_tokens = int(docs.shape[0])
             docs, offsets_array = pool_doc_tokens(docs, offsets_array, pool_factor)
@@ -132,7 +144,7 @@ class Corpus:
                 metadata={} if metadata is None else dict(metadata),
             )
         raise ValueError(
-            "mode must be one of 'binary', 'binary_token_scale', 'binary_token_scale_u8', 'pooled_binary', 'binary_q40', 'int4', "
+            "mode must be 'auto', one of 'binary', 'binary_token_scale', 'binary_token_scale_u8', 'pooled_binary', 'binary_q40', 'int4', "
             f"or a preset in {sorted(MODE_PRESETS)}"
         )
 
@@ -141,7 +153,7 @@ class Corpus:
         output.parent.mkdir(parents=True, exist_ok=True)
         arrays: dict[str, object] = {
             "schema_version": np.array(1, dtype=np.int64),
-            "format": np.array("bitmax_corpus"),
+            "format": np.array("maxsim_corpus"),
             "mode": np.array(self.mode),
             "doc_ids": np.asarray(self.doc_ids),
             "metadata_json": np.array(json.dumps({} if self.metadata is None else self.metadata, sort_keys=True)),
@@ -200,7 +212,7 @@ class Corpus:
         with np.load(Path(path), allow_pickle=False) as data:
             if int(np.asarray(data["schema_version"]).item()) != 1:
                 raise ValueError("unsupported corpus schema_version")
-            if str(np.asarray(data["format"]).item()) != "bitmax_corpus":
+            if str(np.asarray(data["format"]).item()) != "maxsim_corpus":
                 raise ValueError("unsupported corpus format")
             mode = str(np.asarray(data["mode"]).item())
             doc_ids = tuple(str(value) for value in np.asarray(data["doc_ids"]))
@@ -243,7 +255,7 @@ class Corpus:
                     metadata=metadata,
                 )
             if mode == "int4":
-                from bitmax.experimental import Int4PackedDocs
+                from maxsim.experimental import Int4PackedDocs
 
                 int4_data = np.ascontiguousarray(data["int4_data"], dtype=np.uint8)
                 values = _unpack_signed_int4_data(int4_data, dim)
@@ -385,7 +397,7 @@ def _validate_corpus_inputs(doc_ids: tuple[str, ...], docs: np.ndarray, offsets:
         raise ValueError("offsets must have one more entry than doc_ids")
     if mode not in {"binary", "binary_token_scale", "binary_token_scale_u8", "binary_token_scale_u4", "pooled_binary", "binary_q40", "int4"}:
         raise ValueError(
-            "mode must be one of 'binary', 'binary_token_scale', 'binary_token_scale_u8', 'pooled_binary', 'binary_q40', 'int4', "
+            "mode must be 'auto', one of 'binary', 'binary_token_scale', 'binary_token_scale_u8', 'pooled_binary', 'binary_q40', 'int4', "
             f"or a preset in {sorted(MODE_PRESETS)}"
         )
 
@@ -509,3 +521,8 @@ def _format_result_row(scores: np.ndarray, indices: np.ndarray, doc_ids: tuple[s
         SearchResult(doc_id=doc_ids[int(index)], score=float(score), rank=rank)
         for rank, (score, index) in enumerate(zip(scores, indices), start=1)
     ]
+
+
+# The primary product name for a packed corpus; Corpus remains as an alias
+# used throughout the benchmark harness.
+Index = Corpus

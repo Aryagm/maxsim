@@ -8,7 +8,7 @@ from typing import Any
 
 import numpy as np
 
-import bitmax
+import maxsim
 
 try:
     import torch as _torch
@@ -24,7 +24,7 @@ def run_stage(stage: str, *, output_path: Path | str | None = None, gate_path: P
     rows: list[dict[str, Any]] = []
     for spec in specs:
         query, docs, offsets = _make_fixture(spec)
-        packed = bitmax.pack_signs(docs, offsets)
+        packed = maxsim.pack_signs(docs, offsets)
         reference_scores, reference_latency = _time_call(lambda: _python_reference_maxsim(query, packed), repeat=repeat)
         native_device, baseline_device = _benchmark_devices(stage)
         fp16_runner, fp16_metadata = _dense_baseline_runner(query, packed, storage_dtype=np.float16, device=baseline_device)
@@ -32,7 +32,7 @@ def run_stage(stage: str, *, output_path: Path | str | None = None, gate_path: P
         fp16_scores, fp16_latency = _time_call(fp16_runner, repeat=repeat)
         int8_scores, int8_latency = _time_call(int8_runner, repeat=repeat)
         native_name = "bitmax_cuda" if native_device == "cuda" else "bitmax_native"
-        native_scores, native_latency = _time_call(lambda: bitmax.maxsim(query, packed, device=native_device), repeat=repeat)
+        native_scores, native_latency = _time_call(lambda: maxsim.maxsim(query, packed, device=native_device), repeat=repeat)
 
         fp16_row = _row(
             stage,
@@ -161,7 +161,7 @@ def _time_call(fn, *, repeat: int):
     return best_value, best_latency
 
 
-def _python_reference_maxsim(query, packed: bitmax.PackedDocs):
+def _python_reference_maxsim(query, packed: maxsim.PackedDocs):
     query_float = np.asarray(query, dtype=np.float32)
     signs = _unpack_signs(packed.data, packed.dim)
     scores = np.empty(packed.num_docs, dtype=np.float32)
@@ -174,7 +174,7 @@ def _python_reference_maxsim(query, packed: bitmax.PackedDocs):
     return scores
 
 
-def _dense_baseline_runner(query, packed: bitmax.PackedDocs, *, storage_dtype, device: str):
+def _dense_baseline_runner(query, packed: maxsim.PackedDocs, *, storage_dtype, device: str):
     formula = "dense_fp16_vectorized_maxsim" if storage_dtype == np.float16 else "dense_int8_vectorized_doc_maxsim"
     torch_device = _resolve_torch_device(device)
     backend = "torch" if torch_device is not None else "numpy_torch_equivalent"
@@ -223,7 +223,7 @@ def _torch_cuda_supports_current_device() -> bool:
     return False
 
 
-def _numpy_dense_baseline_maxsim(query, packed: bitmax.PackedDocs, *, storage_dtype) -> np.ndarray:
+def _numpy_dense_baseline_maxsim(query, packed: maxsim.PackedDocs, *, storage_dtype) -> np.ndarray:
     query_float = np.asarray(query, dtype=storage_dtype).astype(np.float32)
     signs = _unpack_signs(packed.data, packed.dim).astype(storage_dtype).astype(np.float32)
     scale = 1.0 if packed.scale is None else float(packed.scale)
@@ -240,7 +240,7 @@ def _numpy_dense_baseline_maxsim(query, packed: bitmax.PackedDocs, *, storage_dt
     return dots.reshape(query_float.shape[0], packed.num_docs, doc_tokens).max(axis=2).sum(axis=0, dtype=np.float32) * scale
 
 
-def _torch_dense_baseline_maxsim(query, packed: bitmax.PackedDocs, *, storage_dtype, device) -> np.ndarray:
+def _torch_dense_baseline_maxsim(query, packed: maxsim.PackedDocs, *, storage_dtype, device) -> np.ndarray:
     torch_dtype = _torch.float16 if storage_dtype == np.float16 else _torch.int8
     query_tensor = _torch.as_tensor(np.asarray(query), dtype=torch_dtype, device=device)
     signs_tensor = _torch.as_tensor(_unpack_signs(packed.data, packed.dim), dtype=torch_dtype, device=device)
@@ -262,7 +262,7 @@ def _torch_dense_baseline_maxsim(query, packed: bitmax.PackedDocs, *, storage_dt
     return result.detach().cpu().numpy().astype(np.float32, copy=False)
 
 
-def _uniform_doc_tokens(packed: bitmax.PackedDocs) -> int | None:
+def _uniform_doc_tokens(packed: maxsim.PackedDocs) -> int | None:
     lengths = np.diff(packed.doc_offsets)
     if lengths.size == 0 or np.any(lengths != lengths[0]):
         return None
@@ -344,7 +344,7 @@ def _gate_passed(rows: list[dict[str, Any]]) -> bool:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run staged synthetic bitmax benchmarks.")
+    parser = argparse.ArgumentParser(description="Run staged synthetic maxsim benchmarks.")
     parser.add_argument("--stage", required=True, choices=["stage0", "cpu-smoke", "cuda-smoke", "cuda-sweep", "vast-large"])
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--gate", type=Path, default=None)

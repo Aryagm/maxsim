@@ -24,7 +24,7 @@ class BenchmarkStep:
 
 
 def main(argv: list[str] | None = None) -> dict[str, Any]:
-    parser = argparse.ArgumentParser(description="Plan or run reproducible bitmax benchmark suites.")
+    parser = argparse.ArgumentParser(description="Plan or run reproducible maxsim benchmark suites.")
     parser.add_argument(
         "--suite",
         choices=["smoke", "build-unique-caches", "cuda-unique-5k", "cuda-unique-10k", "cuda-docscale", "ledger-refresh"],

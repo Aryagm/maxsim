@@ -10,7 +10,7 @@ from typing import Any
 
 import numpy as np
 
-import bitmax
+import maxsim
 
 try:
     import faiss as _PRELOADED_FAISS
@@ -34,7 +34,7 @@ except ImportError:  # pragma: no cover - optional CUDA baseline dependency
 
 
 def main(argv: list[str] | None = None) -> dict[str, Any]:
-    parser = argparse.ArgumentParser(description="Compare bitmax against popular open-source retrieval baselines.")
+    parser = argparse.ArgumentParser(description="Compare maxsim against popular open-source retrieval baselines.")
     parser.add_argument("--input", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--device", default="cuda", choices=["cpu", "cuda"])
@@ -119,10 +119,10 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
             if mode == "pooled_binary3":
                 mode = "pooled_binary"
                 pool_factor = 3
-            corpus = bitmax.Corpus.from_embeddings(
+            corpus = maxsim.Corpus.from_embeddings(
                 dataset["doc_ids"], dataset["doc_embeddings"], dataset["doc_offsets"], mode=mode, pool_factor=pool_factor
             )
-            reranker = bitmax.Reranker.from_corpus(corpus, device=args.device, int4_query=int4_query)
+            reranker = maxsim.Reranker.from_corpus(corpus, device=args.device, int4_query=int4_query)
             scores, latency, latency_stats = _time_call(lambda: _scores_from_sdk(reranker, dataset["query_embeddings"], dataset["doc_ids"], score_k), repeat=args.repeat)
             rows.append(
                 _result_row(
@@ -477,7 +477,7 @@ def _fast_plaid_scores(
         )
         for query in dataset["query_embeddings"]
     ]
-    index_dir = tempfile.mkdtemp(prefix="bitmax-fast-plaid-")
+    index_dir = tempfile.mkdtemp(prefix="maxsim-fast-plaid-")
     actual_k = min(k, len(dataset["doc_ids"]))
     actual_n_full_scores = min(int(n_full_scores), len(dataset["doc_ids"]))
     search_device = "cuda:0" if device == "cuda" and torch.cuda.is_available() else "cpu"

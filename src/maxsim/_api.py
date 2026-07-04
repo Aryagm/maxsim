@@ -6,14 +6,14 @@ from typing import Literal
 import numpy as np
 
 try:
-    from bitmax import _bitmax_cpp
+    from maxsim import _maxsim_cpp
 except ImportError:  # pragma: no cover - exercised only in pure Python builds
-    _bitmax_cpp = None
+    _maxsim_cpp = None
 
 try:
-    from bitmax import _bitmax_cuda
+    from maxsim import _maxsim_cuda
 except ImportError:  # pragma: no cover - exercised only in CUDA builds
-    _bitmax_cuda = None
+    _maxsim_cuda = None
 
 
 @dataclass(frozen=True)
@@ -120,12 +120,12 @@ def to_device(packed: PackedDocs, device: Literal["cpu", "cuda"] = "cuda") -> Pa
         return packed
     if device == "cpu":
         raise NotImplementedError("copying CUDA PackedDocs back to CPU is not implemented")
-    if _bitmax_cuda is None or not hasattr(_bitmax_cuda, "CudaPackedDocs"):
+    if _maxsim_cuda is None or not hasattr(_maxsim_cuda, "CudaPackedDocs"):
         raise NotImplementedError("CUDA PackedDocs are not available in this build")
 
     packed_data = np.ascontiguousarray(packed.data, dtype=np.uint8)
     offsets = np.ascontiguousarray(packed.doc_offsets, dtype=np.int64)
-    handle = _bitmax_cuda.CudaPackedDocs(packed_data, offsets, packed.dim)
+    handle = _maxsim_cuda.CudaPackedDocs(packed_data, offsets, packed.dim)
     stored_scale = packed.scale.copy() if isinstance(packed.scale, np.ndarray) else packed.scale
     if isinstance(stored_scale, np.ndarray) and hasattr(handle, "set_scale_vector"):
         handle.set_scale_vector(np.ascontiguousarray(stored_scale, dtype=np.float32))
@@ -149,7 +149,7 @@ def maxsim(query_tokens, packed: PackedDocs, *, scale=None, device="auto"):
     if device not in ("auto", "cpu", "cuda"):
         raise ValueError("device must be 'auto', 'cpu', or 'cuda'")
     effective_device = "cuda" if device == "auto" and isinstance(packed, PackedDocs) and packed.device == "cuda" else device
-    if effective_device == "cuda" and packed.device == "cpu" and _bitmax_cuda is None:
+    if effective_device == "cuda" and packed.device == "cpu" and _maxsim_cuda is None:
         raise NotImplementedError("CUDA maxsim is not available in this build")
     _validate_packed(packed)
     if packed.device == "cuda" and effective_device in ("auto", "cpu"):
@@ -187,10 +187,10 @@ def maxsim(query_tokens, packed: PackedDocs, *, scale=None, device="auto"):
 
     if effective_device == "cuda":
         if use_token_scale:
-            raise NotImplementedError("token scale scoring on CUDA requires CUDA-resident PackedDocs; call bitmax.to_device(packed, 'cuda') first")
+            raise NotImplementedError("token scale scoring on CUDA requires CUDA-resident PackedDocs; call maxsim.to_device(packed, 'cuda') first")
         packed_data = np.ascontiguousarray(packed.data, dtype=np.uint8)
         offsets = np.ascontiguousarray(packed.doc_offsets, dtype=np.int64)
-        batch_kernel = getattr(_bitmax_cuda, "maxsim_cuda_batch", None)
+        batch_kernel = getattr(_maxsim_cuda, "maxsim_cuda_batch", None)
         if batch_kernel is not None:
             batch_result = batch_kernel(
                 np.ascontiguousarray(query_float, dtype=np.float32),
@@ -203,7 +203,7 @@ def maxsim(query_tokens, packed: PackedDocs, *, scale=None, device="auto"):
             return batch_result[0] if squeeze else batch_result
 
         for batch_idx, query in enumerate(query_float):
-            result[batch_idx] = _bitmax_cuda.maxsim_cuda(
+            result[batch_idx] = _maxsim_cuda.maxsim_cuda(
                 np.ascontiguousarray(query, dtype=np.float32),
                 packed_data,
                 offsets,
@@ -213,11 +213,11 @@ def maxsim(query_tokens, packed: PackedDocs, *, scale=None, device="auto"):
         result = _apply_vector_scale(result, resolved_scale)
         return result[0] if squeeze else result
 
-    if _bitmax_cpp is not None and not use_token_scale:
+    if _maxsim_cpp is not None and not use_token_scale:
         packed_data = np.ascontiguousarray(packed.data, dtype=np.uint8)
         offsets = np.ascontiguousarray(packed.doc_offsets, dtype=np.int64)
         for batch_idx, query in enumerate(query_float):
-            result[batch_idx] = _bitmax_cpp.maxsim_lut(
+            result[batch_idx] = _maxsim_cpp.maxsim_lut(
                 np.ascontiguousarray(query, dtype=np.float32),
                 packed_data,
                 offsets,

@@ -8,8 +8,8 @@ from typing import Any
 
 import numpy as np
 
-import bitmax
-from bitmax.experimental import pack_ternary, ternary_maxsim
+import maxsim
+from maxsim.experimental import pack_ternary, ternary_maxsim
 
 
 def run_benchmark(stage: str = "smoke", *, output_path: Path | str | None = None, repeat: int | None = None) -> dict[str, Any]:
@@ -47,8 +47,8 @@ def run_benchmark(stage: str = "smoke", *, output_path: Path | str | None = None
             )
         )
 
-        packed_binary = bitmax.pack_signs(docs, offsets)
-        binary_scores, binary_ms = _time_call(lambda: bitmax.maxsim(query_int8, packed_binary), repeat=actual_repeat)
+        packed_binary = maxsim.pack_signs(docs, offsets)
+        binary_scores, binary_ms = _time_call(lambda: maxsim.maxsim(query_int8, packed_binary), repeat=actual_repeat)
         rows.append(
             _row(
                 spec,
@@ -63,7 +63,7 @@ def run_benchmark(stage: str = "smoke", *, output_path: Path | str | None = None
         )
 
         query_binary = np.where(query >= 0, 1.0, -1.0).astype(np.float32)
-        binary_binary_scores, binary_binary_ms = _time_call(lambda: bitmax.maxsim(query_binary, packed_binary), repeat=actual_repeat)
+        binary_binary_scores, binary_binary_ms = _time_call(lambda: maxsim.maxsim(query_binary, packed_binary), repeat=actual_repeat)
         rows.append(
             _row(
                 spec,

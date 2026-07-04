@@ -7,11 +7,11 @@ dense fp16 (vectorized) & 0.5068 & 0.6016 & 0.4772 & 6.04\,s & 1.0$\times$ & 2$\
 fast-plaid (tuned)$^{\ast}$ & 0.5117 & 0.6133 & 0.4801 & n/c & n/c & 3.4$\times$ \\
 FAISS GPU mean-pool & 0.0355 & 0.0508 & 0.0309 & 0.00\,s & --- & 746$\times$ \\
 \midrule
-\bitmax{} int4$+$dp4a & 0.5008 & 0.6055 & 0.4681 & 1.12\,s & 5.4$\times$ & 8$\times$ \\
-\bitmax{} binary & 0.4856 & 0.5898 & 0.4526 & 0.68\,s & 8.8$\times$ & 32$\times$ \\
-\bitmax{} fp16 token scales & 0.4797 & 0.5781 & 0.4488 & 0.70\,s & 8.6$\times$ & 28.4$\times$ \\
-\bitmax{} u4 token scales & 0.4779 & 0.5781 & 0.4465 & 0.70\,s & 8.6$\times$ & 31$\times$ \\
-\bitmax{} pool2 binary & 0.4864 & 0.5938 & 0.4523 & 0.45\,s & 13.4$\times$ & 63.9$\times$ \\
-\bitmax{} pool3 binary & 0.4968 & 0.6133 & 0.4607 & 0.46\,s & 13.1$\times$ & 95.9$\times$ \\
+\sysname{} int4$+$dp4a & 0.5008 & 0.6055 & 0.4681 & 1.12\,s & 5.4$\times$ & 8$\times$ \\
+\sysname{} binary & 0.4856 & 0.5898 & 0.4526 & 0.68\,s & 8.8$\times$ & 32$\times$ \\
+\sysname{} fp16 token scales & 0.4797 & 0.5781 & 0.4488 & 0.70\,s & 8.6$\times$ & 28.4$\times$ \\
+\sysname{} u4 token scales & 0.4779 & 0.5781 & 0.4465 & 0.70\,s & 8.6$\times$ & 31$\times$ \\
+\sysname{} pool2 binary & 0.4864 & 0.5938 & 0.4523 & 0.45\,s & 13.4$\times$ & 63.9$\times$ \\
+\sysname{} pool3 binary & 0.4968 & 0.6133 & 0.4607 & 0.46\,s & 13.1$\times$ & 95.9$\times$ \\
 \bottomrule
 \end{tabular}

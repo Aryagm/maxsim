@@ -10,8 +10,8 @@ from typing import Any
 
 import numpy as np
 
-import bitmax
-from bitmax.experimental import (
+import maxsim
+from maxsim.experimental import (
     fit_dim_centroid_calibration,
     int4_maxsim,
     int4_maxsim_int8q,
@@ -85,11 +85,11 @@ def run_stage(
 
     requested_variants = _normalize_variants(variants)
     if requested_variants is None:
-        packed = bitmax.pack_signs(dataset.doc_embeddings, dataset.doc_offsets, scale=scale)
-        scoring_packed = _prepare_bitmax_packed(packed, native_device)
+        packed = maxsim.pack_signs(dataset.doc_embeddings, dataset.doc_offsets, scale=scale)
+        scoring_packed = _prepare_maxsim_packed(packed, native_device)
         bitmax_name = "bitmax_cuda" if native_device == "cuda" else "bitmax_native"
         bitmax_scores, bitmax_latency = _time_call(
-            lambda: _bitmax_scores(dataset, scoring_packed, device=native_device),
+            lambda: _maxsim_scores(dataset, scoring_packed, device=native_device),
             repeat=actual_repeat,
         )
         rows = [
@@ -437,10 +437,10 @@ def _torch_dense_fp16_scores(dataset: RetrievalEmbeddings, device) -> np.ndarray
     return _torch.stack(scores).detach().cpu().numpy().astype(np.float32, copy=False)
 
 
-def _bitmax_scores(dataset: RetrievalEmbeddings, packed: bitmax.PackedDocs, *, device: str) -> np.ndarray:
+def _maxsim_scores(dataset: RetrievalEmbeddings, packed: maxsim.PackedDocs, *, device: str) -> np.ndarray:
     if device == "cuda":
-        return bitmax.maxsim(_padded_query_batch(dataset.query_embeddings), packed, device=device).astype(np.float32, copy=False)
-    rows = [bitmax.maxsim(query, packed, device=device) for query in dataset.query_embeddings]
+        return maxsim.maxsim(_padded_query_batch(dataset.query_embeddings), packed, device=device).astype(np.float32, copy=False)
+    rows = [maxsim.maxsim(query, packed, device=device) for query in dataset.query_embeddings]
     return np.stack(rows, axis=0).astype(np.float32, copy=False)
 
 
@@ -449,15 +449,15 @@ def _variant_scores(dataset: RetrievalEmbeddings, variant: str, native_device: s
         return _pooled_variant_scores(dataset, variant, native_device, repeat)
 
     if variant == "binary":
-        packed = bitmax.pack_signs(dataset.doc_embeddings, dataset.doc_offsets)
-        scoring_packed = _prepare_bitmax_packed(packed, native_device)
-        scores, latency = _time_call(lambda: _bitmax_scores(dataset, scoring_packed, device=native_device), repeat=repeat)
+        packed = maxsim.pack_signs(dataset.doc_embeddings, dataset.doc_offsets)
+        scoring_packed = _prepare_maxsim_packed(packed, native_device)
+        scores, latency = _time_call(lambda: _maxsim_scores(dataset, scoring_packed, device=native_device), repeat=repeat)
         return scores, latency, {"implementation": "bitmax_binary", "variant": variant, "requested_device": native_device}, _packed_doc_bytes(dataset)
 
     if variant == "binary_doc_scale":
-        packed = bitmax.pack_signs(dataset.doc_embeddings, dataset.doc_offsets, scale="doc")
-        scoring_packed = _prepare_bitmax_packed(packed, native_device)
-        scores, latency = _time_call(lambda: _bitmax_scores(dataset, scoring_packed, device=native_device), repeat=repeat)
+        packed = maxsim.pack_signs(dataset.doc_embeddings, dataset.doc_offsets, scale="doc")
+        scoring_packed = _prepare_maxsim_packed(packed, native_device)
+        scores, latency = _time_call(lambda: _maxsim_scores(dataset, scoring_packed, device=native_device), repeat=repeat)
         return scores, latency, {"implementation": "bitmax_binary_doc_scale", "variant": variant, "requested_device": native_device}, _packed_doc_bytes(dataset) + dataset.num_docs * 4
 
     if variant == "ternary_threshold":
@@ -471,9 +471,9 @@ def _variant_scores(dataset: RetrievalEmbeddings, variant: str, native_device: s
         return scores, latency, {"implementation": "binary_token_scale", "variant": variant, "requested_device": "cpu_reference"}, _packed_doc_bytes(dataset) + dataset.doc_embeddings.shape[0] * 4
 
     if variant == "binary_token_scale_cuda":
-        packed = bitmax.pack_signs(dataset.doc_embeddings, dataset.doc_offsets, token_scale="mean_abs")
-        scoring_packed = _prepare_bitmax_packed(packed, native_device)
-        scores, latency = _time_call(lambda: _bitmax_scores(dataset, scoring_packed, device=native_device), repeat=repeat)
+        packed = maxsim.pack_signs(dataset.doc_embeddings, dataset.doc_offsets, token_scale="mean_abs")
+        scoring_packed = _prepare_maxsim_packed(packed, native_device)
+        scores, latency = _time_call(lambda: _maxsim_scores(dataset, scoring_packed, device=native_device), repeat=repeat)
         return (
             scores,
             latency,
@@ -482,9 +482,9 @@ def _variant_scores(dataset: RetrievalEmbeddings, variant: str, native_device: s
         )
 
     if variant == "binary_token_scale_fp16_cuda":
-        packed = bitmax.pack_signs(dataset.doc_embeddings, dataset.doc_offsets, token_scale="mean_abs_fp16")
-        scoring_packed = _prepare_bitmax_packed(packed, native_device)
-        scores, latency = _time_call(lambda: _bitmax_scores(dataset, scoring_packed, device=native_device), repeat=repeat)
+        packed = maxsim.pack_signs(dataset.doc_embeddings, dataset.doc_offsets, token_scale="mean_abs_fp16")
+        scoring_packed = _prepare_maxsim_packed(packed, native_device)
+        scores, latency = _time_call(lambda: _maxsim_scores(dataset, scoring_packed, device=native_device), repeat=repeat)
         return (
             scores,
             latency,
@@ -493,9 +493,9 @@ def _variant_scores(dataset: RetrievalEmbeddings, variant: str, native_device: s
         )
 
     if variant == "binary_token_scale_u4_cuda":
-        packed = bitmax.pack_signs(dataset.doc_embeddings, dataset.doc_offsets, token_scale="mean_abs_u4")
-        scoring_packed = _prepare_bitmax_packed(packed, native_device)
-        scores, latency = _time_call(lambda: _bitmax_scores(dataset, scoring_packed, device=native_device), repeat=repeat)
+        packed = maxsim.pack_signs(dataset.doc_embeddings, dataset.doc_offsets, token_scale="mean_abs_u4")
+        scoring_packed = _prepare_maxsim_packed(packed, native_device)
+        scores, latency = _time_call(lambda: _maxsim_scores(dataset, scoring_packed, device=native_device), repeat=repeat)
         return (
             scores,
             latency,
@@ -504,9 +504,9 @@ def _variant_scores(dataset: RetrievalEmbeddings, variant: str, native_device: s
         )
 
     if variant == "binary_token_scale_u8_cuda":
-        packed = bitmax.pack_signs(dataset.doc_embeddings, dataset.doc_offsets, token_scale="mean_abs_u8")
-        scoring_packed = _prepare_bitmax_packed(packed, native_device)
-        scores, latency = _time_call(lambda: _bitmax_scores(dataset, scoring_packed, device=native_device), repeat=repeat)
+        packed = maxsim.pack_signs(dataset.doc_embeddings, dataset.doc_offsets, token_scale="mean_abs_u8")
+        scoring_packed = _prepare_maxsim_packed(packed, native_device)
+        scores, latency = _time_call(lambda: _maxsim_scores(dataset, scoring_packed, device=native_device), repeat=repeat)
         return (
             scores,
             latency,
@@ -538,8 +538,8 @@ def _variant_scores(dataset: RetrievalEmbeddings, variant: str, native_device: s
         )
 
     if variant == "binary_int8q_dp4a":
-        packed = bitmax.pack_signs(dataset.doc_embeddings, dataset.doc_offsets)
-        scoring_packed = bitmax.to_device(packed, "cuda")
+        packed = maxsim.pack_signs(dataset.doc_embeddings, dataset.doc_offsets)
+        scoring_packed = maxsim.to_device(packed, "cuda")
         scores, latency = _time_call(lambda: _binary_int8q_scores(dataset, scoring_packed), repeat=repeat)
         return (
             scores,
@@ -549,8 +549,8 @@ def _variant_scores(dataset: RetrievalEmbeddings, variant: str, native_device: s
         )
 
     if variant == "binary_token_scale_fp16_int8q_dp4a":
-        packed = bitmax.pack_signs(dataset.doc_embeddings, dataset.doc_offsets, token_scale="mean_abs_fp16")
-        scoring_packed = bitmax.to_device(packed, "cuda")
+        packed = maxsim.pack_signs(dataset.doc_embeddings, dataset.doc_offsets, token_scale="mean_abs_fp16")
+        scoring_packed = maxsim.to_device(packed, "cuda")
         scores, latency = _time_call(lambda: _binary_int8q_scores(dataset, scoring_packed), repeat=repeat)
         return (
             scores,
@@ -581,7 +581,7 @@ def _variant_scores(dataset: RetrievalEmbeddings, variant: str, native_device: s
     if variant == "binary_dim_centroid_zero":
         calibration = fit_dim_centroid_calibration(dataset.doc_embeddings)
         centroid_dataset, scoring_packed = _prepare_centroid_binary(dataset, calibration, native_device)
-        scores, latency = _time_call(lambda: _bitmax_scores(centroid_dataset, scoring_packed, device=native_device), repeat=repeat)
+        scores, latency = _time_call(lambda: _maxsim_scores(centroid_dataset, scoring_packed, device=native_device), repeat=repeat)
         return (
             scores,
             latency,
@@ -593,7 +593,7 @@ def _variant_scores(dataset: RetrievalEmbeddings, variant: str, native_device: s
         thresholds = _quantile_thresholds(dataset.doc_embeddings, 40.0)
         calibration = fit_dim_centroid_calibration(dataset.doc_embeddings, thresholds=thresholds)
         centroid_dataset, scoring_packed = _prepare_centroid_binary(dataset, calibration, native_device)
-        scores, latency = _time_call(lambda: _bitmax_scores(centroid_dataset, scoring_packed, device=native_device), repeat=repeat)
+        scores, latency = _time_call(lambda: _maxsim_scores(centroid_dataset, scoring_packed, device=native_device), repeat=repeat)
         return (
             scores,
             latency,
@@ -610,7 +610,7 @@ def _variant_scores(dataset: RetrievalEmbeddings, variant: str, native_device: s
     if variant == "binary_dim_centroid_lloyd":
         calibration = fit_dim_centroid_calibration(dataset.doc_embeddings, lloyd_iterations=4)
         centroid_dataset, scoring_packed = _prepare_centroid_binary(dataset, calibration, native_device)
-        scores, latency = _time_call(lambda: _bitmax_scores(centroid_dataset, scoring_packed, device=native_device), repeat=repeat)
+        scores, latency = _time_call(lambda: _maxsim_scores(centroid_dataset, scoring_packed, device=native_device), repeat=repeat)
         return (
             scores,
             latency,
@@ -662,21 +662,21 @@ def _pooled_variant_scores(dataset: RetrievalEmbeddings, variant: str, native_de
         return scores, latency, metadata, pooled_tokens * dataset.dim * 4
 
     if inner == "binary":
-        packed = bitmax.pack_signs(pooled.doc_embeddings, pooled.doc_offsets)
+        packed = maxsim.pack_signs(pooled.doc_embeddings, pooled.doc_offsets)
         storage = pooled_tokens * (dataset.dim // 8)
     else:
-        packed = bitmax.pack_signs(pooled.doc_embeddings, pooled.doc_offsets, token_scale="mean_abs")
+        packed = maxsim.pack_signs(pooled.doc_embeddings, pooled.doc_offsets, token_scale="mean_abs")
         storage = pooled_tokens * (dataset.dim // 8) + pooled_tokens * 4
-    scoring_packed = _prepare_bitmax_packed(packed, native_device)
-    scores, latency = _time_call(lambda: _bitmax_scores(pooled, scoring_packed, device=native_device), repeat=repeat)
+    scoring_packed = _prepare_maxsim_packed(packed, native_device)
+    scores, latency = _time_call(lambda: _maxsim_scores(pooled, scoring_packed, device=native_device), repeat=repeat)
     metadata["requested_device"] = native_device
     if native_device == "cuda" and hasattr(scoring_packed.data, "maxsim_kernel_variant"):
         metadata["maxsim_kernel_variant"] = scoring_packed.data.maxsim_kernel_variant
     return scores, latency, metadata, storage
 
 
-def _prepare_bitmax_packed(packed: bitmax.PackedDocs, device: str):
-    return bitmax.to_device(packed, "cuda") if device == "cuda" else packed
+def _prepare_maxsim_packed(packed: maxsim.PackedDocs, device: str):
+    return maxsim.to_device(packed, "cuda") if device == "cuda" else packed
 
 
 def _padded_query_batch(query_embeddings: tuple[np.ndarray, ...]) -> np.ndarray:
@@ -795,7 +795,7 @@ def _threshold_sign_scores(dataset: RetrievalEmbeddings, thresholds: np.ndarray)
 def _prepare_centroid_binary(dataset: RetrievalEmbeddings, calibration, native_device: str):
     adjusted_queries = tuple(transform_query_dim_centroids(query, calibration) for query in dataset.query_embeddings)
     packed, _ = pack_dim_centroid_signs(dataset.doc_embeddings, dataset.doc_offsets, calibration=calibration)
-    scoring_packed = _prepare_bitmax_packed(packed, native_device)
+    scoring_packed = _prepare_maxsim_packed(packed, native_device)
     centroid_dataset = RetrievalEmbeddings(
         name=dataset.name,
         query_embeddings=adjusted_queries,
@@ -969,14 +969,14 @@ def _gate_passed(rows: list[dict[str, Any]]) -> bool:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run retrieval-level bitmax benchmarks from multi-vector embeddings.")
+    parser = argparse.ArgumentParser(description="Run retrieval-level maxsim benchmarks from multi-vector embeddings.")
     parser.add_argument("--stage", required=True, choices=["fixture-smoke", "embeddings-smoke", "embeddings-cuda-smoke"])
     parser.add_argument("--input", type=Path, default=None, help="Input .npz with doc/query embeddings and qrels.")
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--gate", type=Path, default=None)
     parser.add_argument("--top-k", type=int, default=10)
     parser.add_argument("--repeat", type=int, default=None)
-    parser.add_argument("--scale", default=None, help="Optional bitmax scale value, 'global', or 'doc'.")
+    parser.add_argument("--scale", default=None, help="Optional maxsim scale value, 'global', or 'doc'.")
     parser.add_argument("--variants", default=None, help="Comma-separated experimental variants, or 'all'.")
     args = parser.parse_args()
 

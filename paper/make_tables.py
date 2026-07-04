@@ -134,12 +134,12 @@ def table_tenk():
         ("dense_fp16_vectorized", "dense fp16 (vectorized)", "2$\\times$", True),
         ("fast_plaid", "fast-plaid (tuned)$^{\\ast}$", "3.4$\\times$", None),
         ("faiss_gpu_mean_pool_flat_ip", "FAISS GPU mean-pool", "746$\\times$", False),
-        ("bitmax_int4_dp4a", "\\bitmax{} int4$+$dp4a", "8$\\times$", True),
-        ("bitmax_binary", "\\bitmax{} binary", "32$\\times$", True),
-        ("bitmax_binary_token_scale", "\\bitmax{} fp16 token scales", "28.4$\\times$", True),
-        ("bitmax_binary_token_scale_u4", "\\bitmax{} u4 token scales", "31$\\times$", True),
-        ("bitmax_pooled_binary", "\\bitmax{} pool2 binary", "63.9$\\times$", True),
-        ("bitmax_pooled_binary3", "\\bitmax{} pool3 binary", "95.9$\\times$", True),
+        ("bitmax_int4_dp4a", "\\sysname{} int4$+$dp4a", "8$\\times$", True),
+        ("bitmax_binary", "\\sysname{} binary", "32$\\times$", True),
+        ("bitmax_binary_token_scale", "\\sysname{} fp16 token scales", "28.4$\\times$", True),
+        ("bitmax_binary_token_scale_u4", "\\sysname{} u4 token scales", "31$\\times$", True),
+        ("bitmax_pooled_binary", "\\sysname{} pool2 binary", "63.9$\\times$", True),
+        ("bitmax_pooled_binary3", "\\sysname{} pool3 binary", "95.9$\\times$", True),
     ]
     lines = [
         "\\begin{tabular}{l r r r r r r}",

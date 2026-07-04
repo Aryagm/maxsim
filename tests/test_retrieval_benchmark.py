@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from benchmarks.run_retrieval import run_stage
-from benchmarks.run_retrieval import RetrievalEmbeddings, _bitmax_scores, _prepare_bitmax_packed
+from benchmarks.run_retrieval import RetrievalEmbeddings, _maxsim_scores, _prepare_maxsim_packed
 
 
 def _write_tiny_embedding_file(path):
@@ -184,7 +184,7 @@ def test_cuda_retrieval_scores_pad_ragged_queries_for_single_batch_call(monkeypa
         query_ids=("q0", "q1"),
         doc_ids=("d0", "d1"),
     )
-    packed = __import__("bitmax").pack_signs(dataset.doc_embeddings, dataset.doc_offsets)
+    packed = __import__("maxsim").pack_signs(dataset.doc_embeddings, dataset.doc_offsets)
     calls = []
 
     def fake_maxsim(query, packed_arg, *, device):
@@ -193,9 +193,9 @@ def test_cuda_retrieval_scores_pad_ragged_queries_for_single_batch_call(monkeypa
         np.testing.assert_array_equal(query[0, 1:], np.zeros((2, 8), dtype=np.float32))
         return np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
 
-    monkeypatch.setattr("benchmarks.run_retrieval.bitmax.maxsim", fake_maxsim)
+    monkeypatch.setattr("benchmarks.run_retrieval.maxsim.maxsim", fake_maxsim)
 
-    scores = _bitmax_scores(dataset, packed, device="cuda")
+    scores = _maxsim_scores(dataset, packed, device="cuda")
 
     assert len(calls) == 1
     assert calls[0][2] == "cuda"
@@ -203,18 +203,18 @@ def test_cuda_retrieval_scores_pad_ragged_queries_for_single_batch_call(monkeypa
 
 
 def test_cuda_retrieval_prepares_resident_packed_docs_once(monkeypatch):
-    packed = __import__("bitmax").pack_signs(np.ones((2, 8), dtype=np.float32))
+    packed = __import__("maxsim").pack_signs(np.ones((2, 8), dtype=np.float32))
     calls = []
 
     def fake_to_device(packed_arg, device):
         calls.append((packed_arg, device))
         return "cuda-packed"
 
-    monkeypatch.setattr("benchmarks.run_retrieval.bitmax.to_device", fake_to_device)
+    monkeypatch.setattr("benchmarks.run_retrieval.maxsim.to_device", fake_to_device)
 
-    assert _prepare_bitmax_packed(packed, "cuda") == "cuda-packed"
+    assert _prepare_maxsim_packed(packed, "cuda") == "cuda-packed"
     assert calls == [(packed, "cuda")]
-    assert _prepare_bitmax_packed(packed, "auto") is packed
+    assert _prepare_maxsim_packed(packed, "auto") is packed
 
 
 @pytest.mark.benchmark_smoke

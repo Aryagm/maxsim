@@ -1,2 +1,2 @@
-"""Benchmark entrypoints for bitmax."""
+"""Benchmark entrypoints for maxsim."""
 

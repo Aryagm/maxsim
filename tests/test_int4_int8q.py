@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from bitmax.experimental import int4_maxsim_int8q, int4_to_device, pack_int4_symmetric
+from maxsim.experimental import int4_maxsim_int8q, int4_to_device, pack_int4_symmetric
 
 
 def _reference_int8q_scores(packed, query):
@@ -35,7 +35,7 @@ def _ragged_fixture(num_docs, seed):
 
 @pytest.mark.cuda
 def test_cuda_int4_int8q_matches_numpy_reference():
-    pytest.importorskip("bitmax._bitmax_cuda")
+    pytest.importorskip("maxsim._maxsim_cuda")
     docs, offsets = _ragged_fixture(150, seed=71)
     rng = np.random.default_rng(73)
     query = rng.standard_normal((2, 5, 128)).astype(np.float32)
@@ -49,7 +49,7 @@ def test_cuda_int4_int8q_matches_numpy_reference():
 
 @pytest.mark.cuda
 def test_cuda_int4_int8q_zero_query_rows_and_empty_docs():
-    pytest.importorskip("bitmax._bitmax_cuda")
+    pytest.importorskip("maxsim._maxsim_cuda")
     docs, offsets = _ragged_fixture(10, seed=79)
     empty_doc = int(np.flatnonzero(np.diff(offsets) == 0)[0])
     rng = np.random.default_rng(83)
@@ -66,7 +66,7 @@ def test_cuda_int4_int8q_zero_query_rows_and_empty_docs():
 
 @pytest.mark.cuda
 def test_cuda_int4_int8q_topk_matches_maxsim_ranking():
-    pytest.importorskip("bitmax._bitmax_cuda")
+    pytest.importorskip("maxsim._maxsim_cuda")
     docs, offsets = _ragged_fixture(150, seed=89)
     rng = np.random.default_rng(97)
     query = rng.standard_normal((2, 4, 128)).astype(np.float32)

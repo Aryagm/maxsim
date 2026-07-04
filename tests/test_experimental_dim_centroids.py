@@ -1,10 +1,10 @@
 import numpy as np
 
-import bitmax
+import maxsim
 
 
 def test_dim_centroid_transform_restores_centroid_approximation_scores():
-    from bitmax.experimental import (
+    from maxsim.experimental import (
         dim_centroid_maxsim,
         fit_dim_centroid_calibration,
         pack_dim_centroid_signs,
@@ -48,7 +48,7 @@ def test_dim_centroid_transform_restores_centroid_approximation_scores():
 
 
 def test_dim_centroid_topk_keeps_one_bit_doc_storage_plus_small_metadata():
-    from bitmax.experimental import (
+    from maxsim.experimental import (
         fit_dim_centroid_calibration,
         pack_dim_centroid_signs,
         topk_dim_centroid_maxsim,
@@ -74,7 +74,7 @@ def test_dim_centroid_topk_keeps_one_bit_doc_storage_plus_small_metadata():
 
 
 def test_dim_centroid_topk_uses_cuda_fused_centroid_method_when_available():
-    from bitmax.experimental import DimCentroidCalibration, topk_dim_centroid_maxsim
+    from maxsim.experimental import DimCentroidCalibration, topk_dim_centroid_maxsim
 
     calls = []
 
@@ -91,7 +91,7 @@ def test_dim_centroid_topk_uses_cuda_fused_centroid_method_when_available():
         negative_centroids=np.full(8, -2.0, dtype=np.float32),
         positive_centroids=np.full(8, 3.0, dtype=np.float32),
     )
-    packed = bitmax.PackedDocs(
+    packed = maxsim.PackedDocs(
         data=FakeCudaHandle(),
         doc_offsets=np.array([0, 1, 2], dtype=np.int64),
         dim=8,

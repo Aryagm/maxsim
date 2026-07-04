@@ -16,11 +16,12 @@
 \captionsetup{font=small,labelfont=bf,width=.92\linewidth}
 \usepackage[hidelinks]{hyperref}
 
-\newcommand{\bitmax}{\textsc{bitmax}}
+\newcommand{\sysname}{\textsc{maxsim}}
 \newcommand{\ndcg}{NDCG@10}
 
-\title{Compression Tiers for Late-Interaction Visual Document Retrieval:\\
-A Measured Accuracy--Size--Latency Frontier}
+\title{\textsc{maxsim}: A Compressed Runtime for Multi-Vector Retrieval\\
+\large A Measured Accuracy--Storage--Latency Frontier\\
+\large on ColPali-Style Visual Document Search}
 
 \author{Arya Manjaramkar\\
 \texttt{arya@e3group.ai}}
@@ -34,12 +35,17 @@ A Measured Accuracy--Size--Latency Frontier}
 \maketitle
 
 \begin{abstract}
-Late-interaction retrieval over visual documents (ColPali-family models) stores
-hundreds of patch vectors per page, making storage the dominant deployment
-cost. We present \bitmax{}, a library of exact CUDA scoring kernels for
-compressed multi-vector MaxSim, and a systematically measured frontier of five
-compression tiers spanning $8\times$ to $96\times$ compression versus fp32
-storage. On the full ViDoRe benchmark (10 datasets, complete test splits,
+Multi-vector retrieval models such as ColBERT, ColPali, and ColQwen deliver
+state-of-the-art quality by storing hundreds to thousands of token or patch
+vectors per document --- which makes storage and scoring, not the model, the
+main barrier to deployment. We present \sysname{}, a compressed exact-MaxSim
+runtime for fixed-dimensional multi-vector embeddings: exact CUDA scoring
+kernels over a systematically measured frontier of five compression tiers
+spanning $8\times$ to $96\times$ versus fp32 storage, so that existing
+late-interaction systems become dramatically smaller and faster without
+changing the model or approximating the score. We validate the frontier on
+visual document retrieval, the setting where the storage problem is most
+acute. On the full ViDoRe benchmark (10 datasets, complete test splits,
 8{,}443 queries), a symmetric int4 format scored by a dp4a int8-query kernel
 retains dense-fp16 quality within $-0.0018$ \ndcg{} (95\% CI
 $[-0.0030,-0.0006]$) at $8\times$ compression, and 1-bit sign quantization
@@ -62,10 +68,16 @@ artifacts with stored per-query metrics.
 
 Late-interaction retrieval~\citep{khattab2020colbert} scores a query against a
 document as a sum of per-query-token maxima over document token vectors
-(MaxSim). Applied to visual documents, ColPali-family
-models~\citep{faysse2024colpali} embed each page as roughly a thousand
-128-dimensional patch vectors, so a corpus of only $10^4$ pages already
-occupies gigabytes at fp32 --- storage, not compute, dominates deployment.
+(MaxSim). The paradigm now spans text (ColBERT) and visual documents
+(ColPali-family models~\citep{faysse2024colpali}), and its cost structure is
+the same everywhere: a document is hundreds to thousands of vectors, so a
+corpus of only $10^4$ visual pages already occupies gigabytes at fp32 ---
+storage, not compute, dominates deployment. \sysname{} addresses this as a
+runtime layer: it applies to any fixed-dimensional multi-vector embedding
+scored with dot-product MaxSim, independent of the producing model. Its
+\emph{interface} is that general; the \emph{empirical validation} in this
+paper is visual document retrieval, the setting where the storage problem is
+most acute (text-corpus replication is future work, Section~\ref{sec:limitations}).
 
 Compression of multi-vector representations is usually studied one technique
 at a time and on a single corpus size. Practitioners face a different
@@ -300,6 +312,9 @@ would not grant them --- and pooling's relative strength at scale to its
 denoising of near-duplicate patches, which grow more confusable as the corpus
 grows. Practical consequence: \textbf{compression defaults should be selected
 by corpus size}, and small-slice benchmarks actively mislead tier selection.
+The released library ships this finding as behavior: its default
+\texttt{auto} tier selects per-token scales below 500 documents and int4
+above.
 
 \subsection{The 10k frontier and baselines}
 
@@ -396,7 +411,7 @@ analysis.
 \section*{Reproducibility Statement}
 Every reported number derives from a JSON artifact committed under
 \texttt{docs/\allowbreak benchmark\_results/\allowbreak raw/} in the
-\bitmax{} repository, including per-query metric vectors for all suite rows.
+\sysname{} repository, including per-query metric vectors for all suite rows.
 Paper figures and exact-value tables regenerate deterministically from those
 artifacts (\texttt{paper/\allowbreak make\_figures.py},
 \texttt{paper/\allowbreak make\_tables.py}); the statistical analysis is

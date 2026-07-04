@@ -34,7 +34,7 @@ DATASET_ALIASES = {
 
 
 def main(argv: list[str] | None = None) -> dict[str, Any]:
-    parser = argparse.ArgumentParser(description="Run the bitmax CUDA comparison across multiple cached embedding datasets.")
+    parser = argparse.ArgumentParser(description="Run the maxsim CUDA comparison across multiple cached embedding datasets.")
     parser.add_argument("--datasets", default="docvqa,infovqa,arxivqa,tabfquad")
     parser.add_argument("--embedding-dir", type=Path, default=Path("benchmark-results"))
     parser.add_argument("--output-dir", type=Path, default=Path("benchmark-results/multidataset"))

@@ -7,8 +7,8 @@ from typing import Any
 
 import numpy as np
 
-from bitmax._api import PackedDocs
-from bitmax.experimental import DimCentroidCalibration
+from maxsim._api import PackedDocs
+from maxsim.experimental import DimCentroidCalibration
 
 _SCHEMA_VERSION = 1
 
@@ -40,7 +40,7 @@ def save_packed(
     token_scale_kind, token_scale_values = _encode_scale(packed.token_scale)
     arrays: dict[str, object] = {
         "schema_version": np.array(_SCHEMA_VERSION, dtype=np.int64),
-        "format": np.array("bitmax_packed_docs"),
+        "format": np.array("maxsim_packed_docs"),
         "data": np.ascontiguousarray(packed.data, dtype=np.uint8),
         "doc_offsets": np.ascontiguousarray(packed.doc_offsets, dtype=np.int64),
         "dim": np.array(packed.dim, dtype=np.int64),
@@ -69,7 +69,7 @@ def load_packed(path: str | Path) -> PackedBundle:
         if schema_version != _SCHEMA_VERSION:
             raise ValueError(f"unsupported packed docs schema_version={schema_version}")
         file_format = str(np.asarray(data["format"]).item())
-        if file_format != "bitmax_packed_docs":
+        if file_format != "maxsim_packed_docs":
             raise ValueError(f"unsupported packed docs format: {file_format}")
 
         token_scale = None

@@ -127,7 +127,7 @@ py::array_t<float> maxsim_lut(
 
 py::dict cpu_features() {
   py::dict features;
-#if defined(BITMAX_ARM64)
+#if defined(MAXSIM_ARM64)
   features["arch"] = "arm64";
   features["neon_compilable"] = true;
 #else
@@ -145,8 +145,8 @@ py::dict cpu_features() {
 
 }  // namespace
 
-PYBIND11_MODULE(_bitmax_cpp, m) {
-  m.doc() = "Native CPU kernels for bitmax";
+PYBIND11_MODULE(_maxsim_cpp, m) {
+  m.doc() = "Native CPU kernels for maxsim";
   m.def("maxsim_lut", &maxsim_lut, py::arg("query"), py::arg("packed"), py::arg("offsets"), py::arg("dim"), py::arg("scale") = 1.0F);
   m.def("cpu_features", &cpu_features);
 }

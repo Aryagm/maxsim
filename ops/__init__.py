@@ -1,2 +1,2 @@
-"""Operational helpers for bitmax."""
+"""Operational helpers for maxsim."""
 

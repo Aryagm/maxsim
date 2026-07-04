@@ -2,7 +2,7 @@ import numpy as np
 
 
 def test_pack_int4_symmetric_packs_signed_nibbles_and_reports_storage():
-    from bitmax.experimental import pack_int4_symmetric
+    from maxsim.experimental import pack_int4_symmetric
 
     docs = np.array(
         [
@@ -25,7 +25,7 @@ def test_pack_int4_symmetric_packs_signed_nibbles_and_reports_storage():
 
 
 def test_int4_maxsim_matches_dequantized_reference():
-    from bitmax.experimental import int4_maxsim, pack_int4_symmetric
+    from maxsim.experimental import int4_maxsim, pack_int4_symmetric
 
     docs = np.array(
         [
@@ -59,7 +59,7 @@ def test_int4_maxsim_matches_dequantized_reference():
 
 
 def test_topk_int4_maxsim_sorts_by_score_then_lower_doc_id():
-    from bitmax.experimental import pack_int4_symmetric, topk_int4_maxsim
+    from maxsim.experimental import pack_int4_symmetric, topk_int4_maxsim
 
     docs = np.array(
         [

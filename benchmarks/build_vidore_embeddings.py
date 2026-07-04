@@ -198,7 +198,7 @@ def _flatten_ragged(arrays: list[np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Build a ViDoRe/ColVision embedding .npz for bitmax retrieval benchmarks.")
+    parser = argparse.ArgumentParser(description="Build a ViDoRe/ColVision embedding .npz for maxsim retrieval benchmarks.")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--dataset", default="vidore/docvqa_test_subsampled")
     parser.add_argument("--config", default="default")
