@@ -1,7 +1,8 @@
 """Generate the paper figures from the committed benchmark ledger.
 
-Reads docs/benchmark_results/raw/*.json and writes PDFs into paper/figures/.
-Run from the repository root:  python paper/make_figures.py
+Reads docs/benchmark_results/raw/*.json and writes PDFs into paper/figures/
+plus PNG twins into docs/figures/ for the README. Run from the repo root:
+    python paper/make_figures.py
 """
 
 from __future__ import annotations
@@ -16,8 +17,10 @@ import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 
 RAW = Path("docs/benchmark_results/raw")
-OUT = Path("paper/figures")
-OUT.mkdir(parents=True, exist_ok=True)
+OUT_PDF = Path("paper/figures")
+OUT_PNG = Path("docs/figures")
+OUT_PDF.mkdir(parents=True, exist_ok=True)
+OUT_PNG.mkdir(parents=True, exist_ok=True)
 
 COLORS = {
     "binary": "#2a78d6",
@@ -29,7 +32,8 @@ COLORS = {
     "dense": "#5c6672",
     "ext": "#8a5a1e",
 }
-MARKERS = {"binary": "o", "ts": "s", "u4": "D", "int4": "^", "pool2": "v", "pool3": "P", "dense": "o", "ext": "X"}
+MARKERS = {"binary": "o", "ts": "s", "u4": "D", "int4": "^", "pool2": "v", "pool3": "P",
+           "dense": "o", "ext": "X"}
 LABELS = {
     "binary": "binary (32×)",
     "ts": "fp16 token scales (28.4×)",
@@ -58,13 +62,58 @@ plt.rcParams.update({
 })
 
 
+def save(fig, name: str):
+    fig.savefig(OUT_PDF / f"{name}.pdf")
+    fig.savefig(OUT_PNG / f"{name}.png", dpi=220)
+    plt.close(fig)
+
+
 def _mark(ax, x, y, key, size=46, alpha=1.0, zorder=3):
     ax.scatter([x], [y], s=size, marker=MARKERS[key], color=COLORS[key], alpha=alpha,
                edgecolor="white", linewidth=1.1, zorder=zorder)
 
 
+def _final_rows():
+    data = json.loads((RAW / "paper-unique-10k-final.json").read_text())
+    return {r["implementation"]: r for r in data["results"] if not r.get("status") or r["status"] == "ok"}
+
+
+# ---------------------------------------------------------------- fig: formats
+def fig_format_layout():
+    """Byte budget per stored 128-d token, log-width bars with exact values."""
+    tiers = [
+        ("fp32 (reference)", 512.0, "dense", "1.0×"),
+        ("fp16 dense", 256.0, "dense", "2×"),
+        ("int4 (per-tensor scale)", 64.0, "int4", "8×"),
+        ("binary + fp16 scale", 18.0, "ts", "28.4×"),
+        ("binary + u4 scale", 16.5, "u4", "31×"),
+        ("binary signs", 16.0, "binary", "32×"),
+        ("pool2 binary$^{\\dagger}$", 8.0, "pool2", "63.9×"),
+        ("pool3 binary$^{\\dagger}$", 5.33, "pool3", "95.9×"),
+    ]
+    fig, ax = plt.subplots(figsize=(5.4, 2.7))
+    ax.grid(axis="y", visible=False)
+    import numpy as np
+    for i, (label, size_b, key, comp) in enumerate(tiers):
+        y = len(tiers) - i
+        ax.barh(y, np.log2(size_b), height=0.62, color=COLORS[key],
+                alpha=1.0 if i > 1 else 0.45, edgecolor="white", linewidth=0.8)
+        val = f"{size_b:g} B" if size_b >= 1 else f"{size_b:.2f} B"
+        ax.annotate(f"{val}  ({comp})", (np.log2(size_b), y), textcoords="offset points",
+                    xytext=(6, -2.6), fontsize=7.2, color="#40444a")
+        ax.annotate(label, (-0.15, y), ha="right", va="center", fontsize=7.6,
+                    color="#40444a", annotation_clip=False)
+    ax.set_yticks([])
+    ax.set_xticks([np.log2(v) for v in (4, 16, 64, 256)], ["4 B", "16 B", "64 B", "256 B"])
+    ax.set_xlim(0, 10.4)
+    ax.set_xlabel("stored bytes per 128-dim token (log scale)")
+    save(fig, "format_layout")
+
+
+# ---------------------------------------------------------------- fig: scale flip
 def fig_scale_flip():
-    scales = ["256 docs\nDocVQA slice", "6.7k docs\nsuite (10 sets)", "10,171 docs\nunique mixed", "25,000 docs\nstress"]
+    scales = ["256 docs\nDocVQA slice", "6.7k docs\nsuite (10 sets)", "10,171 docs\nunique mixed",
+              "25,000 docs\nstress"]
     series = [
         ("int4", [0.0093, 0.0048, 0.0152, None]),
         ("pool3", [-0.0133, -0.0024, 0.0112, 0.0238]),
@@ -72,10 +121,9 @@ def fig_scale_flip():
         ("ts", [0.0092, -0.0015, -0.0059, -0.0120]),
         ("u4", [0.0126, -0.0015, -0.0077, -0.0135]),
     ]
-    # suite-level 95% CIs from the paired bootstrap (significance-suite.json)
     suite_ci = {"ts": (-0.0026, -0.0004), "pool2": (-0.0040, -0.0003), "pool3": (-0.0057, -0.0017),
                 "int4": (0.0014, 0.0054)}
-    fig, ax = plt.subplots(figsize=(5.4, 3.2))
+    fig, ax = plt.subplots(figsize=(5.6, 3.3))
     x = list(range(len(scales)))
     ax.axhspan(-0.0005, 0.0005, color="#9aa1a9", alpha=0.14, lw=0)
     ax.axhline(0, color="#5c6672", linewidth=0.9, linestyle=(0, (4, 3)))
@@ -85,68 +133,79 @@ def fig_scale_flip():
         ax.plot(xs, vs, "-", color=COLORS[key], linewidth=1.5, zorder=2)
         for xi, vi in zip(xs, vs):
             _mark(ax, xi, vi, key, size=30)
+        end_x, end_v = xs[-1], vs[-1]
+        ax.annotate(f"{end_v:+.4f}", (end_x, end_v), textcoords="offset points",
+                    xytext=(8, -2.5), fontsize=6.6, color=COLORS[key], fontweight="bold")
         if key in suite_ci:
             lo, hi = suite_ci[key]
             ax.plot([1, 1], [lo, hi], color=COLORS[key], linewidth=2.6, alpha=0.32,
                     solid_capstyle="round", zorder=1)
-    ax.text(3.02, 0.0012, "= plain binary", fontsize=7, color="#5c6672", ha="right")
+    ax.text(2.55, 0.0012, "= plain binary", fontsize=7, color="#5c6672", ha="right")
     ax.set_xticks(x, scales, fontsize=7.5)
-    ax.set_xlim(-0.2, 3.2)
+    ax.set_xlim(-0.2, 3.62)
     ax.set_ylabel(r"$\Delta$ NDCG@10 relative to plain binary")
     handles = [Line2D([], [], marker=MARKERS[k], linestyle="-", color=COLORS[k],
                       markersize=5, label=LABELS[k]) for k, _ in series]
     ax.legend(handles=handles, fontsize=7, ncol=2, loc="upper left", handlelength=1.6,
               columnspacing=1.0, borderaxespad=0.1)
-    fig.savefig(OUT / "scale_flip.pdf")
+    save(fig, "scale_flip")
 
 
-def _final_rows():
-    data = json.loads((RAW / "paper-unique-10k-final.json").read_text())
-    return {r["implementation"]: r for r in data["results"] if not r.get("status") or r["status"] == "ok"}
-
-
+# ---------------------------------------------------------------- fig: pareto
 def fig_pareto_10k():
     rows = _final_rows()
     pts = [
         ("dense", "dense_fp16_vectorized", 2.0, "dense fp16", (8, -18, "left")),
         ("int4", "bitmax_int4_dp4a", 8.0, "int4+dp4a", (0, 9, "center")),
         ("ts", "bitmax_binary_token_scale", 28.4, "fp16 scales", (-8, -14, "center")),
-        ("u4", "bitmax_binary_token_scale_u4", 31.0, "u4 scales", (-34, 2, "center")),
-        ("binary", "bitmax_binary", 32.0, "binary", (16, 7, "center")),
+        ("u4", "bitmax_binary_token_scale_u4", 31.0, "u4 scales", (-36, 2, "center")),
+        ("binary", "bitmax_binary", 32.0, "binary", (18, 7, "center")),
         ("pool2", "bitmax_pooled_binary", 63.9, "pool2", (0, -15, "center")),
         ("pool3", "bitmax_pooled_binary3", 95.9, "pool3", (0, 9, "center")),
     ]
     dense_y = rows["dense_fp16_vectorized"]["ndcg_at_10"]
-    fig, ax = plt.subplots(figsize=(5.4, 3.3))
+    fig, ax = plt.subplots(figsize=(5.6, 3.4))
     ax.axhspan(dense_y - 0.01, dense_y, color="#008300", alpha=0.07, lw=0)
     ax.axhline(dense_y, color="#5c6672", linewidth=0.9, linestyle=(0, (4, 3)))
     ax.text(126, dense_y + 0.0012, "dense fp16", fontsize=7, color="#5c6672", ha="right")
-    ax.text(13, dense_y - 0.0093, "within 0.01 of dense", fontsize=7, color="#3d7a3d",
+    ax.text(13.5, dense_y - 0.0093, "within 0.01 of dense", fontsize=7, color="#3d7a3d",
             ha="left", style="italic")
+    # pareto-efficient frontier among measured points (fast-plaid, int4, pool3)
+    frontier = [(3.4, rows["fast_plaid"]["ndcg_at_10"]),
+                (8.0, rows["bitmax_int4_dp4a"]["ndcg_at_10"]),
+                (95.9, rows["bitmax_pooled_binary3"]["ndcg_at_10"])]
+    fx, fy = [], []
+    for i, (cx, cy) in enumerate(frontier):
+        if i:
+            fx.append(cx); fy.append(frontier[i - 1][1])
+        fx.append(cx); fy.append(cy)
+    ax.plot(fx, fy, color="#b9bec5", linewidth=1.1, linestyle="-", zorder=1)
+    ax.text(17, 0.5035, "efficient frontier", fontsize=6.6, color="#8a919a", rotation=-4)
     for key, impl, comp, label, (dx, dy, ha) in pts:
         row = rows[impl]
         y = row["ndcg_at_10"]
         lat = row["latency_ms"] / 1000
         _mark(ax, comp, y, key, size=52)
-        ax.annotate(f"{label}\n{lat:.2f} s", (comp, y), textcoords="offset points",
-                    xytext=(dx, dy if dy > 0 else dy - 8), ha=ha, fontsize=6.8,
-                    color=COLORS[key], fontweight="bold", linespacing=1.1)
+        ax.annotate(f"{label}\n{y:.4f} · {lat:.2f} s", (comp, y), textcoords="offset points",
+                    xytext=(dx, dy if dy > 0 else dy - 8), ha=ha, fontsize=6.6,
+                    color=COLORS[key], fontweight="bold", linespacing=1.15)
     fp = rows.get("fast_plaid")
     if fp:
         _mark(ax, 3.4, fp["ndcg_at_10"], "ext", size=52)
-        ax.annotate("fast-plaid\n(latency n/c)", (3.4, fp["ndcg_at_10"]), textcoords="offset points",
-                    xytext=(0, 9), ha="center", fontsize=6.8, color=COLORS["ext"],
-                    fontweight="bold", linespacing=1.1)
+        ax.annotate(f"fast-plaid\n{fp['ndcg_at_10']:.4f} · lat. n/c", (3.4, fp["ndcg_at_10"]),
+                    textcoords="offset points", xytext=(2, 9), ha="center", fontsize=6.6,
+                    color=COLORS["ext"], fontweight="bold", linespacing=1.15)
     ax.set_xscale("log")
     ax.set_xticks([2, 4, 8, 16, 32, 64, 128], ["2×", "4×", "8×", "16×", "32×", "64×", "128×"])
     ax.minorticks_off()
     ax.set_xlabel("compression vs. fp32 storage (log scale)")
     ax.set_ylabel("NDCG@10")
-    ax.set_ylim(0.462, 0.53)
+    ax.set_ylim(0.462, 0.532)
     ax.set_xlim(1.7, 135)
-    fig.savefig(OUT / "pareto_10k.pdf")
+    save(fig, "pareto_10k")
 
 
+# ---------------------------------------------------------------- fig: latency
 def fig_latency_10k():
     rows = _final_rows()
     dense_v = rows["dense_fp16_vectorized"]["latency_ms"]
@@ -160,7 +219,7 @@ def fig_latency_10k():
         ("pool3 binary", "bitmax_pooled_binary3", "pool3", 1.0, True),
         ("pool2 binary", "bitmax_pooled_binary", "pool2", 1.0, True),
     ]
-    fig, ax = plt.subplots(figsize=(5.4, 2.9))
+    fig, ax = plt.subplots(figsize=(5.6, 2.95))
     ax.grid(axis="y", visible=False)
     for i, (label, impl, key, alpha, speedup) in enumerate(order):
         v = rows[impl]["latency_ms"] / 1000
@@ -178,12 +237,13 @@ def fig_latency_10k():
     ax.set_xticks([1, 10, 100], ["1 s", "10 s", "100 s"])
     ax.minorticks_off()
     ax.set_xlabel("latency, 256 queries × 10,171 documents (log scale)")
-    fig.savefig(OUT / "latency_10k.pdf")
+    save(fig, "latency_10k")
 
 
+# ------------------------------------------------------- fig: per-dataset deltas
 def fig_per_dataset():
-    keys = [("dense_fp16_baseline", "dense"), ("int4_int8q_dp4a", "int4"),
-            ("bitmax_binary", "binary"), ("pool3_binary", "pool3")]
+    """Delta-from-dense per dataset: differences readable at every magnitude."""
+    keys = [("int4_int8q_dp4a", "int4"), ("bitmax_binary", "binary"), ("pool3_binary", "pool3")]
     natural, synthetic = [], []
     for path in sorted(RAW.glob("paper-vidore-*colqwen2*-r3.json")):
         data = json.loads(path.read_text())
@@ -192,47 +252,51 @@ def fig_per_dataset():
         if p3.exists():
             rows.update({r["implementation"]: r for r in json.loads(p3.read_text())["results"]
                          if r["implementation"] != "dense_fp16_baseline"})
-        stem = path.stem.replace("paper-vidore-", "").replace("-colqwen2", "").replace("-r3", "")
+        stem = path.stem.replace("paper-vidore-", "")
         pretty = {
-            "docvqa-test-limit500": "DocVQA (500)", "infovqa-test-limit500": "InfoVQA (500)",
-            "arxivqa-test-limit500": "ArxivQA (500)", "tabfquad-test-limit500": "TabFQuAD (280 q)",
-            "tatdqa-test-limit1663": "TAT-DQA (1,663 q)",
-            "syntheticdocqa-ai-limit1000": "SynthDocQA / AI",
-            "syntheticdocqa-energy-limit1000": "SynthDocQA / Energy",
-            "syntheticdocqa-government-limit1000": "SynthDocQA / Gov.",
-            "syntheticdocqa-healthcare-limit1000": "SynthDocQA / Health",
-            "syntheticdocqa-shift-limit1000": "SynthDocQA / Shift",
+            "docvqa-test-colqwen2-limit500-r3": "DocVQA",
+            "infovqa-test-colqwen2-limit500-r3": "InfoVQA",
+            "arxivqa-test-colqwen2-limit500-r3": "ArxivQA",
+            "tabfquad-test-colqwen2-limit500-r3": "TabFQuAD",
+            "tatdqa-test-colqwen2-limit1663-r3": "TAT-DQA",
+            "syntheticdocqa-ai-colqwen2-limit1000-r3": "SynthDocQA/AI",
+            "syntheticdocqa-energy-colqwen2-limit1000-r3": "SynthDocQA/Energy",
+            "syntheticdocqa-government-colqwen2-limit1000-r3": "SynthDocQA/Gov.",
+            "syntheticdocqa-healthcare-colqwen2-limit1000-r3": "SynthDocQA/Health",
+            "syntheticdocqa-shift-colqwen2-limit1000-r3": "SynthDocQA/Shift",
         }.get(stem, stem)
-        (synthetic if "Synth" in pretty else natural).append((pretty, rows))
-    natural.sort(key=lambda t: -t[1]["dense_fp16_baseline"]["ndcg_at_10"])
-    synthetic.sort(key=lambda t: -t[1]["dense_fp16_baseline"]["ndcg_at_10"])
+        dense = rows["dense_fp16_baseline"]["ndcg_at_10"]
+        deltas = {ck: rows[k]["ndcg_at_10"] - dense for k, ck in keys if k in rows}
+        (synthetic if "Synth" in pretty else natural).append((pretty, dense, deltas))
+    natural.sort(key=lambda t: -t[1])
+    synthetic.sort(key=lambda t: -t[1])
     groups = natural + synthetic
-    fig, ax = plt.subplots(figsize=(5.4, 3.5))
+    fig, ax = plt.subplots(figsize=(5.6, 3.6))
     ax.grid(axis="y", visible=False)
+    ax.axvline(0, color="#5c6672", linewidth=0.9, linestyle=(0, (4, 3)))
     n = len(groups)
     gap = 0.9
-    for i, (name, rows) in enumerate(groups):
+    for i, (name, dense, deltas) in enumerate(groups):
         y = n - i + (gap if i < len(natural) else 0)
-        vals = [rows[k]["ndcg_at_10"] for k, _ in keys if k in rows]
-        ax.plot([min(vals), max(vals)], [y, y], color="#d5d8dc", linewidth=2.4,
+        vals = list(deltas.values())
+        ax.plot([min(vals + [0]), max(vals + [0])], [y, y], color="#e6e8eb", linewidth=2.2,
                 solid_capstyle="round", zorder=1)
-        for k, ckey in keys:
-            if k in rows:
-                _mark(ax, rows[k]["ndcg_at_10"], y, ckey, size=26)
-        ax.annotate(name, (-0.015, y), ha="right", va="center", fontsize=7.4,
-                    color="#40444a", annotation_clip=False)
-    ax.axhline(n - len(natural) + 1 + gap / 2, color="#e3e5e8", linewidth=0.7)
-    ax.text(1.0, n - len(natural) + 1 + gap / 2 + 0.15, "hard synthetic query sets",
-            fontsize=6.6, color="#8a919a", ha="right", style="italic")
+        for ck, v in deltas.items():
+            _mark(ax, v, y, ck, size=30)
+        ax.annotate(f"{name}   (dense {dense:.3f})", (-0.0255, y), ha="right", va="center",
+                    fontsize=7.2, color="#40444a", annotation_clip=False)
+    ax.text(0.0005, n + gap + 0.75, "better than dense →", fontsize=6.6, color="#8a919a")
+    ax.text(-0.0005, n + gap + 0.75, "← worse", fontsize=6.6, color="#8a919a", ha="right")
     ax.set_yticks([])
-    ax.set_xlim(-0.02, 1.0)
-    ax.set_xlabel("NDCG@10")
+    ax.set_xlim(-0.025, 0.011)
+    ax.set_xlabel(r"$\Delta$ NDCG@10 vs. dense fp16 (same dataset)")
     handles = [Line2D([], [], marker=MARKERS[c], linestyle="", color=COLORS[c], markersize=5,
                       label=LABELS[c]) for _, c in keys]
-    ax.legend(handles=handles, fontsize=7, loc="center right", handlelength=1.2)
-    fig.savefig(OUT / "per_dataset.pdf")
+    ax.legend(handles=handles, fontsize=7, loc="lower left", handlelength=1.2)
+    save(fig, "per_dataset")
 
 
+# ---------------------------------------------------------------- fig: forest
 def fig_forest():
     data = json.loads((RAW / "significance-suite.json").read_text())["pairs"]
     pretty = {
@@ -243,7 +307,7 @@ def fig_forest():
     color_of = {"int4+dp4a": "int4", "binary": "binary", "pool2": "pool2", "pool3": "pool3",
                 "fp16 scales": "ts", "u4 scales": "u4", "dense": "dense"}
     rows = [(f"{pretty[p['a']]}  vs  {pretty[p['b']]}", p, color_of[pretty[p["a"]]]) for p in data]
-    fig, ax = plt.subplots(figsize=(5.4, 2.9))
+    fig, ax = plt.subplots(figsize=(5.6, 0.28 * len(rows) + 0.7))
     ax.grid(axis="y", visible=False)
     ax.axvline(0, color="#5c6672", linewidth=0.9, linestyle=(0, (4, 3)))
     for i, (label, p, ckey) in enumerate(rows):
@@ -259,13 +323,14 @@ def fig_forest():
     ax.set_yticks([])
     ax.set_xlim(-0.0122, 0.0085)
     ax.set_xlabel(r"paired $\Delta$ NDCG@10 with 95% bootstrap CI  (8,443 queries, full suite)")
-    fig.savefig(OUT / "forest.pdf")
+    save(fig, "forest")
 
 
 if __name__ == "__main__":
+    fig_format_layout()
     fig_scale_flip()
     fig_pareto_10k()
     fig_latency_10k()
     fig_per_dataset()
     fig_forest()
-    print("figures written to", OUT)
+    print("figures written to", OUT_PDF, "and", OUT_PNG)

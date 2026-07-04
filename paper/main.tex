@@ -1,20 +1,20 @@
-\documentclass[11pt]{article}
-\usepackage[margin=1.1in]{geometry}
+\documentclass{article}
+
+\usepackage{arxiv}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
 \usepackage{graphicx}
 \usepackage{booktabs}
 \usepackage{amsmath}
 \usepackage{amssymb}
 \usepackage{multirow}
 \usepackage[numbers]{natbib}
-\usepackage[hidelinks]{hyperref}
 \usepackage{microtype}
 \usepackage{xcolor}
 \usepackage{newtxtext,newtxmath}
 \usepackage{caption}
 \captionsetup{font=small,labelfont=bf,width=.92\linewidth}
-\usepackage{titlesec}
-\titlespacing*{\section}{0pt}{1.1em}{0.5em}
-\titlespacing*{\subsection}{0pt}{0.9em}{0.35em}
+\usepackage[hidelinks]{hyperref}
 
 \newcommand{\bitmax}{\textsc{bitmax}}
 \newcommand{\ndcg}{NDCG@10}
@@ -23,9 +23,12 @@
 A Measured Accuracy--Size--Latency Frontier}
 
 \author{Arya Manjaramkar\\
-\normalsize\texttt{arya@e3group.ai}}
+\texttt{arya@e3group.ai}}
 
 \date{July 2026}
+
+\renewcommand{\headeright}{Preprint}
+\renewcommand{\undertitle}{Preprint}
 
 \begin{document}
 \maketitle
@@ -72,9 +75,9 @@ question empirically for visual late-interaction retrieval, with three
 contributions:
 
 \begin{enumerate}
-\item \textbf{A measured five-tier frontier} --- binary signs ($32\times$),
-binary with fp16 or 4-bit-log per-token scales ($28.4\times$/$31\times$),
-symmetric int4 ($8\times$), and token-pooled binary
+\item \textbf{A measured five-tier frontier} (Figure~\ref{fig:formats}) ---
+binary signs ($32\times$), binary with fp16 or 4-bit-log per-token scales
+($28.4\times$/$31\times$), symmetric int4 ($8\times$), and token-pooled binary
 ($63.9\times$/$95.9\times$) --- evaluated jointly on quality, storage, and
 wall-clock latency with exact, parity-tested CUDA kernels, including a dp4a
 int8-query kernel that accelerates int4 scoring $4.2\times$ with bit-identical
@@ -119,7 +122,20 @@ factors 2--3 jointly with bit-level quantization and find the combination
 \section{Compression Tiers and Kernels}
 
 \subsection{Storage formats}
-All tiers store per-document token matrices $X \in \mathbb{R}^{n_d \times 128}$ under MaxSim scoring $s(q,d)=\sum_i \max_j \langle q_i, x_j\rangle$.
+All tiers store per-document token matrices $X \in \mathbb{R}^{n_d \times 128}$
+under MaxSim scoring $s(q,d)=\sum_i \max_j \langle q_i, x_j\rangle$.
+Figure~\ref{fig:formats} shows the exact byte budget of every format.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=.8\linewidth]{figures/format_layout.pdf}
+\caption{Stored bytes per 128-dimensional token for every format in this
+paper (log scale). $^{\dagger}$Pooled tiers store 16 bytes per \emph{cluster};
+the effective per-original-token budget shown here divides by the pooling
+factor. Compression factors are measured on the 10k corpus, including offsets
+and scale side-information.}
+\label{fig:formats}
+\end{figure}
 
 \textbf{Binary (32$\times$).} $x_j \mapsto \mathrm{sign}(x_j)$ packed to 16
 bytes per token; scoring is asymmetric (fp32 query against $\pm1$ documents).
@@ -130,7 +146,8 @@ dot product \emph{before} the per-query-token max. Scales are stored as fp16
 (2 bytes), 16 log-spaced levels (4 bits, \texttt{u4}), or 256 log-spaced
 levels (1 byte, \texttt{u8}). Sixteen levels are statistically
 indistinguishable from fp16 (paired $\Delta = -0.00003$, $p{=}1.0$ over
-8{,}443 queries), so \texttt{u4} strictly dominates \texttt{u8}.
+8{,}443 queries; Table~\ref{tab:significance}), so \texttt{u4} strictly
+dominates \texttt{u8}.
 
 \textbf{Symmetric int4 (8$\times$).} Two signed 4-bit values per byte with one
 per-tensor scale. A per-token int4 scale variant was evaluated in exact-kernel
@@ -146,15 +163,16 @@ binary.
 Documents are GPU-resident (packed bits, offsets, optional scale vectors).
 Three scoring kernels are routed by corpus shape: a generic bit-unpack kernel;
 an unrolled dim-128 kernel, which a tokens-per-document gate (threshold 256,
-determined by a warm-up$+$median microbenchmark sweep) extends from its
-original $\le$128-document restriction to all long-document corpora for a
-$\sim$2$\times$ gain at every corpus size tested; and a dp4a kernel for int4
-that quantizes queries to int8 on-device (per-token symmetric scales, applied
-after the max --- rank-safe), permutes them to match the nibble interleave,
-and accumulates with \texttt{\_\_dp4a}, yielding $4.2\times$ over fp32-query
-int4 scoring with quality identical to four decimals. All kernels preserve
-exact empty-document semantics and deterministic lower-index tie-breaking,
-verified by parity tests against CPU references.
+determined by a warm-up$+$median microbenchmark sweep;
+Table~\ref{tab:kernels}) extends from its original $\le$128-document
+restriction to all long-document corpora for a $\sim$2$\times$ gain at every
+corpus size tested; and a dp4a kernel for int4 that quantizes queries to int8
+on-device (per-token symmetric scales, applied after the max --- rank-safe),
+permutes them to match the nibble interleave, and accumulates with
+\texttt{\_\_dp4a}, yielding $4.2\times$ over fp32-query int4 scoring with
+quality identical to four decimals. All kernels preserve exact empty-document
+semantics and deterministic lower-index tie-breaking, verified by parity tests
+against CPU references.
 
 \section{Experimental Setup}
 
@@ -190,9 +208,10 @@ over the suite with $10^4$-sample bootstrap CIs and two-sided sign tests.
 \caption{Full ViDoRe suite (10 datasets, complete test splits, 8{,}443
 queries): mean \ndcg{}, paired delta vs.\ dense fp16 with 95\% bootstrap CI,
 and storage compression vs.\ fp32. Latency is the suite-mean batched query-set
-time on an RTX 4090.}
+time on an RTX 4090. Exact per-dataset values are in
+Table~\ref{tab:perdataset-full} (Appendix~\ref{app:exact}).}
 \label{tab:suite}
-\footnotesize
+\small
 \begin{tabular}{lrrrr}
 \toprule
 tier & \ndcg{} & paired $\Delta$ vs.\ dense [CI$_{95}$] & compr. & latency \\
@@ -200,9 +219,9 @@ tier & \ndcg{} & paired $\Delta$ vs.\ dense [CI$_{95}$] & compr. & latency \\
 dense fp16 & 0.4559 & --- & $2\times$ & 6.0\,s$^{\dagger}$ \\
 int4 $+$ dp4a & 0.4545 & $-0.0018$ $[-0.0030,-0.0006]$ & $8\times$ & 0.55\,s \\
 binary & 0.4497 & $-0.0052$ $[-0.0071,-0.0033]$ & $32\times$ & 0.34\,s \\
-pool2 binary & 0.4485 & $-0.0073$ & $63.9\times$ & 0.22\,s \\
-fp16 token scales & 0.4484 & $-0.0067$ & $28.4\times$ & 0.34\,s \\
-u4 token scales & 0.4482 & $-0.0067$ & $31.0\times$ & 0.34\,s \\
+pool2 binary & 0.4485 & $-0.0073$ $[-0.0095,-0.0051]$ & $63.9\times$ & 0.22\,s \\
+fp16 token scales & 0.4484 & $-0.0067$ $[-0.0088,-0.0047]$ & $28.4\times$ & 0.34\,s \\
+u4 token scales & 0.4482 & $-0.0067$ $[-0.0088,-0.0047]$ & $31.0\times$ & 0.34\,s \\
 pool3 binary & 0.4473 & $-0.0089$ $[-0.0112,-0.0066]$ & $95.9\times$ & 0.22\,s \\
 \bottomrule
 \multicolumn{5}{l}{\footnotesize $^{\dagger}$vectorized dense at the 10k
@@ -210,20 +229,38 @@ corpus; suite-mean loop-dense is reported in the artifact ledger.}
 \end{tabular}
 \end{table}
 
-Table~\ref{tab:suite} and Figures~\ref{fig:perdataset}
-and~\ref{fig:forest} summarize the suite.
+\begin{table}[t]
+\centering
+\caption{All pairwise statistical comparisons over the pooled suite (8{,}443
+paired queries): mean per-query $\Delta$\ndcg{}, $10^4$-sample bootstrap 95\%
+CI, win/loss/tie counts, and two-sided sign-test $p$-value. Positive favors
+the first-named method. Figure~\ref{fig:forest} plots the same data.}
+\label{tab:significance}
+\small
+\input{tables/significance}
+\end{table}
+
+Table~\ref{tab:suite} summarizes the suite; Table~\ref{tab:significance} and
+Figure~\ref{fig:forest} give every pairwise comparison with exact effect
+sizes, confidence intervals, win/loss counts, and $p$-values.
 int4$+$dp4a is the strongest compressed tier everywhere: its paired deficit
 versus dense is $-0.0018$ \ndcg{} --- statistically detectable
 ($p{=}0.005$) but far below any practical significance threshold --- and it
 \emph{significantly outperforms} binary ($+0.0034$, $p{=}10^{-4}$). The four
 SyntheticDocQA domains score near 0.10 for every method including dense,
-diluting suite means uniformly without affecting comparisons.
+diluting suite means uniformly without affecting comparisons;
+Figure~\ref{fig:perdataset} therefore plots per-dataset \emph{deltas} against
+dense, which are readable at every magnitude, and
+Table~\ref{tab:perdataset-full} records the absolute values.
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=.78\linewidth]{figures/per_dataset.pdf}
-\caption{Per-dataset \ndcg{} for dense fp16 and three representative tiers,
-full test splits. Marks within a row share the same corpus and queries.}
+\includegraphics[width=.82\linewidth]{figures/per_dataset.pdf}
+\caption{Per-dataset quality deltas versus dense fp16 (full test splits,
+ColQwen2). Each row is one dataset scored on an identical corpus and query
+set; the dense absolute \ndcg{} is given in the row label. Natural-document
+datasets (top block) separate the tiers; the SyntheticDocQA domains (bottom
+block) are within $\pm 0.004$ of dense for every tier.}
 \label{fig:perdataset}
 \end{figure}
 
@@ -242,9 +279,11 @@ intervals, pooled over the full suite (8{,}443 queries; two-sided sign tests;
 \centering
 \includegraphics[width=.8\linewidth]{figures/scale_flip.pdf}
 \caption{Quality of each tier relative to plain binary across four corpus
-scales. Token-scale tiers win only on the smallest corpus; pooled tiers
-strengthen monotonically with scale. Each point compares methods on an
-identical corpus; corpora differ between points.}
+scales, with terminal values annotated. Vertical bands at the suite point are
+95\% bootstrap CIs from Table~\ref{tab:significance}. Token-scale tiers win
+only on the smallest corpus; pooled tiers strengthen monotonically with
+scale. Each point compares methods on an identical corpus; corpora differ
+between points.}
 \label{fig:scaleflip}
 \end{figure}
 
@@ -268,45 +307,35 @@ by corpus size}, and small-slice benchmarks actively mislead tier selection.
 \centering
 \includegraphics[width=.8\linewidth]{figures/pareto_10k.pdf}
 \caption{Quality versus compression on the 10{,}171-document unique corpus
-(256 queries, repeat 3). The shaded band marks $0.01$ \ndcg{} below dense.
-FAISS mean-pooling (746$\times$, \ndcg{} 0.036) is omitted for scale.}
+(256 queries, repeat 3), each point annotated with exact \ndcg{} and
+query-set latency. The step line traces the efficient frontier among measured
+systems; the shaded band marks $0.01$ \ndcg{} below dense. FAISS mean-pooling
+(746$\times$, \ndcg{} 0.036) is omitted for scale.}
 \label{fig:pareto}
 \end{figure}
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=.75\linewidth]{figures/latency_10k.pdf}
-\caption{Query-set latency at 10k documents (log scale). Faded marks are
-superseded implementations retained for reference: the loop-bound dense
-baseline and the fp32-query int4 kernel.}
+\includegraphics[width=.78\linewidth]{figures/latency_10k.pdf}
+\caption{Query-set latency at 10k documents (log scale) with speedups over
+the vectorized dense baseline. Faded marks are superseded implementations
+retained for reference: the loop-bound dense baseline and the fp32-query int4
+kernel.}
 \label{fig:latency}
 \end{figure}
 
 \begin{table}[t]
 \centering
 \caption{The 10{,}171-document unique mixed corpus (256 queries, repeat~3,
-RTX~4090). Speedup is relative to the vectorized dense baseline. fast-plaid
-latency is not cited (Section~7); FAISS mean-pooling collapses because
-single-vector pooling discards the late-interaction structure.}
+RTX~4090): \ndcg{}, recall@10, MRR@10, best-of-3 query-set latency, speedup
+vs.\ the vectorized dense baseline, and compression vs.\ fp32.
+$^{\ast}$fast-plaid latency is not cited (n/c): across three runs at identical
+tuned parameters it varied 23.5--820\,s (Section~\ref{sec:limitations}).
+FAISS mean-pooling collapses because single-vector pooling discards the
+late-interaction structure.}
 \label{tab:tenk}
-\footnotesize
-\begin{tabular}{lrrrrr}
-\toprule
-implementation & \ndcg{} & recall@10 & latency & speedup & compr. \\
-\midrule
-dense fp16 (loop impl.) & 0.5068 & 0.6016 & 166\,s & --- & $2\times$ \\
-dense fp16 (vectorized) & 0.5068 & 0.6016 & 6.04\,s & $1.0\times$ & $2\times$ \\
-fast-plaid (tuned) & 0.5117 & 0.6133 & n/c & n/c & $3.4\times$ \\
-FAISS GPU mean-pool & 0.0355 & 0.0508 & 0.004\,s & --- & $746\times$ \\
-\midrule
-\bitmax{} int4$+$dp4a & 0.5008 & 0.6055 & 1.12\,s & $5.4\times$ & $8\times$ \\
-\bitmax{} binary & 0.4856 & 0.5898 & 0.68\,s & $8.8\times$ & $32\times$ \\
-\bitmax{} fp16 token scales & 0.4797 & 0.5781 & 0.70\,s & $8.6\times$ & $28.4\times$ \\
-\bitmax{} u4 token scales & 0.4779 & 0.5781 & 0.70\,s & $8.6\times$ & $31\times$ \\
-\bitmax{} pool2 binary & 0.4864 & 0.5938 & 0.45\,s & $13.4\times$ & $63.9\times$ \\
-\bitmax{} pool3 binary & 0.4968 & 0.6133 & 0.46\,s & $13.1\times$ & $95.9\times$ \\
-\bottomrule
-\end{tabular}
+\small
+\input{tables/tenk}
 \end{table}
 
 Table~\ref{tab:tenk} and Figures~\ref{fig:pareto} and~\ref{fig:latency}
@@ -316,16 +345,16 @@ int4$+$dp4a reaches \ndcg{} 0.5008 (dense: 0.5068) in 1.12\,s
 0.46\,s ($13.1\times$); binary 0.4856 at $32\times$ in 0.68\,s ($8.8\times$).
 Single-vector baselines collapse (FAISS GPU mean-pooling: \ndcg{} 0.036),
 confirming that late interaction is doing the retrieval work.
-\texttt{fast-plaid} matches dense quality (0.5117) at $3.4\times$ compression;
-its latency varied from 23\,s to 820\,s across configurations and environments
-in our measurements, so we cite its quality only. Notably, pool3 ties
-fast-plaid's recall@10 (0.6133) at $28\times$ less storage.
+\texttt{fast-plaid} matches dense quality (0.5117) at $3.4\times$ compression.
+Notably, pool3 ties fast-plaid's recall@10 (0.6133) at $28\times$ less
+storage.
 
 \subsection{Generality across embedding models}
 Replicating four datasets with ColPali-v1.3 preserves the tier ordering
-(dense 0.8208 mean; int4$+$dp4a 0.8122; binary 0.8069; tiers within 0.015),
-indicating the frontier is a property of the representation family rather
-than one model.
+(dense 0.8208 mean; int4$+$dp4a 0.8122; binary 0.8069; all tiers within
+0.015 of dense), indicating the frontier is a property of the representation
+family rather than one model. Exact values are in
+Table~\ref{tab:perdataset-colpali}.
 
 \section{Negative Results}
 \label{sec:negative}
@@ -349,21 +378,28 @@ match scores. (vi)~\emph{Per-token int4 scales}: $-0.011$ \ndcg{} in
 exact-semantics simulation.
 
 \section{Limitations}
+\label{sec:limitations}
 All latency measurements use one GPU model (RTX 4090); kernel-level findings
 (memory-boundedness of the binary path, dp4a gains) may shift on other
 architectures. Per-query significance data covers the suite but not the 10k
-comparison (256 queries there). The fast-plaid latency instability we observed
-deserves its own investigation before any comparative latency claim. Our
-corpora are visual documents; transfer to text-only ColBERT corpora is
-unverified. The scale-dependence mechanism is supported but not proven by our
-attribution analysis.
+comparison (256 queries there). fast-plaid latency proved
+environment-unstable in our measurements --- 23.5\,s, 171\,s, and 820\,s
+across three runs, two of which used identical tuned parameters
+(\texttt{nbits}=4, 4{,}096 full scores, 4 IVF probes) --- with index-build
+time co-varying (14.2\,s/29.8\,s/107.8\,s), while its quality stayed within
+0.5103--0.5119. We therefore cite its quality only; the instability deserves
+its own investigation before any comparative latency claim. Our corpora are
+visual documents; transfer to text-only ColBERT corpora is unverified. The
+scale-dependence mechanism is supported but not proven by our attribution
+analysis.
 
 \section*{Reproducibility Statement}
 Every reported number derives from a JSON artifact committed under
 \texttt{docs/\allowbreak benchmark\_results/\allowbreak raw/} in the
 \bitmax{} repository, including per-query metric vectors for all suite rows.
-Paper figures regenerate deterministically from those artifacts
-(\texttt{paper/\allowbreak make\_figures.py}); the statistical analysis is
+Paper figures and exact-value tables regenerate deterministically from those
+artifacts (\texttt{paper/\allowbreak make\_figures.py},
+\texttt{paper/\allowbreak make\_tables.py}); the statistical analysis is
 \texttt{benchmarks/\allowbreak significance.py} with a fixed seed. Embedding caches
 rebuild via \texttt{benchmarks/\allowbreak reproduce.py} recipes at batch size~1; kernel
 correctness is enforced by the \texttt{pytest -m cuda} parity suite. Total
@@ -429,5 +465,45 @@ B.~Clavi{\'e}, A.~Chaffin, and G.~Adams.
 \newblock \emph{arXiv:2409.14683}, 2024.
 
 \end{thebibliography}
+
+\appendix
+
+\section{Exact Per-Dataset Values}
+\label{app:exact}
+
+\begin{table}[h]
+\centering
+\caption{Exact \ndcg{} for every tier on every ViDoRe dataset, ColQwen2
+embeddings, full test splits, repeat-3. Generated from the committed artifact
+ledger by \texttt{paper/make\_tables.py}.}
+\label{tab:perdataset-full}
+\footnotesize
+\setlength{\tabcolsep}{3.6pt}
+\input{tables/per_dataset_colqwen2}
+\end{table}
+
+\begin{table}[h]
+\centering
+\caption{ColPali-v1.3 replication (four datasets, full test splits,
+repeat-3): the tier ordering of the main experiments is preserved on a second
+embedding model.}
+\label{tab:perdataset-colpali}
+\footnotesize
+\setlength{\tabcolsep}{3.6pt}
+\input{tables/per_dataset_colpali}
+\end{table}
+
+\section{Kernel Microbenchmarks}
+\label{app:kernels}
+
+\begin{table}[h]
+\centering
+\caption{Generic vs.\ unrolled dim-128 binary kernel across corpus shapes
+(RTX 4090, warm-up$+$median). The unrolled kernel wins at every shape with
+$\ge$\,256 tokens per document, which sets the routing gate's threshold.}
+\label{tab:kernels}
+\small
+\input{tables/kernels}
+\end{table}
 
 \end{document}

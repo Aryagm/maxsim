@@ -1,0 +1,11 @@
+\begin{tabular}{l r r r r r}
+\toprule
+shape & docs & tokens/doc & generic (ms) & unrolled (ms) & speedup \\
+\midrule
+docvqa\_like\_256 & 256 & 750 & 8.55 & 4.30 & 1.99$\times$ \\
+docs\_1000\_long & 1,000 & 750 & 5.87 & 2.91 & 2.02$\times$ \\
+docs\_5000\_long & 5,000 & 750 & 25.99 & 14.17 & 1.83$\times$ \\
+rerank\_512\_short & 512 & 128 & 2.16 & 2.52 & 0.86$\times$ \\
+rerank\_4096\_short & 4,096 & 32 & 3.62 & 5.10 & 0.71$\times$ \\
+\bottomrule
+\end{tabular}

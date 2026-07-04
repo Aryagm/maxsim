@@ -29,19 +29,26 @@ one RTX 4090, repeat 3
 | pool2 binary | 0.4864 | 0.5938 | 0.45 s | 63.9× |
 | **pool3 binary** (`max_compression`) | **0.4968** | **0.6133** | **0.46 s** | **95.9×** |
 
+<p align="center">
+  <img src="docs/figures/pareto_10k.png" width="620" alt="Quality vs compression at 10k documents, with the efficient frontier and exact NDCG/latency annotations per tier">
+</p>
+
 For calibration: FAISS GPU mean-pooling (single-vector) collapses to NDCG@10
 0.036 on this corpus, and a PLAID-style baseline (`fast-plaid`) matches dense
 quality at 3.4× compression — pool3 ties its recall@10 at 28× less storage.
 
 Full ViDoRe suite (10 datasets, complete test splits, 8,443 queries), paired
-per-query analysis with bootstrap CIs
-(`benchmark-results/significance-suite.json`):
+per-query analysis with 10k-sample bootstrap CIs and two-sided sign tests
+(`docs/benchmark_results/raw/significance-suite.json`):
 
-| tier | paired ΔNDCG@10 vs dense | 95% CI |
-| --- | ---: | ---: |
-| int4 + dp4a | −0.0018 | [−0.0030, −0.0006] |
-| binary | −0.0052 | [−0.0071, −0.0033] |
-| pool3 binary | −0.0089 | [−0.0112, −0.0066] |
+| tier | paired ΔNDCG@10 vs dense | 95% CI | sign-test p |
+| --- | ---: | ---: | ---: |
+| int4 + dp4a | −0.0018 | [−0.0030, −0.0006] | 0.005 |
+| binary | −0.0052 | [−0.0071, −0.0033] | 2×10⁻⁹ |
+| fp16 token scales | −0.0067 | [−0.0088, −0.0047] | 4×10⁻¹¹ |
+| u4 token scales | −0.0067 | [−0.0088, −0.0047] | 4×10⁻¹¹ |
+| pool2 binary | −0.0073 | [−0.0095, −0.0051] | 3×10⁻¹¹ |
+| pool3 binary | −0.0089 | [−0.0112, −0.0066] | 6×10⁻¹³ |
 
 All numbers derive from committed JSON artifacts with stored per-query
 metrics; see `paper/` for the full write-up and `docs/gpu_optimization.md`
@@ -89,6 +96,16 @@ per-token scales help below ~500 documents and hurt at 10k+; pooling
 strengthens with scale. When in doubt at scale, use `max_quality` or
 `max_compression`; on small corpora, `balanced`.
 
+<p align="center">
+  <img src="docs/figures/scale_flip.png" width="620" alt="Each tier's NDCG delta versus plain binary across four corpus scales: token scales invert from gain to loss, pooling strengthens monotonically">
+</p>
+
+Every format's exact byte budget per stored token:
+
+<p align="center">
+  <img src="docs/figures/format_layout.png" width="620" alt="Stored bytes per 128-dim token for each format, from 512 B fp32 down to 5.33 B pool3 binary">
+</p>
+
 ## What's inside
 
 - **Formats**: packed 1-bit signs (16 B/token at dim 128), optional per-token
@@ -114,8 +131,10 @@ strengthens with scale. When in doubt at scale, use `max_quality` or
   through the public SDK.
 - `benchmarks/significance.py` — paired bootstrap CIs + sign tests from the
   stored per-query vectors.
-- `paper/make_figures.py` — regenerates the paper's figures from the committed
-  ledger (`docs/benchmark_results/raw/`).
+- `paper/make_figures.py` / `paper/make_tables.py` — regenerate every figure
+  (PDF + README PNG) and every exact-value LaTeX table from the committed
+  ledger (`docs/benchmark_results/raw/`); no number in the paper is
+  hand-typed.
 - `python -m benchmarks.reproduce --suite ...` — canonical cache-building and
   comparison recipes. Embedding caches must be built at `--batch-size 1`
   (the builder is not batch-faithful; see docs). For fast rebuilds, run many
@@ -123,14 +142,17 @@ strengthens with scale. When in doubt at scale, use `max_quality` or
 
 Two honesty notes baked into the methodology: speedups are cited against the
 **vectorized** dense baseline (the naïve per-document loop overstates dense
-cost 27×), and fast-plaid latency is not cited because it varied 23–820 s
-across configurations in our environment while its quality stayed at parity.
+cost 27×), and fast-plaid latency is not cited because it varied 23.5–820 s
+across three runs — two at identical tuned parameters — while its quality
+stayed at parity (0.5103–0.5119).
 
 ## Paper
 
-`paper/main.tex` (+ `paper/make_figures.py`) — *Compression Tiers for
-Late-Interaction Visual Document Retrieval: A Measured Accuracy–Size–Latency
-Frontier*. Compiles with `tectonic main.tex` from `paper/`.
+`paper/main.tex` — *Compression Tiers for Late-Interaction Visual Document
+Retrieval: A Measured Accuracy–Size–Latency Frontier* — typeset on the
+arXiv preprint template, with all figures and exact-value tables generated
+from the artifact ledger by `paper/make_figures.py` and
+`paper/make_tables.py`. Compiles with `tectonic main.tex` from `paper/`.
 
 ## Status & limitations
 
