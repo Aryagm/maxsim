@@ -160,6 +160,7 @@ def _cached_dense_scores(dataset: RetrievalEmbeddings, input_path, baseline_devi
                 return np.ascontiguousarray(data["scores"], dtype=np.float32), float(data["latency_ms"])
     scores, latency = _time_call(lambda: _dense_fp16_scores(dataset, device=baseline_device), repeat=repeat)
     if cache_path is not None:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
         np.savez(cache_path, scores=np.ascontiguousarray(scores, dtype=np.float32), latency_ms=np.array(latency))
     return scores, latency
 
