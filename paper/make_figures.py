@@ -56,7 +56,7 @@ def fig_scale_flip():
     ax.axhline(0, color="#666", linewidth=0.9, linestyle="--")
     ax.text(len(scales) - 1.02, 0.0008, "plain binary", fontsize=7.5, color="#666", ha="right")
     ax.set_xticks(list(x), scales)
-    ax.set_ylabel(r"$\Delta$ NDCG@10 vs.\ plain binary")
+    ax.set_ylabel(r"$\Delta$ NDCG@10 vs. plain binary")
     ax.legend(frameon=False, fontsize=7.5, ncol=2, loc="upper left")
     fig.tight_layout()
     fig.savefig(OUT / "scale_flip.pdf")
@@ -82,8 +82,8 @@ def fig_pareto_10k():
     fig, ax = plt.subplots(figsize=(5.2, 3.2))
     ax.axhspan(dense_y - 0.01, dense_y, color="#008300", alpha=0.08, lw=0)
     ax.axhline(dense_y, color="#666", linewidth=0.9, linestyle="--")
-    offsets = {"ts": (0, -11), "u4": (0, 7), "binary": (0, -11), "pool2": (0, -11), "pool3": (0, 7),
-               "int4": (0, 7), "dense": (0, 7)}
+    offsets = {"ts": (-6, -13), "u4": (-28, 5), "binary": (14, 7), "pool2": (0, -13), "pool3": (0, 8),
+               "int4": (0, 8), "dense": (30, 8)}
     for key, impl, comp, label in pts:
         y = rows[impl]["ndcg_at_10"]
         ax.scatter([comp], [y], s=42, color=COLORS[key], zorder=3, edgecolor="white", linewidth=1)
@@ -129,7 +129,7 @@ def fig_latency_10k():
     ax.set_yticks([len(order) - i for i in range(len(order))], [o[0] for o in order], fontsize=8)
     ax.set_xscale("log")
     ax.set_xlim(0.3, 400)
-    ax.set_xlabel("latency for 256 queries × 10{,}171 documents (s, log)")
+    ax.set_xlabel("latency for 256 queries × 10,171 documents (s, log)")
     fig.tight_layout()
     fig.savefig(OUT / "latency_10k.pdf")
 
