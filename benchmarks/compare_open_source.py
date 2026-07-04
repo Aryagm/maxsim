@@ -82,6 +82,29 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
             )
             continue
 
+        if implementation == "dense_fp16_vectorized":
+            vec_scores, vec_latency, vec_latency_stats = _time_call(lambda: _dense_fp16_scores_vectorized(dataset, args.device), repeat=args.repeat)
+            _release_cuda_cache()
+            if dense_scores is None:
+                dense_scores, dense_latency = vec_scores, vec_latency
+            rows.append(
+                _result_row(
+                    "dense_fp16_vectorized",
+                    "dense_cuda_vectorized" if args.device == "cuda" else "dense_cpu_vectorized",
+                    dataset,
+                    vec_scores,
+                    vec_latency,
+                    args.k,
+                    metric_ks=metric_ks,
+                    doc_storage_bytes=_dense_doc_bytes(dataset, 2),
+                    dense_scores=dense_scores if dense_scores is not None else vec_scores,
+                    latency_stats=vec_latency_stats,
+                    metadata={"library": "torch", "storage_dtype": "fp16", "device": args.device,
+                              "formula": "flat_matmul_plus_segment_amax"},
+                )
+            )
+            continue
+
         if dense_scores is None:
             dense_scores, dense_latency, _dense_latency_stats = _time_call(lambda: _dense_fp16_scores(dataset, args.device), repeat=args.repeat)
             _release_cuda_cache()
@@ -662,6 +685,37 @@ def _sync_cuda(resources) -> None:
         resources.syncDefaultStreamCurrentDevice()
     if torch is not None and torch.cuda.is_available():
         torch.cuda.synchronize()
+
+
+def _dense_fp16_scores_vectorized(dataset, device: str) -> "np.ndarray":
+    """Honest dense fp16 MaxSim: one flat matmul per query + segment-amax.
+
+    Replaces the per-document Python loop with [q_tokens, total_tokens] fp16
+    matmuls and a scatter amax over document segments; numerically the same
+    scores (fp16 dot precision) at vectorized speed. Empty documents score 0.
+    """
+    import torch
+
+    torch_device = torch.device(device if device == "cuda" and torch.cuda.is_available() else "cpu")
+    docs = torch.as_tensor(dataset["doc_embeddings"], dtype=torch.float16, device=torch_device)
+    offsets = np.asarray(dataset["doc_offsets"], dtype=np.int64)
+    num_docs = offsets.shape[0] - 1
+    lengths = np.diff(offsets)
+    doc_index = torch.as_tensor(np.repeat(np.arange(num_docs, dtype=np.int64), lengths), device=torch_device)
+    scores = np.empty((len(dataset["query_embeddings"]), num_docs), dtype=np.float32)
+    neg_inf = torch.finfo(torch.float32).min
+    for query_idx, query in enumerate(dataset["query_embeddings"]):
+        q = torch.as_tensor(np.ascontiguousarray(query), dtype=torch.float16, device=torch_device)
+        dots = (q @ docs.T).to(torch.float32)
+        seg = torch.full((q.shape[0], num_docs), neg_inf, dtype=torch.float32, device=torch_device)
+        seg.scatter_reduce_(1, doc_index.expand(q.shape[0], -1), dots, reduce="amax")
+        seg[seg == neg_inf] = 0.0
+        scores[query_idx] = seg.sum(dim=0).cpu().numpy()
+    if torch_device.type == "cuda":
+        torch.cuda.synchronize()
+    return scores
+
+
 
 
 def _release_cuda_cache() -> None:
