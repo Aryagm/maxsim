@@ -698,3 +698,31 @@ Revised guidance from standardized scale:
 3. Pooling IMPROVES relatively with scale and corpus heterogeneity; pool3 at
    95.9x beats pool2 and plain binary on both 10k and 25k corpora — the
    max_compression tier is stronger than any dev-slice suggested.
+
+## 2026-07-04: Honest Baselines — Vectorized Dense and Tuned fast-plaid
+
+Final citable 10k table (`benchmark-results/paper-unique-10k-final.json`,
+corpus re-embedded via 10-14 concurrent batch-1 builders on one H100 —
+concurrency across processes preserves batch-1 fidelity; measured on RTX
+4090; all source caches archived in caches-full/, 8.5GB local):
+
+| implementation | NDCG@10 | R@10 | best | compression |
+| --- | ---: | ---: | ---: | ---: |
+| dense fp16 (loop impl.) | 0.5068 | 0.6016 | 166.0 s | 2x |
+| dense fp16 (vectorized) | 0.5068 | 0.6016 | 6.04 s | 2x |
+| fast-plaid (tuned) | 0.5117 | 0.6133 | 171 s* | 3.4x |
+| bitmax int4 + dp4a | 0.5008 | 0.6055 | 1.12 s | 8x |
+| bitmax binary | 0.4856 | 0.5898 | 0.68 s | 32x |
+| bitmax pool2 | 0.4864 | 0.5938 | 0.45 s | 63.9x |
+| bitmax pool3 | 0.4968 | 0.6133 | 0.46 s | 95.9x |
+
+The vectorized dense baseline (`dense_fp16_vectorized`: one flat fp16 matmul
+per query + segment-amax; score-identical to the loop, validated exactly)
+shows the loop implementation overstated dense cost 27x. Honest speedups vs
+dense at 10k: pool3 13.1x, binary 8.8x, int4+dp4a 5.4x — cite these, not the
+loop-relative multipliers. *fast-plaid latency varied 171 s (tuned here) /
+820 s (defaults) / 23.5 s (earlier committed run) across environments; its
+quality parity is citable, its latency is not without further investigation.
+pool3 ties fast-plaid on recall@10 at 28x its compression and ~370x its
+measured latency. Token scales again below plain binary at 10k (third
+independent corpus build confirming the small-corpus-only verdict).

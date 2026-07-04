@@ -1,0 +1,402 @@
+{
+  "created_at": "2026-07-01T04:20:32.074305+00:00",
+  "environment": {
+    "cwd": "/Users/aryagm/code/bitmax",
+    "git_branch": "pareto-retrieval-research",
+    "git_dirty": true,
+    "git_sha": "ea30c334c0a7f56b5742951740eff2dd235b51b7",
+    "gpu": null,
+    "platform": "macOS-26.3-arm64-arm-64bit-Mach-O",
+    "python": "3.14.0"
+  },
+  "executed": false,
+  "ledger_refresh_command": [
+    "rsync",
+    "-av",
+    "--include=*/",
+    "--include=*.json",
+    "--include=*.png",
+    "--exclude=*",
+    "benchmark-results/",
+    "docs/benchmark_results/raw/"
+  ],
+  "output_path": "benchmark-results/reproduce-build-unique-caches-plan.json",
+  "schema_version": 1,
+  "steps": [
+    {
+      "artifacts": [
+        "benchmark-results/vidore-docvqa-test-colqwen2-limit500.npz"
+      ],
+      "command": [
+        "/Users/aryagm/code/bitmax/.venv/bin/python",
+        "-m",
+        "benchmarks.build_vidore_embeddings",
+        "--dataset",
+        "vidore/docvqa_test_subsampled",
+        "--split",
+        "test",
+        "--limit",
+        "500",
+        "--model",
+        "vidore/colqwen2-v1.0-hf",
+        "--output",
+        "benchmark-results/vidore-docvqa-test-colqwen2-limit500.npz"
+      ],
+      "expensive": true,
+      "name": "embed-docvqa-test",
+      "notes": "Builds a unique public ViDoRe/ColQwen2 embedding cache from raw dataset rows.",
+      "requires_cuda": true
+    },
+    {
+      "artifacts": [
+        "benchmark-results/vidore-infovqa-test-colqwen2-limit500.npz"
+      ],
+      "command": [
+        "/Users/aryagm/code/bitmax/.venv/bin/python",
+        "-m",
+        "benchmarks.build_vidore_embeddings",
+        "--dataset",
+        "vidore/infovqa_test_subsampled",
+        "--split",
+        "test",
+        "--limit",
+        "500",
+        "--model",
+        "vidore/colqwen2-v1.0-hf",
+        "--output",
+        "benchmark-results/vidore-infovqa-test-colqwen2-limit500.npz"
+      ],
+      "expensive": true,
+      "name": "embed-infovqa-test",
+      "notes": "Builds a unique public ViDoRe/ColQwen2 embedding cache from raw dataset rows.",
+      "requires_cuda": true
+    },
+    {
+      "artifacts": [
+        "benchmark-results/vidore-arxivqa-test-colqwen2-limit500.npz"
+      ],
+      "command": [
+        "/Users/aryagm/code/bitmax/.venv/bin/python",
+        "-m",
+        "benchmarks.build_vidore_embeddings",
+        "--dataset",
+        "vidore/arxivqa_test_subsampled",
+        "--split",
+        "test",
+        "--limit",
+        "500",
+        "--model",
+        "vidore/colqwen2-v1.0-hf",
+        "--output",
+        "benchmark-results/vidore-arxivqa-test-colqwen2-limit500.npz"
+      ],
+      "expensive": true,
+      "name": "embed-arxivqa-test",
+      "notes": "Builds a unique public ViDoRe/ColQwen2 embedding cache from raw dataset rows.",
+      "requires_cuda": true
+    },
+    {
+      "artifacts": [
+        "benchmark-results/vidore-tatdqa-test-colqwen2-limit1663.npz"
+      ],
+      "command": [
+        "/Users/aryagm/code/bitmax/.venv/bin/python",
+        "-m",
+        "benchmarks.build_vidore_embeddings",
+        "--dataset",
+        "vidore/tatdqa_test",
+        "--split",
+        "test",
+        "--limit",
+        "1663",
+        "--model",
+        "vidore/colqwen2-v1.0-hf",
+        "--output",
+        "benchmark-results/vidore-tatdqa-test-colqwen2-limit1663.npz"
+      ],
+      "expensive": true,
+      "name": "embed-tatdqa-test",
+      "notes": "Builds a unique public ViDoRe/ColQwen2 embedding cache from raw dataset rows.",
+      "requires_cuda": true
+    },
+    {
+      "artifacts": [
+        "benchmark-results/vidore-syntheticdocqa-ai-colqwen2-limit1000.npz"
+      ],
+      "command": [
+        "/Users/aryagm/code/bitmax/.venv/bin/python",
+        "-m",
+        "benchmarks.build_vidore_embeddings",
+        "--dataset",
+        "vidore/syntheticDocQA_artificial_intelligence_test",
+        "--split",
+        "test",
+        "--limit",
+        "1000",
+        "--model",
+        "vidore/colqwen2-v1.0-hf",
+        "--output",
+        "benchmark-results/vidore-syntheticdocqa-ai-colqwen2-limit1000.npz"
+      ],
+      "expensive": true,
+      "name": "embed-syntheticdocqa-ai",
+      "notes": "Builds a unique public ViDoRe/ColQwen2 embedding cache from raw dataset rows.",
+      "requires_cuda": true
+    },
+    {
+      "artifacts": [
+        "benchmark-results/vidore-syntheticdocqa-energy-colqwen2-limit1000.npz"
+      ],
+      "command": [
+        "/Users/aryagm/code/bitmax/.venv/bin/python",
+        "-m",
+        "benchmarks.build_vidore_embeddings",
+        "--dataset",
+        "vidore/syntheticDocQA_energy_test",
+        "--split",
+        "test",
+        "--limit",
+        "1000",
+        "--model",
+        "vidore/colqwen2-v1.0-hf",
+        "--output",
+        "benchmark-results/vidore-syntheticdocqa-energy-colqwen2-limit1000.npz"
+      ],
+      "expensive": true,
+      "name": "embed-syntheticdocqa-energy",
+      "notes": "Builds a unique public ViDoRe/ColQwen2 embedding cache from raw dataset rows.",
+      "requires_cuda": true
+    },
+    {
+      "artifacts": [
+        "benchmark-results/vidore-syntheticdocqa-government-colqwen2-limit1000.npz"
+      ],
+      "command": [
+        "/Users/aryagm/code/bitmax/.venv/bin/python",
+        "-m",
+        "benchmarks.build_vidore_embeddings",
+        "--dataset",
+        "vidore/syntheticDocQA_government_reports_test",
+        "--split",
+        "test",
+        "--limit",
+        "1000",
+        "--model",
+        "vidore/colqwen2-v1.0-hf",
+        "--output",
+        "benchmark-results/vidore-syntheticdocqa-government-colqwen2-limit1000.npz"
+      ],
+      "expensive": true,
+      "name": "embed-syntheticdocqa-government",
+      "notes": "Builds a unique public ViDoRe/ColQwen2 embedding cache from raw dataset rows.",
+      "requires_cuda": true
+    },
+    {
+      "artifacts": [
+        "benchmark-results/vidore-syntheticdocqa-healthcare-colqwen2-limit1000.npz"
+      ],
+      "command": [
+        "/Users/aryagm/code/bitmax/.venv/bin/python",
+        "-m",
+        "benchmarks.build_vidore_embeddings",
+        "--dataset",
+        "vidore/syntheticDocQA_healthcare_industry_test",
+        "--split",
+        "test",
+        "--limit",
+        "1000",
+        "--model",
+        "vidore/colqwen2-v1.0-hf",
+        "--output",
+        "benchmark-results/vidore-syntheticdocqa-healthcare-colqwen2-limit1000.npz"
+      ],
+      "expensive": true,
+      "name": "embed-syntheticdocqa-healthcare",
+      "notes": "Builds a unique public ViDoRe/ColQwen2 embedding cache from raw dataset rows.",
+      "requires_cuda": true
+    },
+    {
+      "artifacts": [
+        "benchmark-results/vidore-syntheticdocqa-shift-colqwen2-limit1000.npz"
+      ],
+      "command": [
+        "/Users/aryagm/code/bitmax/.venv/bin/python",
+        "-m",
+        "benchmarks.build_vidore_embeddings",
+        "--dataset",
+        "vidore/shiftproject_test",
+        "--split",
+        "test",
+        "--limit",
+        "1000",
+        "--model",
+        "vidore/colqwen2-v1.0-hf",
+        "--output",
+        "benchmark-results/vidore-syntheticdocqa-shift-colqwen2-limit1000.npz"
+      ],
+      "expensive": true,
+      "name": "embed-syntheticdocqa-shift",
+      "notes": "Builds a unique public ViDoRe/ColQwen2 embedding cache from raw dataset rows.",
+      "requires_cuda": true
+    },
+    {
+      "artifacts": [
+        "benchmark-results/vidore-docvqa-train-colqwen2-limit3000.npz"
+      ],
+      "command": [
+        "/Users/aryagm/code/bitmax/.venv/bin/python",
+        "-m",
+        "benchmarks.build_vidore_embeddings",
+        "--dataset",
+        "vidore/docvqa_train",
+        "--split",
+        "train",
+        "--limit",
+        "3000",
+        "--model",
+        "vidore/colqwen2-v1.0-hf",
+        "--output",
+        "benchmark-results/vidore-docvqa-train-colqwen2-limit3000.npz",
+        "--streaming"
+      ],
+      "expensive": true,
+      "name": "embed-docvqa-train",
+      "notes": "Builds a unique public ViDoRe/ColQwen2 embedding cache from raw dataset rows.",
+      "requires_cuda": true
+    },
+    {
+      "artifacts": [
+        "benchmark-results/vidore-infovqa-train-colqwen2-limit1200.npz"
+      ],
+      "command": [
+        "/Users/aryagm/code/bitmax/.venv/bin/python",
+        "-m",
+        "benchmarks.build_vidore_embeddings",
+        "--dataset",
+        "vidore/infovqa_train",
+        "--split",
+        "train",
+        "--limit",
+        "1200",
+        "--model",
+        "vidore/colqwen2-v1.0-hf",
+        "--output",
+        "benchmark-results/vidore-infovqa-train-colqwen2-limit1200.npz",
+        "--streaming"
+      ],
+      "expensive": true,
+      "name": "embed-infovqa-train",
+      "notes": "Builds a unique public ViDoRe/ColQwen2 embedding cache from raw dataset rows.",
+      "requires_cuda": true
+    },
+    {
+      "artifacts": [
+        "benchmark-results/vidore-arxivqa-train-colqwen2-limit1200.npz"
+      ],
+      "command": [
+        "/Users/aryagm/code/bitmax/.venv/bin/python",
+        "-m",
+        "benchmarks.build_vidore_embeddings",
+        "--dataset",
+        "vidore/arxivqa_train",
+        "--split",
+        "train",
+        "--limit",
+        "1200",
+        "--model",
+        "vidore/colqwen2-v1.0-hf",
+        "--output",
+        "benchmark-results/vidore-arxivqa-train-colqwen2-limit1200.npz",
+        "--streaming"
+      ],
+      "expensive": true,
+      "name": "embed-arxivqa-train",
+      "notes": "Builds a unique public ViDoRe/ColQwen2 embedding cache from raw dataset rows.",
+      "requires_cuda": true
+    },
+    {
+      "artifacts": [
+        "benchmark-results/vidore-tatdqa-train-colqwen2-limit1200.npz"
+      ],
+      "command": [
+        "/Users/aryagm/code/bitmax/.venv/bin/python",
+        "-m",
+        "benchmarks.build_vidore_embeddings",
+        "--dataset",
+        "vidore/tatdqa_train",
+        "--split",
+        "train",
+        "--limit",
+        "1200",
+        "--model",
+        "vidore/colqwen2-v1.0-hf",
+        "--output",
+        "benchmark-results/vidore-tatdqa-train-colqwen2-limit1200.npz",
+        "--streaming"
+      ],
+      "expensive": true,
+      "name": "embed-tatdqa-train",
+      "notes": "Builds a unique public ViDoRe/ColQwen2 embedding cache from raw dataset rows.",
+      "requires_cuda": true
+    },
+    {
+      "artifacts": [
+        "benchmark-results/vidore-syntheticdocqa-energy-train-colqwen2-limit3000.npz"
+      ],
+      "command": [
+        "/Users/aryagm/code/bitmax/.venv/bin/python",
+        "-m",
+        "benchmarks.build_vidore_embeddings",
+        "--dataset",
+        "vidore/syntheticDocQA_energy_train",
+        "--split",
+        "train",
+        "--limit",
+        "3000",
+        "--model",
+        "vidore/colqwen2-v1.0-hf",
+        "--output",
+        "benchmark-results/vidore-syntheticdocqa-energy-train-colqwen2-limit3000.npz",
+        "--streaming"
+      ],
+      "expensive": true,
+      "name": "embed-syntheticdocqa-energy-train",
+      "notes": "Builds a unique public ViDoRe/ColQwen2 embedding cache from raw dataset rows.",
+      "requires_cuda": true
+    },
+    {
+      "artifacts": [
+        "benchmark-results/vidore-mixed-public-unique-colqwen2-limit10000.npz"
+      ],
+      "command": [
+        "/Users/aryagm/code/bitmax/.venv/bin/python",
+        "-m",
+        "benchmarks.build_mixed_embeddings",
+        "--inputs",
+        "benchmark-results/vidore-docvqa-test-colqwen2-limit500.npz",
+        "benchmark-results/vidore-infovqa-test-colqwen2-limit500.npz",
+        "benchmark-results/vidore-arxivqa-test-colqwen2-limit500.npz",
+        "benchmark-results/vidore-tatdqa-test-colqwen2-limit1663.npz",
+        "benchmark-results/vidore-syntheticdocqa-ai-colqwen2-limit1000.npz",
+        "benchmark-results/vidore-syntheticdocqa-energy-colqwen2-limit1000.npz",
+        "benchmark-results/vidore-syntheticdocqa-government-colqwen2-limit1000.npz",
+        "benchmark-results/vidore-syntheticdocqa-healthcare-colqwen2-limit1000.npz",
+        "benchmark-results/vidore-syntheticdocqa-shift-colqwen2-limit1000.npz",
+        "benchmark-results/vidore-docvqa-train-colqwen2-limit3000.npz",
+        "benchmark-results/vidore-infovqa-train-colqwen2-limit1200.npz",
+        "benchmark-results/vidore-arxivqa-train-colqwen2-limit1200.npz",
+        "benchmark-results/vidore-tatdqa-train-colqwen2-limit1200.npz",
+        "benchmark-results/vidore-syntheticdocqa-energy-train-colqwen2-limit3000.npz",
+        "--dataset-name",
+        "vidore/mixed_public_unique:test:10000",
+        "--output",
+        "benchmark-results/vidore-mixed-public-unique-colqwen2-limit10000.npz"
+      ],
+      "expensive": true,
+      "name": "mix-unique-10k",
+      "notes": "Combines unique source caches. Actual doc count is recorded in the output metadata/results.",
+      "requires_cuda": false
+    }
+  ],
+  "suite": "build-unique-caches"
+}

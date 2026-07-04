@@ -1,0 +1,52 @@
+{
+  "results": [
+    {
+      "batch": 8,
+      "docs": 1000,
+      "name": "docs_1000_long_12MB",
+      "packed_mb": 12.0,
+      "qtile_median_ms": 20.038481801748276,
+      "qtile_speedup": 0.12127375354594008,
+      "query_tokens": 24,
+      "token_scale": false,
+      "tokens_per_doc": 750,
+      "unrolled_median_ms": 2.430141903460026
+    },
+    {
+      "batch": 8,
+      "docs": 5000,
+      "name": "docs_5000_long_60MB",
+      "packed_mb": 60.0,
+      "qtile_median_ms": 98.25644828379154,
+      "qtile_speedup": 0.10801077453863507,
+      "query_tokens": 24,
+      "token_scale": false,
+      "tokens_per_doc": 750,
+      "unrolled_median_ms": 10.612755082547665
+    },
+    {
+      "batch": 8,
+      "docs": 10000,
+      "name": "docs_10000_long_120MB",
+      "packed_mb": 120.0,
+      "qtile_median_ms": 196.081287227571,
+      "qtile_speedup": 0.10903802110375069,
+      "query_tokens": 24,
+      "token_scale": false,
+      "tokens_per_doc": 750,
+      "unrolled_median_ms": 21.38031553477049
+    },
+    {
+      "batch": 4,
+      "docs": 25000,
+      "name": "docs_25000_long_300MB",
+      "packed_mb": 300.0,
+      "qtile_median_ms": 245.52529584616423,
+      "qtile_speedup": 0.10963850696659361,
+      "query_tokens": 24,
+      "token_scale": false,
+      "tokens_per_doc": 750,
+      "unrolled_median_ms": 26.919026859104633
+    }
+  ]
+}

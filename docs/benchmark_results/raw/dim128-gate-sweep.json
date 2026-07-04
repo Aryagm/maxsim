@@ -1,0 +1,59 @@
+{
+  "results": [
+    {
+      "batch": 64,
+      "docs": 256,
+      "generic_median_ms": 8.552368730306625,
+      "name": "docvqa_like_256",
+      "parity": "exact_indices_tol_scores",
+      "query_tokens": 23,
+      "tokens_per_doc": 750,
+      "unrolled_median_ms": 4.299873486161232,
+      "unrolled_speedup": 1.9889814799974181
+    },
+    {
+      "batch": 8,
+      "docs": 1000,
+      "generic_median_ms": 5.86631428450346,
+      "name": "docs_1000_long",
+      "parity": "exact_indices_tol_scores",
+      "query_tokens": 32,
+      "tokens_per_doc": 750,
+      "unrolled_median_ms": 2.9057608917355537,
+      "unrolled_speedup": 2.018856507150396
+    },
+    {
+      "batch": 8,
+      "docs": 5000,
+      "generic_median_ms": 25.994383729994297,
+      "name": "docs_5000_long",
+      "parity": "exact_indices_tol_scores",
+      "query_tokens": 32,
+      "tokens_per_doc": 750,
+      "unrolled_median_ms": 14.166322536766529,
+      "unrolled_speedup": 1.834942248599087
+    },
+    {
+      "batch": 32,
+      "docs": 512,
+      "generic_median_ms": 2.155141904950142,
+      "name": "rerank_512_short",
+      "parity": "exact_indices_tol_scores",
+      "query_tokens": 32,
+      "tokens_per_doc": 128,
+      "unrolled_median_ms": 2.518618479371071,
+      "unrolled_speedup": 0.8556841469249866
+    },
+    {
+      "batch": 16,
+      "docs": 4096,
+      "generic_median_ms": 3.6200331524014473,
+      "name": "rerank_4096_short",
+      "parity": "exact_indices_tol_scores",
+      "query_tokens": 32,
+      "tokens_per_doc": 32,
+      "unrolled_median_ms": 5.104850046336651,
+      "unrolled_speedup": 0.7091360411260778
+    }
+  ]
+}
