@@ -5,10 +5,23 @@ build-backend = "scikit_build_core.build"
 [project]
 name = "bitmax"
 version = "0.1.0"
-description = "Exact asymmetric binary MaxSim kernels for compressed multi-vector scoring."
+description = "Exact compressed MaxSim scoring for late-interaction retrieval, with CUDA kernels."
 readme = "README.md"
+license = {file = "LICENSE"}
+authors = [{name = "Arya Manjaramkar", email = "arya@e3group.ai"}]
 requires-python = ">=3.9"
 dependencies = ["numpy>=1.24"]
+keywords = ["retrieval", "late-interaction", "colbert", "colpali", "quantization", "maxsim", "cuda"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.urls]
+Repository = "https://github.com/Aryagm/bitmax"
 
 [project.scripts]
 bitmax-bench = "benchmarks.run_synthetic:main"

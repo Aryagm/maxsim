@@ -9,6 +9,12 @@
 \usepackage[hidelinks]{hyperref}
 \usepackage{microtype}
 \usepackage{xcolor}
+\usepackage{newtxtext,newtxmath}
+\usepackage{caption}
+\captionsetup{font=small,labelfont=bf,width=.92\linewidth}
+\usepackage{titlesec}
+\titlespacing*{\section}{0pt}{1.1em}{0.5em}
+\titlespacing*{\subsection}{0pt}{0.9em}{0.35em}
 
 \newcommand{\bitmax}{\textsc{bitmax}}
 \newcommand{\ndcg}{NDCG@10}
@@ -113,8 +119,7 @@ factors 2--3 jointly with bit-level quantization and find the combination
 \section{Compression Tiers and Kernels}
 
 \subsection{Storage formats}
-All tiers store per-document token matrices $X \in \mathbb{R}^{n_d \times
-128}$ under MaxSim scoring $s(q,d)=\sum_i \max_j \langle q_i, x_j\rangle$.
+All tiers store per-document token matrices $X \in \mathbb{R}^{n_d \times 128}$ under MaxSim scoring $s(q,d)=\sum_i \max_j \langle q_i, x_j\rangle$.
 
 \textbf{Binary (32$\times$).} $x_j \mapsto \mathrm{sign}(x_j)$ packed to 16
 bytes per token; scoring is asymmetric (fp32 query against $\pm1$ documents).
@@ -205,7 +210,8 @@ corpus; suite-mean loop-dense is reported in the artifact ledger.}
 \end{tabular}
 \end{table}
 
-Table~\ref{tab:suite} and Figure~\ref{fig:perdataset} summarize the suite.
+Table~\ref{tab:suite} and Figures~\ref{fig:perdataset}
+and~\ref{fig:forest} summarize the suite.
 int4$+$dp4a is the strongest compressed tier everywhere: its paired deficit
 versus dense is $-0.0018$ \ndcg{} --- statistically detectable
 ($p{=}0.005$) but far below any practical significance threshold --- and it
@@ -219,6 +225,15 @@ diluting suite means uniformly without affecting comparisons.
 \caption{Per-dataset \ndcg{} for dense fp16 and three representative tiers,
 full test splits. Marks within a row share the same corpus and queries.}
 \label{fig:perdataset}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=.78\linewidth]{figures/forest.pdf}
+\caption{Paired per-query \ndcg{} deltas with 95\% bootstrap confidence
+intervals, pooled over the full suite (8{,}443 queries; two-sided sign tests;
+``n.s.''\ marks $p \ge 0.05$). Positive favors the first-named method.}
+\label{fig:forest}
 \end{figure}
 
 \subsection{The tier ranking reorders with corpus scale}
@@ -267,7 +282,35 @@ baseline and the fp32-query int4 kernel.}
 \label{fig:latency}
 \end{figure}
 
-Figures~\ref{fig:pareto} and~\ref{fig:latency} show the 10k corpus.
+\begin{table}[t]
+\centering
+\caption{The 10{,}171-document unique mixed corpus (256 queries, repeat~3,
+RTX~4090). Speedup is relative to the vectorized dense baseline. fast-plaid
+latency is not cited (Section~7); FAISS mean-pooling collapses because
+single-vector pooling discards the late-interaction structure.}
+\label{tab:tenk}
+\footnotesize
+\begin{tabular}{lrrrrr}
+\toprule
+implementation & \ndcg{} & recall@10 & latency & speedup & compr. \\
+\midrule
+dense fp16 (loop impl.) & 0.5068 & 0.6016 & 166\,s & --- & $2\times$ \\
+dense fp16 (vectorized) & 0.5068 & 0.6016 & 6.04\,s & $1.0\times$ & $2\times$ \\
+fast-plaid (tuned) & 0.5117 & 0.6133 & n/c & n/c & $3.4\times$ \\
+FAISS GPU mean-pool & 0.0355 & 0.0508 & 0.004\,s & --- & $746\times$ \\
+\midrule
+\bitmax{} int4$+$dp4a & 0.5008 & 0.6055 & 1.12\,s & $5.4\times$ & $8\times$ \\
+\bitmax{} binary & 0.4856 & 0.5898 & 0.68\,s & $8.8\times$ & $32\times$ \\
+\bitmax{} fp16 token scales & 0.4797 & 0.5781 & 0.70\,s & $8.6\times$ & $28.4\times$ \\
+\bitmax{} u4 token scales & 0.4779 & 0.5781 & 0.70\,s & $8.6\times$ & $31\times$ \\
+\bitmax{} pool2 binary & 0.4864 & 0.5938 & 0.45\,s & $13.4\times$ & $63.9\times$ \\
+\bitmax{} pool3 binary & 0.4968 & 0.6133 & 0.46\,s & $13.1\times$ & $95.9\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:tenk} and Figures~\ref{fig:pareto} and~\ref{fig:latency}
+show the 10k corpus.
 int4$+$dp4a reaches \ndcg{} 0.5008 (dense: 0.5068) in 1.12\,s
 ($5.4\times$ dense speed); pool3 reaches 0.4968 at $95.9\times$ compression in
 0.46\,s ($13.1\times$); binary 0.4856 at $32\times$ in 0.68\,s ($8.8\times$).
@@ -314,6 +357,18 @@ deserves its own investigation before any comparative latency claim. Our
 corpora are visual documents; transfer to text-only ColBERT corpora is
 unverified. The scale-dependence mechanism is supported but not proven by our
 attribution analysis.
+
+\section*{Reproducibility Statement}
+Every reported number derives from a JSON artifact committed under
+\texttt{docs/\allowbreak benchmark\_results/\allowbreak raw/} in the
+\bitmax{} repository, including per-query metric vectors for all suite rows.
+Paper figures regenerate deterministically from those artifacts
+(\texttt{paper/\allowbreak make\_figures.py}); the statistical analysis is
+\texttt{benchmarks/\allowbreak significance.py} with a fixed seed. Embedding caches
+rebuild via \texttt{benchmarks/\allowbreak reproduce.py} recipes at batch size~1; kernel
+correctness is enforced by the \texttt{pytest -m cuda} parity suite. Total
+compute for all experiments in this paper was approximately 30 RTX-4090-hours
+and 1 H100-hour of rented capacity.
 
 \section{Conclusion}
 Compressed late-interaction retrieval is not a single trade-off but a family

@@ -1,5 +1,8 @@
 # bitmax
 
+[![ci](https://github.com/Aryagm/bitmax/actions/workflows/ci.yml/badge.svg)](https://github.com/Aryagm/bitmax/actions/workflows/ci.yml)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 **Exact compressed MaxSim scoring for late-interaction retrieval, with CUDA kernels.**
 
 `bitmax` stores ColBERT/ColPali-style multi-vector document embeddings at
@@ -137,7 +140,17 @@ Frontier*. Compiles with `tectonic main.tex` from `paper/`.
 - Visual-document (ColPali-family) corpora are the evaluated domain;
   text-only ColBERT corpora are unverified.
 - No prebuilt CUDA wheels yet; build from source.
-- **No license file yet** — do not redistribute until one is added.
+
+## Citation
+
+If you use bitmax, please cite the paper (see `CITATION.cff`):
+
+> Manjaramkar, A. *Compression Tiers for Late-Interaction Visual Document
+> Retrieval: A Measured Accuracy–Size–Latency Frontier.* 2026.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
 
 ## Development
 

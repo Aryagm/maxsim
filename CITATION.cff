@@ -1,0 +1,16 @@
+cff-version: 1.2.0
+message: "If you use bitmax, please cite it as below."
+title: "bitmax: Exact Compressed MaxSim Scoring for Late-Interaction Retrieval"
+authors:
+  - family-names: Manjaramkar
+    given-names: Arya
+version: 0.1.0
+date-released: 2026-07-04
+repository-code: "https://github.com/Aryagm/bitmax"
+preferred-citation:
+  type: article
+  title: "Compression Tiers for Late-Interaction Visual Document Retrieval: A Measured Accuracy-Size-Latency Frontier"
+  authors:
+    - family-names: Manjaramkar
+      given-names: Arya
+  year: 2026
