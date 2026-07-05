@@ -201,3 +201,14 @@ def test_index_is_the_product_name_for_corpus():
     import maxsim
 
     assert maxsim.Index is maxsim.Corpus
+
+
+def test_auto_mode_picks_binary_for_unit_normalized_embeddings():
+    import maxsim
+
+    rng = np.random.default_rng(227)
+    docs = rng.standard_normal((24, 16)).astype(np.float32)
+    docs /= np.linalg.norm(docs, axis=1, keepdims=True)
+    offsets = np.arange(0, 25, 2, dtype=np.int64)
+    corpus = maxsim.Index.from_embeddings([f"d{i}" for i in range(12)], docs, offsets, mode="auto")
+    assert corpus.mode == "binary"

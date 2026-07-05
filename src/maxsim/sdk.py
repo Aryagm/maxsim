@@ -38,10 +38,26 @@ MODE_PRESETS = {
 }
 
 AUTO_SMALL_CORPUS_DOCS = 500
+AUTO_UNIT_NORM_CV = 0.02
 
 
-def resolve_auto_mode(num_docs: int) -> str:
-    """Corpus-size-aware tier choice, per the measured scale-flip finding."""
+def resolve_auto_mode(num_docs: int, embeddings: np.ndarray | None = None) -> str:
+    """Geometry- and corpus-size-aware tier choice, per the measured findings.
+
+    Unit-normalized token embeddings (text ColBERT convention) are detected by
+    near-zero dispersion of token norms. There, mean-abs token scales become a
+    sparsity statistic that down-weights informative tokens, and per-tensor
+    int4 under-quantizes the platykurtic value distribution — measured on
+    BEIR/GTE-ModernColBERT — so plain binary is the strongest compressed tier.
+    On unnormalized (e.g. visual) embeddings the corpus-size rule applies:
+    token scales help small corpora, int4 is the best all-scale quality tier.
+    """
+    if embeddings is not None and embeddings.shape[0] > 1:
+        sample = embeddings[:: max(1, embeddings.shape[0] // 4096)]
+        norms = np.linalg.norm(sample.astype(np.float32, copy=False), axis=1)
+        mean = float(norms.mean())
+        if mean > 0 and float(norms.std()) / mean < AUTO_UNIT_NORM_CV:
+            return "binary"
     return "binary_token_scale" if num_docs <= AUTO_SMALL_CORPUS_DOCS else "int4"
 
 
@@ -74,9 +90,9 @@ class Corpus:
     ) -> "Corpus":
         mode = MODE_PRESETS.get(mode, mode)
         doc_id_values = _normalize_doc_ids(doc_ids)
-        if mode == "auto":
-            mode = resolve_auto_mode(len(doc_id_values))
         docs = _as_numpy(embeddings).astype(np.float32, copy=False)
+        if mode == "auto":
+            mode = resolve_auto_mode(len(doc_id_values), docs)
         offsets_array = _normalize_sdk_offsets(offsets, docs.shape[0])
         _validate_corpus_inputs(doc_id_values, docs, offsets_array, mode)
         if mode == "pooled_binary":
