@@ -441,7 +441,15 @@ all neutral-to-worse; plain mean-absolute scales are a local optimum.
 (v)~\emph{Cluster-mass-weighted pooled scales}: catastrophic (\ndcg{}
 0.29--0.80) --- under MaxSim, large background clusters must not amplify their
 match scores. (vi)~\emph{Per-token int4 scales}: $-0.011$ \ndcg{} in
-exact-semantics simulation.
+exact-semantics simulation. (vii)~\emph{Inverted and spikiness scales on
+unit-norm text}: the anti-sparsity mechanism of Section~\ref{sec:text}
+suggests \emph{inverting} the scale should recover salience; measured on
+both BEIR datasets, inversion indeed beats mean-abs (0.371/0.186 vs.\
+0.343/0.159) --- confirming the mechanism's direction --- but every
+reweighting still loses to plain binary (0.678/0.266), and
+max-abs/spikiness weights collapse to $\approx$\,0. On unit-normalized
+embeddings, no per-token magnitude statistic we tested carries exploitable
+salience; flat binary is locally optimal.
 
 \section{Limitations}
 \label{sec:limitations}

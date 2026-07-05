@@ -1,0 +1,65 @@
+name: wheels
+
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+jobs:
+  # macOS gets CPU-only wheels; linux wheels (below) bundle the CUDA kernels
+  # and degrade gracefully to the CPU path on machines without a GPU.
+  macos-wheels:
+    name: CPU wheels (macos arm64)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pypa/cibuildwheel@v2.21
+        env:
+          CIBW_BUILD: "cp310-* cp311-* cp312-* cp313-*"
+          CIBW_ARCHS_MACOS: "arm64"
+          CIBW_TEST_COMMAND: python -c "import maxsim; import numpy as np; p = maxsim.pack_signs(np.ones((4, 16), dtype=np.float32), np.array([0, 2, 4])); print(maxsim.maxsim(np.ones((2, 16), dtype=np.float32), p, device='cpu'))"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cpu-wheels-macos
+          path: wheelhouse/*.whl
+
+  cuda-wheels:
+    name: CUDA wheels (linux x86_64)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pypa/cibuildwheel@v2.21
+        env:
+          CIBW_BUILD: "cp310-* cp311-* cp312-* cp313-*"
+          CIBW_SKIP: "*-musllinux* *_i686"
+          CIBW_ARCHS_LINUX: "x86_64"
+          # CUDA toolkit inside the manylinux container; fatbin covers
+          # Ampere/Ada/Hopper (sm_80;86;89;90) — override at source-build
+          # time with MAXSIM_CUDA_ARCH for other architectures.
+          CIBW_BEFORE_ALL_LINUX: >
+            yum install -y yum-utils &&
+            yum-config-manager --add-repo
+            https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo &&
+            yum install -y cuda-nvcc-12-6 cuda-cudart-devel-12-6
+          CIBW_ENVIRONMENT_LINUX: >
+            MAXSIM_BUILD_CUDA=1
+            MAXSIM_CUDA_ARCH=80;86;89;90
+            PATH=/usr/local/cuda-12.6/bin:$PATH
+            CUDACXX=/usr/local/cuda-12.6/bin/nvcc
+          # no GPU on the runner: import test only exercises the CPU path
+          CIBW_TEST_COMMAND: python -c "import maxsim; print('wheel ok')"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cuda-wheels-linux
+          path: wheelhouse/*.whl
+
+  sdist:
+    name: sdist
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: pipx run build --sdist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
