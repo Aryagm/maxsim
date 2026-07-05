@@ -1,0 +1,8 @@
+{
+  "cache": "beir-fiqa-gte-moderncolbert.npz",
+  "ndcg_at_10": {
+    "dense_fp32": 0.45560398627785076,
+    "binary": 0.27690728252572683,
+    "int4_sim": 0.2090689973817979
+  }
+}
