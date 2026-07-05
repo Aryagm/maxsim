@@ -1,0 +1,8 @@
+{
+  "cache": "beir-scifact-gte-moderncolbert.npz",
+  "ndcg_at_10": {
+    "int4_per_tensor": 0.5047393199049142,
+    "int4_per_token": 0.6980302375143059,
+    "int4_per_channel": 0.7002455622656083
+  }
+}

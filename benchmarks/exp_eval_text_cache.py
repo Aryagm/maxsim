@@ -77,3 +77,17 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+def int4_variants(docs: np.ndarray) -> dict[str, np.ndarray]:
+    """Exact-grid int4 simulations: per-tensor, per-token, per-channel scales."""
+    out = {}
+    s_tensor = np.float32(np.max(np.abs(docs)) / 7.0)
+    out["int4_per_tensor"] = np.clip(np.round(docs / s_tensor), -8, 7).astype(np.float32) * s_tensor
+    s_tok = (np.max(np.abs(docs), axis=1, keepdims=True) / 7.0).astype(np.float32)
+    s_tok = np.maximum(s_tok, 1e-9)
+    out["int4_per_token"] = np.clip(np.round(docs / s_tok), -8, 7).astype(np.float32) * s_tok
+    s_ch = (np.max(np.abs(docs), axis=0, keepdims=True) / 7.0).astype(np.float32)
+    s_ch = np.maximum(s_ch, 1e-9)
+    out["int4_per_channel"] = np.clip(np.round(docs / s_ch), -8, 7).astype(np.float32) * s_ch
+    return out

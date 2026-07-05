@@ -1,0 +1,8 @@
+{
+  "cache": "beir-fiqa-gte-moderncolbert.npz",
+  "ndcg_at_10": {
+    "int4_per_tensor": 0.2090689973817979,
+    "int4_per_token": 0.339136528439802,
+    "int4_per_channel": 0.28567543444013693
+  }
+}
