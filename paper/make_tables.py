@@ -191,6 +191,20 @@ def table_text_beir():
             row = rows.get(impl)
             cells.append(f"{row['ndcg_at_10']:.4f}" if row else "---")
         lines.append(" & ".join(cells) + " \\\\")
+    # fiqa via the exact CPU-simulation evaluator (harness loop-dense is
+    # impractical at 57k docs); scored identically, single evaluation
+    fiqa = RAW / "exp-eval-beir-fiqa-gte-moderncolbert.json"
+    if fiqa.exists():
+        vals = json.loads(fiqa.read_text())["ndcg_at_10"]
+        remap = {
+            "dense_fp16_baseline": "dense_fp32", "int4_int8q_dp4a": "int4_sim",
+            "bitmax_binary": "binary", "pool2_binary": "pool2_binary", "pool3_binary": "pool3_binary",
+        }
+        cells = ["FiQA-2018$^{\\ast}$", "57,638", "648"]
+        for impl, _ in tiers:
+            key = remap.get(impl)
+            cells.append(f"{vals[key]:.4f}" if key and key in vals else "---")
+        lines.append(" & ".join(cells) + " \\\\")
     lines += ["\\bottomrule", "\\end{tabular}"]
     (OUT / "text_beir.tex").write_text("\n".join(lines) + "\n")
     print("wrote text_beir.tex")

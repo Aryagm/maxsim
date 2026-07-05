@@ -385,10 +385,12 @@ Table~\ref{tab:perdataset-colpali}.
 \begin{table}[t]
 \centering
 \caption{Text-ColBERT replication (\texttt{GTE-ModernColBERT-v1}, BEIR test
-splits, repeat-3, RTX 4090): exact \ndcg{} per tier. Under unit-normalized
-token embeddings the visual-corpus tier ordering does not transfer: token
-scales collapse, per-tensor int4 under-quantizes, and int4 vs.\ binary flips
-between datasets.}
+splits): exact \ndcg{} per tier. Under unit-normalized token embeddings the
+visual-corpus tier ordering does not transfer: token scales collapse,
+per-tensor int4 under-quantizes, and int4 vs.\ binary flips between
+datasets. $^{\ast}$FiQA scored by the exact CPU simulation of each format
+(the na\"ive dense baseline is impractical at 57k documents); other rows are
+repeat-3 GPU measurements.}
 \label{tab:text}
 \footnotesize
 \setlength{\tabcolsep}{3.6pt}
@@ -418,9 +420,18 @@ visual corpora --- text late interaction needs text-tuned formats
 free as it is for visual documents. (iv)~The \texttt{binary\_q40} centroid
 calibration, benign on visual corpora, collapses to near-random on text
 (0.006/0.026) --- its threshold placement assumes skewed activations.
-Consequently the released \texttt{auto} tier inspects token-norm dispersion
-and routes unit-normalized corpora to plain binary, avoiding every
-measured-catastrophic configuration.
+(v)~\textbf{Pooling does not transfer either}: at 57{,}638 FiQA documents,
+pool2/pool3 (0.257/0.236) both lose to plain binary (0.277) --- the
+denoising that makes pooling \emph{gain} with scale on visual corpora relies
+on near-duplicate patch redundancy that text tokens lack --- and the binary
+tier's deficit itself grows with text corpus size ($-0.08$ at 5k, $-0.18$ at
+57k documents), the mirror image of the visual trend. Across three datasets
+binary is the strongest text tier twice (int4 once), so the released
+\texttt{auto} tier inspects token-norm dispersion and routes unit-normalized
+corpora to plain binary, avoiding every measured-catastrophic configuration;
+the modality-dependence of \emph{both} magnitude restoration and pooling is
+the strongest form of this paper's thesis that tier choice must be measured,
+not assumed.
 
 \section{Negative Results}
 \label{sec:negative}
