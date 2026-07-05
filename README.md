@@ -36,9 +36,9 @@ compressed scoring and reranking primitive those systems can call.
 ## Choosing a tier
 
 ```text
-auto      (default) picks the tier from corpus size — you rarely need more
-int4      dense-like quality, 8× smaller, dp4a-accelerated
-binary    strong all-rounder, 32× smaller
+auto      (default) picks the tier from embedding geometry + corpus size
+int4      dense-like quality on visual corpora, 8× smaller, dp4a-accelerated
+binary    strong all-rounder, 32× smaller — the robust tier for text models
 pool3     extreme compression, 96× smaller — best at 10k+ docs
 ```
 
@@ -47,16 +47,19 @@ preset/mode names:
 
 | preset | recipe | pick when |
 | --- | --- | --- |
-| `auto` *(default)* | ≤500 docs → binary + fp16 token scales; larger → int4 | you want the measured-best default at your corpus size |
+| `auto` *(default)* | unit-normalized embeddings (text ColBERT) → binary; else ≤500 docs → binary + fp16 token scales, larger → int4 | you want the measured-best default for your embeddings |
 | `max_quality` | int4 + dp4a int8-query scoring (`Reranker(..., int4_query="int8")`) | quality SLAs at any corpus size — the strongest all-scale tier |
 | `balanced` | binary + fp16 per-token scales | small corpora (≲500 docs), where magnitude restoration measurably helps |
 | `compact` | binary + 4-bit log per-token scales | as `balanced`, 9% smaller index, statistically identical quality |
 | `max_speed` | binary signs | large corpora when storage is tight and latency is king |
 | `max_compression` | pooled binary (`pool_factor=2\|3`, needs `pip install -e ".[pooling]"`) | 10k+ docs where size dominates — pool3 *beats* plain binary at scale |
 
-**The tier ranking is corpus-size-dependent** (the paper's central finding):
-per-token scales help below ~500 documents and hurt at 10k+; pooling
-strengthens with scale. `auto` encodes exactly this.
+**The tier ranking is corpus-size- and geometry-dependent** (the paper's
+central finding): per-token scales help small visual corpora and hurt at
+10k+, pooling strengthens with scale — and on **unit-normalized text ColBERT
+embeddings** magnitude side-information inverts entirely (it becomes a
+sparsity statistic that down-weights informative tokens). `auto` measures
+your embeddings and encodes exactly this.
 
 <p align="center">
   <img src="docs/figures/scale_flip.png" width="620" alt="Each tier's NDCG delta versus plain binary across four corpus scales: token scales invert from gain to loss, pooling strengthens monotonically">
@@ -180,14 +183,18 @@ tables generated from the artifact ledger by `paper/make_figures.py` and
 - Latency validated on RTX 4090 (kernel findings may shift on other
   architectures); dim-128 embeddings are the tested path (dim must be
   divisible by 8; several fast paths are dim-128-specific).
-- Visual-document (ColPali-family) corpora are the evaluated domain;
-  text-only ColBERT replication is planned and not yet published.
+- Text ColBERT is measured (GTE-ModernColBERT on BEIR SciFact/NFCorpus,
+  `docs/benchmark_results/raw/text-beir-*.json`): binary/pooled binary retain
+  ~86–89% of dense NDCG@10 on SciFact at 32–96×, but the absolute gap
+  (−0.08 to −0.11) is ~10× larger than on visual corpora, and tier ordering
+  varies by dataset. Treat text as measured-with-caveats; text-tuned formats
+  (per-channel int4 scales) are the top roadmap item.
 - No prebuilt CUDA wheels yet; build from source.
 
 ## Roadmap
 
-1. Text ColBERT replication (BEIR subsets) — extend the validated claim from
-   visual to text late-interaction.
+1. Text-tuned compression tiers (per-channel/per-token int4 scales) — close
+   the measured text-vs-visual quality gap.
 2. Prebuilt CUDA wheels (`pip install maxsim` with no toolkit required).
 3. Adapters for PyLate/Byaldi/Qdrant-style workflows.
 4. Batched-query serving kernels and a hosted demo.

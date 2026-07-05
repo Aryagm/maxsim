@@ -165,9 +165,41 @@ def table_tenk():
     print("wrote tenk.tex")
 
 
+def table_text_beir():
+    tiers = [
+        ("dense_fp16_baseline", "dense fp16"),
+        ("int4_int8q_dp4a", "int4$+$dp4a"),
+        ("bitmax_binary", "binary"),
+        ("binary_token_scale_fp16_cuda", "fp16 scales"),
+        ("binary_token_scale_u4_cuda", "u4 scales"),
+        ("pool2_binary", "pool2"),
+        ("pool3_binary", "pool3"),
+    ]
+    pretty = {"scifact": "SciFact", "nfcorpus": "NFCorpus", "fiqa": "FiQA-2018"}
+    lines = [
+        "\\begin{tabular}{l r r " + "r " * len(tiers) + "}",
+        "\\toprule",
+        "dataset & docs & queries & " + " & ".join(label for _, label in tiers) + " \\\\",
+        "\\midrule",
+    ]
+    for path in sorted(RAW.glob("text-beir-*-r3.json")):
+        data = json.loads(path.read_text())
+        rows = {r["implementation"]: r for r in data["results"]}
+        ds = path.stem.replace("text-beir-", "").split("-gte-")[0]
+        cells = [pretty.get(ds, ds), f"{int(data['dataset']['docs']):,}", f"{int(data['dataset']['queries']):,}"]
+        for impl, _ in tiers:
+            row = rows.get(impl)
+            cells.append(f"{row['ndcg_at_10']:.4f}" if row else "---")
+        lines.append(" & ".join(cells) + " \\\\")
+    lines += ["\\bottomrule", "\\end{tabular}"]
+    (OUT / "text_beir.tex").write_text("\n".join(lines) + "\n")
+    print("wrote text_beir.tex")
+
+
 if __name__ == "__main__":
     table_per_dataset("paper-vidore-*colqwen2*-r3.json", "per_dataset_colqwen2.tex", " colqwen2")
     table_per_dataset("paper-vidore-*colpali*-r3.json", "per_dataset_colpali.tex", " colpali")
     table_significance()
     table_kernels()
     table_tenk()
+    table_text_beir()

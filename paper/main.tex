@@ -58,8 +58,14 @@ scale --- at 10{,}171 and 25{,}000 documents, a $3\times$-pooled binary tier at
 $95.9\times$ compression outperforms unpooled binary and matches a
 PLAID-style baseline's recall@10 at $28\times$ less storage, answering 256
 queries in 0.46\,s on one RTX~4090. We replicate the tier ordering on a second
-embedding model, correct a $27\times$ latency inflation in a na\"ive dense
-baseline before citing speedups, and report six measured negative results.
+visual embedding model, and a text-ColBERT replication on BEIR shows the
+frontier is additionally \emph{modality-dependent}: under the unit-normalized
+token embeddings conventional in text late interaction, magnitude
+side-information becomes a sparsity statistic that down-weights informative
+tokens, inverting its value --- so the released library selects tiers from
+measured embedding geometry, not assumptions. We correct a $27\times$ latency
+inflation in a na\"ive dense baseline before citing speedups, and report a
+catalogue of measured negative results.
 All kernels are parity-tested, and every number derives from committed JSON
 artifacts with stored per-query metrics.
 \end{abstract}
@@ -75,9 +81,11 @@ corpus of only $10^4$ visual pages already occupies gigabytes at fp32 ---
 storage, not compute, dominates deployment. \sysname{} addresses this as a
 runtime layer: it applies to any fixed-dimensional multi-vector embedding
 scored with dot-product MaxSim, independent of the producing model. Its
-\emph{interface} is that general; the \emph{empirical validation} in this
-paper is visual document retrieval, the setting where the storage problem is
-most acute (text-corpus replication is future work, Section~\ref{sec:limitations}).
+\emph{interface} is that general; the primary \emph{empirical validation} in
+this paper is visual document retrieval, the setting where the storage
+problem is most acute, with a text-ColBERT replication
+(Section~\ref{sec:text}) that measures --- rather than assumes --- the
+transfer.
 
 Compression of multi-vector representations is usually studied one technique
 at a time and on a single corpus size. Practitioners face a different
@@ -371,6 +379,49 @@ Replicating four datasets with ColPali-v1.3 preserves the tier ordering
 family rather than one model. Exact values are in
 Table~\ref{tab:perdataset-colpali}.
 
+\subsection{Text replication: the frontier is modality-dependent}
+\label{sec:text}
+
+\begin{table}[t]
+\centering
+\caption{Text-ColBERT replication (\texttt{GTE-ModernColBERT-v1}, BEIR test
+splits, repeat-3, RTX 4090): exact \ndcg{} per tier. Under unit-normalized
+token embeddings the visual-corpus tier ordering does not transfer: token
+scales collapse, per-tensor int4 under-quantizes, and int4 vs.\ binary flips
+between datasets.}
+\label{tab:text}
+\footnotesize
+\setlength{\tabcolsep}{3.6pt}
+\input{tables/text_beir}
+\end{table}
+
+Applying the identical ladder to a text ColBERT model
+(Table~\ref{tab:text}) is deliberately adversarial to our own defaults, and
+it falsifies two of them. Text ColBERT models emit \emph{unit-normalized}
+token vectors (measured norm dispersion $<10^{-4}$), and this single
+geometric property reorders the frontier. (i)~\textbf{Token scales become
+harmful at every corpus size}: with unit norms, $\mathrm{mean}|x_j|$ no
+longer measures salience but \emph{anti-sparsity} --- spiky, informative
+rare-term tokens receive the lowest scales --- and quality collapses (SciFact
+0.342 vs.\ 0.678 binary) despite the scale vector spanning only
+$[0.067,0.077]$. The effect is score-exact on CPU and CUDA (max deviation
+$10^{-6}$); it is the data, not the kernels. (ii)~\textbf{Per-tensor int4
+under-quantizes}: unit-norm values concentrate near $|x|\!\approx\!0.09$
+under a $\max|x|=0.39$ range, leaving $\sim$2 effective levels; int4 loses
+$-0.256$ on SciFact yet is the \emph{best} compressed tier on NFCorpus
+($-0.053$) --- the int4/binary ordering flips even within modality.
+(iii)~\textbf{Binary and pooled binary are the robust text tiers}, retaining
+86--89\% of dense \ndcg{} on SciFact at $32\times$--$96\times$, though the
+absolute gap ($-0.08$ to $-0.11$) is an order of magnitude larger than on
+visual corpora --- text late interaction needs text-tuned formats
+(per-channel or per-token int4 scales) before compression is as close to
+free as it is for visual documents. (iv)~The \texttt{binary\_q40} centroid
+calibration, benign on visual corpora, collapses to near-random on text
+(0.006/0.026) --- its threshold placement assumes skewed activations.
+Consequently the released \texttt{auto} tier inspects token-norm dispersion
+and routes unit-normalized corpora to plain binary, avoiding every
+measured-catastrophic configuration.
+
 \section{Negative Results}
 \label{sec:negative}
 
@@ -403,10 +454,12 @@ across three runs, two of which used identical tuned parameters
 (\texttt{nbits}=4, 4{,}096 full scores, 4 IVF probes) --- with index-build
 time co-varying (14.2\,s/29.8\,s/107.8\,s), while its quality stayed within
 0.5103--0.5119. We therefore cite its quality only; the instability deserves
-its own investigation before any comparative latency claim. Our corpora are
-visual documents; transfer to text-only ColBERT corpora is unverified. The
-scale-dependence mechanism is supported but not proven by our attribution
-analysis.
+its own investigation before any comparative latency claim. The text
+replication (Section~\ref{sec:text}) covers two BEIR datasets and one text
+model; its per-dataset heterogeneity (the int4/binary flip) means text tier
+recommendations rest on thinner evidence than the visual ones, and
+text-tuned formats remain future work. The scale-dependence mechanism is
+supported but not proven by our attribution analysis.
 
 \section*{Reproducibility Statement}
 Every reported number derives from a JSON artifact committed under
