@@ -41,11 +41,7 @@ jobs:
             yum-config-manager --add-repo
             https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo &&
             yum install -y cuda-nvcc-12-6 cuda-cudart-devel-12-6
-          CIBW_ENVIRONMENT_LINUX: >
-            MAXSIM_BUILD_CUDA=1
-            MAXSIM_CUDA_ARCH=80;86;89;90
-            PATH=/usr/local/cuda-12.6/bin:$PATH
-            CUDACXX=/usr/local/cuda-12.6/bin/nvcc
+          CIBW_ENVIRONMENT_LINUX: MAXSIM_BUILD_CUDA=1 MAXSIM_CUDA_ARCH="80;86;89;90" PATH=/usr/local/cuda-12.6/bin:$PATH CUDACXX=/usr/local/cuda-12.6/bin/nvcc
           # no GPU on the runner: import test only exercises the CPU path
           CIBW_TEST_COMMAND: python -c "import maxsim; print('wheel ok')"
       - uses: actions/upload-artifact@v4
