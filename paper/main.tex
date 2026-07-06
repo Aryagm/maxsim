@@ -55,9 +55,10 @@ side-information significantly improves quality on small corpora
 ($\le$\,500 documents) but significantly \emph{hurts} beyond
 $10^4$ documents, while token-pooled binary representations strengthen with
 scale --- at 10{,}171 and 25{,}000 documents, a $3\times$-pooled binary tier at
-$95.9\times$ compression outperforms unpooled binary and matches a
-PLAID-style baseline's recall@10 at $28\times$ less storage, answering 256
-queries in 0.46\,s on one RTX~4090. We replicate the tier ordering on a second
+$95.9\times$ compression reaches parity with unpooled binary (the sign of
+the small residual gap depends on the query set) and matches a PLAID-style
+baseline's recall@10 at $28\times$ less storage, answering 256 queries in
+0.46\,s on one RTX~4090. We replicate the tier ordering on a second
 visual embedding model, and a text-ColBERT replication on BEIR shows the
 frontier is additionally \emph{modality-dependent}: under the unit-normalized
 token embeddings conventional in text late interaction, magnitude
@@ -299,11 +300,13 @@ intervals, pooled over the full suite (8{,}443 queries; two-sided sign tests;
 \centering
 \includegraphics[width=.8\linewidth]{figures/scale_flip.pdf}
 \caption{Quality of each tier relative to plain binary across four corpus
-scales, with terminal values annotated. Vertical bands at the suite point are
-95\% bootstrap CIs from Table~\ref{tab:significance}. Token-scale tiers win
-only on the smallest corpus; pooled tiers strengthen monotonically with
-scale. Each point compares methods on an identical corpus; corpora differ
-between points.}
+scales, with terminal values annotated (256-query comparison protocol).
+Vertical bands at the suite point are 95\% bootstrap CIs from
+Table~\ref{tab:significance}. Token-scale tiers win only on the smallest
+corpus; pooled tiers strengthen monotonically with scale, though the sign of
+the small pool3--binary gap at 10k+ is query-set-dependent
+(Section~5.2). Each point compares methods on an identical corpus; corpora
+differ between points.}
 \label{fig:scaleflip}
 \end{figure}
 
@@ -312,8 +315,18 @@ fp16 token scales recover 86\% of the binary-to-dense gap ($+0.0092$ over
 binary). Pooled over the 0.5--1.7k-document suite, the same tier is already
 \emph{significantly below} plain binary ($-0.0015$, $p{=}0.003$), and at
 10{,}171 documents the deficit grows to $-0.0059$. Pooling shows the opposite
-trend: pool3 costs $-0.0133$ versus binary at 256 documents but \emph{gains}
-$+0.0112$ at 10k and $+0.0238$ at 25k. We attribute the token-scale reversal
+trend: pool3 costs $-0.0133$ versus binary at 256 documents but reaches
+$+0.0112$ at 10k and $+0.0238$ at 25k on the 256-query comparison protocol.
+A re-evaluation of the same 10k corpus under its full 17{,}763-query set
+reverses the residual gap ($-0.0062$), so we claim the robust form of the
+finding: pooling's \emph{relative} quality improves monotonically with
+corpus scale, from clearly-losing at hundreds of documents to
+query-set-dependent parity at $10^4$+ --- while its storage advantage is
+unconditional. The same large-query evaluation sweeps pooling factors 2--6
+and finds monotone decline ($0.5821/0.5795/0.5760/0.5726/0.5700$ vs.\
+binary $0.5857$): there is no pooling scaling law; factors beyond 3 are
+strictly dominated, and the frontier's extreme end is pool2--pool3.
+We attribute the token-scale reversal
 to magnitude heterogeneity across a mixed corpus --- high-norm tokens from
 foreign documents win per-query-token maxima that sign information alone
 would not grant them --- and pooling's relative strength at scale to its

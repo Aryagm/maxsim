@@ -1,0 +1,19 @@
+{
+  "cache": "vidore-mixed-public-unique-colqwen2-limit10000.npz",
+  "results": {
+    "pool1_binary": {
+      "ndcg_at_10": 0.5856639899755509,
+      "tokens": 7588187
+    },
+    "pool2_binary": {
+      "ndcg_at_10": 0.582088881371185,
+      "tokens": 3798767,
+      "approx_compression_vs_fp32": 63.9
+    },
+    "pool3_binary": {
+      "ndcg_at_10": 0.5795134130355714,
+      "tokens": 2532147,
+      "approx_compression_vs_fp32": 95.9
+    }
+  }
+}

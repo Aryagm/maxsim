@@ -86,6 +86,11 @@ one RTX 4090, repeat 3
 For calibration: FAISS GPU mean-pooling (single-vector) collapses to NDCG@10
 0.036 on this corpus, and a PLAID-style baseline (`fast-plaid`) matches dense
 quality at 3.4× compression — pool3 ties its recall@10 at 28× less storage.
+One honest caveat: the small pool3-vs-binary quality gap at 10k+ is
+query-set-dependent (a 17,763-query re-evaluation of the same corpus
+reverses it to −0.006); pooling's robust property is *relative* improvement
+with corpus scale plus unconditional storage savings. Pool factors beyond 3
+are strictly dominated (measured 2–6).
 
 Full ViDoRe suite (10 datasets, complete test splits, 8,443 queries), paired
 per-query analysis with 10k-sample bootstrap CIs and two-sided sign tests
@@ -193,8 +198,12 @@ tables generated from the artifact ledger by `paper/make_figures.py` and
 
 ## Roadmap
 
-1. Text-tuned compression tiers (per-channel/per-token int4 scales) — close
-   the measured text-vs-visual quality gap.
+1. Per-token int4 kernels — the format is validated across text, visual, and
+   audio (beats binary on all three BEIR text sets, ties dense on Clotho
+   audio); CUDA scoring for it is the next kernel.
+   (jina-embeddings-v4 as a fourth family is deferred: its remote code is
+   incompatible with our benchmark environment across three transformers
+   versions.)
 2. Prebuilt CUDA wheels (`pip install maxsim` with no toolkit required).
 3. Adapters for PyLate/Byaldi/Qdrant-style workflows.
 4. Batched-query serving kernels and a hosted demo.
