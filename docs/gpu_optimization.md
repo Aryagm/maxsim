@@ -726,3 +726,33 @@ quality parity is citable, its latency is not without further investigation.
 pool3 ties fast-plaid on recall@10 at 28x its compression and ~370x its
 measured latency. Token scales again below plain binary at 10k (third
 independent corpus build confirming the small-corpus-only verdict).
+
+## 2026-07-05 — Multimodal families and the universal per-token int4 tier
+
+All experiments local CPU (archived caches) except audio (Vast 4090, instance
+43959730, destroyed). Artifacts: `exp-scale-inversion-*.json`,
+`exp-int4-variants-*.json`, `exp-eval-*.json`, `exp-pool-scaling-*.json`.
+
+- **Per-token int4 scales are the universal 8x-class tier**: beats binary on
+  all three BEIR text sets (.698/.360/.339 vs .678/.267/.277), best on the
+  visual 10k 2k-query subsample (.6074), ties on audio. Our earlier -0.011
+  rejection on a 256-doc slice was a small-slice artifact. CUDA kernel
+  (scale-before-max, as in the binary token-scale kernels) is roadmap #1;
+  until then the format is simulation-validated only.
+- **Audio validated (Clotho x ColQwen-Omni, 1,045 clips)**: dense .3129,
+  int4 .3133 (ties dense), binary .2904, pool2/3 .276. Non-unit-norm; the
+  auto geometry rule extends to a third modality unchanged.
+- **Scale inversion refuted with mechanism confirmed**: inverse-mean-abs
+  beats mean-abs on both text sets (direction proof of the anti-sparsity
+  mechanism) but nothing beats flat binary; spikiness weights collapse to ~0.
+- **No pooling scaling law**: factors 2-6 decline monotonically on the
+  17,763-query 10k evaluation (.5821/.5795/.5760/.5726/.5700 vs binary
+  .5857). pool3>binary at 10k is query-set-dependent (256-q protocol +.011,
+  full-query -.006): claim the relative-improvement-with-scale trend, not
+  strict crossover. pool4+ strictly dominated.
+- **jina-embeddings-v4 deferred**: remote code incompatible at transformers
+  5.12.1 (ROPE 'default'), 4.52.4 and 4.51.3 (ALL_PARALLEL_STYLES None in a
+  torch-distributed-less env).
+- Ops notes: vast direct ssh (`vastai ssh-url`) beats the flaky gateways;
+  colqwen-omni needs colpali-engine + matched torchvision; Clotho pulls from
+  Zenodo + p7zip. Audio cache archived in `caches-full/multimodal/`.
