@@ -1,0 +1,11 @@
+{
+  "cache": "vidore-mixed-public-unique-colqwen2-limit10000.npz",
+  "queries_sampled": 2000,
+  "seed": 42,
+  "ndcg_at_10": {
+    "int4_per_tensor": 0.6047054138366097,
+    "int4_per_token": 0.6073948454394893,
+    "int4_per_channel": 0.6055701366044438,
+    "binary": 0.5971761375104662
+  }
+}

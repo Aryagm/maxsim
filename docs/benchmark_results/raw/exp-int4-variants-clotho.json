@@ -1,0 +1,8 @@
+{
+  "cache": "clotho-eval-omni.npz",
+  "ndcg_at_10": {
+    "int4_per_tensor": 0.313285152596164,
+    "int4_per_token": 0.31299849613959957,
+    "int4_per_channel": 0.3133904508533161
+  }
+}

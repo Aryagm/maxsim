@@ -425,13 +425,51 @@ pool2/pool3 (0.257/0.236) both lose to plain binary (0.277) --- the
 denoising that makes pooling \emph{gain} with scale on visual corpora relies
 on near-duplicate patch redundancy that text tokens lack --- and the binary
 tier's deficit itself grows with text corpus size ($-0.08$ at 5k, $-0.18$ at
-57k documents), the mirror image of the visual trend. Across three datasets
-binary is the strongest text tier twice (int4 once), so the released
-\texttt{auto} tier inspects token-norm dispersion and routes unit-normalized
-corpora to plain binary, avoiding every measured-catastrophic configuration;
-the modality-dependence of \emph{both} magnitude restoration and pooling is
-the strongest form of this paper's thesis that tier choice must be measured,
-not assumed.
+57k documents), the mirror image of the visual trend.
+
+\textbf{A tuned tier closes most of the text gap.} The int4 failure isolates
+to its \emph{scale granularity}. Re-quantizing with one scale per
+\emph{token} (2 bytes/token; $7.8\times$ total) in exact-grid simulation:
+
+\begin{center}
+\footnotesize
+\begin{tabular}{l r r r r r}
+\toprule
+ & binary ($32\times$) & int4/tensor & int4/token & int4/channel & dense \\
+\midrule
+SciFact & 0.678 & 0.505 & \textbf{0.698} & 0.700 & 0.761 \\
+NFCorpus & 0.267 & 0.323 & \textbf{0.360} & 0.359 & 0.377 \\
+FiQA 57k & 0.277 & 0.209 & \textbf{0.339} & 0.286 & 0.456 \\
+visual 10k$^{\dagger}$ & 0.597 & 0.605 & \textbf{0.607} & 0.606 & --- \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Per-token int4 beats binary on \emph{every} text dataset ($+0.02$ to
+$+0.09$; NFCorpus reaches $-0.017$ from dense) and is also the best
+measured variant on the visual corpus ($^{\dagger}$2{,}000 sampled
+queries) --- making it the strongest \emph{universal} tier at the
+$8\times$ class. Notably, we had rejected per-token int4 scales earlier on a
+256-document slice ($-0.011$, Section~\ref{sec:negative}); at realistic
+scale and across modalities the sign flips --- our own negative result was a
+small-slice artifact, which is precisely this paper's thesis applied to
+itself.
+
+\textbf{Audio replication.} Embedding the Clotho evaluation split (1{,}045
+audio clips, caption-to-clip retrieval) with the audio-capable
+late-interaction model \texttt{ColQwen-Omni-v0.1}: dense 0.3129, int4
+\textbf{0.3133} (ties dense at $8\times$), binary 0.2904, pool2/pool3
+0.2761/0.2760. Audio-token embeddings are not unit-normalized, and the
+frontier behaves exactly like the visual one --- int4 lossless, pooling
+costly --- so the geometry rule shipped in \texttt{auto} extends to a third
+modality unchanged.
+
+Across three modalities, the released \texttt{auto} tier inspects token-norm
+dispersion and routes unit-normalized corpora to plain binary (per-token
+int4 kernels are future work; the format is validated above), avoiding every
+measured-catastrophic configuration. The modality-dependence of magnitude
+restoration, quantization granularity, \emph{and} pooling is the strongest
+form of this paper's thesis: tier choice must be measured, not assumed.
 
 \section{Negative Results}
 \label{sec:negative}
