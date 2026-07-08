@@ -1,0 +1,28 @@
+{
+  "cache": "beir-scifact-gte-moderncolbert.npz",
+  "ndcg_at_10": {
+    "dense": 0.7607817410759278,
+    "binary": 0.6782767207225392,
+    "int4": 0.6980302375143059,
+    "res2_global": 0.3221155219748246,
+    "res2_pertoken": 0.40007431472559624,
+    "res2_ratio": 0.4737219129178786,
+    "res3_global": 0.5687353715679647
+  },
+  "recon_mse": {
+    "dense": 0.0,
+    "binary": 0.0024757643695920706,
+    "int4": 9.094728739000857e-05,
+    "res2_global": 0.0008483349811285734,
+    "res2_pertoken": 0.0008468344458378851,
+    "res3_global": 0.0003362967981956899,
+    "res2_ratio": 0.0008468344458378851
+  },
+  "recipe": {
+    "script": "benchmarks/exp_residual_binary.py",
+    "args": [
+      "caches-full/beir/beir-scifact-gte-moderncolbert.npz"
+    ],
+    "cache": "beir-scifact-gte-moderncolbert.npz"
+  }
+}

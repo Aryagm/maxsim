@@ -1,0 +1,28 @@
+{
+  "cache": "beir-nfcorpus-gte-moderncolbert.npz",
+  "ndcg_at_10": {
+    "dense": 0.3766717741082851,
+    "binary": 0.2664416004882442,
+    "int4": 0.360401396434259,
+    "res2_global": 0.2276311098354482,
+    "res2_pertoken": 0.2270394861156927,
+    "res2_ratio": 0.2277952347370719,
+    "res3_global": 0.32494497104861597
+  },
+  "recon_mse": {
+    "dense": 0.0,
+    "binary": 0.002489438047632575,
+    "int4": 9.341621625935659e-05,
+    "res2_global": 0.0008647340000607073,
+    "res2_pertoken": 0.0008631265955045819,
+    "res3_global": 0.00034772310755215585,
+    "res2_ratio": 0.0008631265955045819
+  },
+  "recipe": {
+    "script": "benchmarks/exp_residual_binary.py",
+    "args": [
+      "caches-full/beir/beir-nfcorpus-gte-moderncolbert.npz"
+    ],
+    "cache": "beir-nfcorpus-gte-moderncolbert.npz"
+  }
+}

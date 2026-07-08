@@ -1,0 +1,265 @@
+{
+  "cache": "beir-scifact-gte-moderncolbert.npz",
+  "num_docs": 5183,
+  "num_queries": 300,
+  "fullscan_ndcg_at_10": {
+    "binary": 0.6782767207225392,
+    "dense": 0.7607817410759278,
+    "embedded": 0.757732159952938,
+    "int4_pertoken": 0.6980302375143059,
+    "int8_pertoken": 0.7565073724082663
+  },
+  "cascades": [
+    {
+      "coarse": "int4_pertoken",
+      "rescore": "dense",
+      "m": 25,
+      "ndcg_at_10": 0.7503659034798857,
+      "recall_of_rescore_top10": 0.8206666666666667,
+      "delta_vs_rescore_fullscan": -0.010415837596042032,
+      "hot_bytes_per_token": 66.0,
+      "total_bytes_per_token": 578.0
+    },
+    {
+      "coarse": "int4_pertoken",
+      "rescore": "dense",
+      "m": 50,
+      "ndcg_at_10": 0.7599964371830883,
+      "recall_of_rescore_top10": 0.9183333333333333,
+      "delta_vs_rescore_fullscan": -0.000785303892839484,
+      "hot_bytes_per_token": 66.0,
+      "total_bytes_per_token": 578.0
+    },
+    {
+      "coarse": "int4_pertoken",
+      "rescore": "dense",
+      "m": 100,
+      "ndcg_at_10": 0.7617851743948078,
+      "recall_of_rescore_top10": 0.9616666666666667,
+      "delta_vs_rescore_fullscan": 0.001003433318879976,
+      "hot_bytes_per_token": 66.0,
+      "total_bytes_per_token": 578.0
+    },
+    {
+      "coarse": "int4_pertoken",
+      "rescore": "dense",
+      "m": 200,
+      "ndcg_at_10": 0.7607817410759278,
+      "recall_of_rescore_top10": 0.9830000000000001,
+      "delta_vs_rescore_fullscan": 0.0,
+      "hot_bytes_per_token": 66.0,
+      "total_bytes_per_token": 578.0
+    },
+    {
+      "coarse": "int4_pertoken",
+      "rescore": "int8_pertoken",
+      "m": 25,
+      "ndcg_at_10": 0.746935432539823,
+      "recall_of_rescore_top10": 0.8206666666666668,
+      "delta_vs_rescore_fullscan": -0.009571939868443291,
+      "hot_bytes_per_token": 66.0,
+      "total_bytes_per_token": 196.0
+    },
+    {
+      "coarse": "int4_pertoken",
+      "rescore": "int8_pertoken",
+      "m": 50,
+      "ndcg_at_10": 0.7556340683472007,
+      "recall_of_rescore_top10": 0.9180000000000001,
+      "delta_vs_rescore_fullscan": -0.0008733040610655607,
+      "hot_bytes_per_token": 66.0,
+      "total_bytes_per_token": 196.0
+    },
+    {
+      "coarse": "int4_pertoken",
+      "rescore": "int8_pertoken",
+      "m": 100,
+      "ndcg_at_10": 0.7577977194487637,
+      "recall_of_rescore_top10": 0.9613333333333333,
+      "delta_vs_rescore_fullscan": 0.0012903470404974637,
+      "hot_bytes_per_token": 66.0,
+      "total_bytes_per_token": 196.0
+    },
+    {
+      "coarse": "int4_pertoken",
+      "rescore": "int8_pertoken",
+      "m": 200,
+      "ndcg_at_10": 0.7568341700277041,
+      "recall_of_rescore_top10": 0.9826666666666669,
+      "delta_vs_rescore_fullscan": 0.00032679761943787966,
+      "hot_bytes_per_token": 66.0,
+      "total_bytes_per_token": 196.0
+    },
+    {
+      "coarse": "int4_pertoken",
+      "rescore": "embedded",
+      "m": 25,
+      "ndcg_at_10": 0.7476393314391742,
+      "recall_of_rescore_top10": 0.819,
+      "delta_vs_rescore_fullscan": -0.010092828513763807,
+      "hot_bytes_per_token": 66.0,
+      "total_bytes_per_token": 132.0
+    },
+    {
+      "coarse": "int4_pertoken",
+      "rescore": "embedded",
+      "m": 50,
+      "ndcg_at_10": 0.7568252002578864,
+      "recall_of_rescore_top10": 0.917,
+      "delta_vs_rescore_fullscan": -0.0009069596950516123,
+      "hot_bytes_per_token": 66.0,
+      "total_bytes_per_token": 132.0
+    },
+    {
+      "coarse": "int4_pertoken",
+      "rescore": "embedded",
+      "m": 100,
+      "ndcg_at_10": 0.7586957093739976,
+      "recall_of_rescore_top10": 0.9626666666666666,
+      "delta_vs_rescore_fullscan": 0.0009635494210595841,
+      "hot_bytes_per_token": 66.0,
+      "total_bytes_per_token": 132.0
+    },
+    {
+      "coarse": "int4_pertoken",
+      "rescore": "embedded",
+      "m": 200,
+      "ndcg_at_10": 0.757732159952938,
+      "recall_of_rescore_top10": 0.9830000000000001,
+      "delta_vs_rescore_fullscan": 0.0,
+      "hot_bytes_per_token": 66.0,
+      "total_bytes_per_token": 132.0
+    },
+    {
+      "coarse": "binary",
+      "rescore": "dense",
+      "m": 25,
+      "ndcg_at_10": 0.7307231415466293,
+      "recall_of_rescore_top10": 0.599,
+      "delta_vs_rescore_fullscan": -0.030058599529298458,
+      "hot_bytes_per_token": 16.0,
+      "total_bytes_per_token": 528.0
+    },
+    {
+      "coarse": "binary",
+      "rescore": "dense",
+      "m": 50,
+      "ndcg_at_10": 0.7409460021513498,
+      "recall_of_rescore_top10": 0.695,
+      "delta_vs_rescore_fullscan": -0.019835738924578017,
+      "hot_bytes_per_token": 16.0,
+      "total_bytes_per_token": 528.0
+    },
+    {
+      "coarse": "binary",
+      "rescore": "dense",
+      "m": 100,
+      "ndcg_at_10": 0.7529244525611278,
+      "recall_of_rescore_top10": 0.8003333333333335,
+      "delta_vs_rescore_fullscan": -0.007857288514799943,
+      "hot_bytes_per_token": 16.0,
+      "total_bytes_per_token": 528.0
+    },
+    {
+      "coarse": "binary",
+      "rescore": "dense",
+      "m": 200,
+      "ndcg_at_10": 0.7585973636557228,
+      "recall_of_rescore_top10": 0.876,
+      "delta_vs_rescore_fullscan": -0.0021843774202049415,
+      "hot_bytes_per_token": 16.0,
+      "total_bytes_per_token": 528.0
+    },
+    {
+      "coarse": "binary",
+      "rescore": "int8_pertoken",
+      "m": 25,
+      "ndcg_at_10": 0.7261223143328592,
+      "recall_of_rescore_top10": 0.6016666666666666,
+      "delta_vs_rescore_fullscan": -0.030385058075407034,
+      "hot_bytes_per_token": 16.0,
+      "total_bytes_per_token": 146.0
+    },
+    {
+      "coarse": "binary",
+      "rescore": "int8_pertoken",
+      "m": 50,
+      "ndcg_at_10": 0.7367375289776104,
+      "recall_of_rescore_top10": 0.6996666666666667,
+      "delta_vs_rescore_fullscan": -0.01976984343065591,
+      "hot_bytes_per_token": 16.0,
+      "total_bytes_per_token": 146.0
+    },
+    {
+      "coarse": "binary",
+      "rescore": "int8_pertoken",
+      "m": 100,
+      "ndcg_at_10": 0.7486731025229868,
+      "recall_of_rescore_top10": 0.803,
+      "delta_vs_rescore_fullscan": -0.007834269885279466,
+      "hot_bytes_per_token": 16.0,
+      "total_bytes_per_token": 146.0
+    },
+    {
+      "coarse": "binary",
+      "rescore": "int8_pertoken",
+      "m": 200,
+      "ndcg_at_10": 0.7546043829845361,
+      "recall_of_rescore_top10": 0.8790000000000001,
+      "delta_vs_rescore_fullscan": -0.0019029894237301281,
+      "hot_bytes_per_token": 16.0,
+      "total_bytes_per_token": 146.0
+    },
+    {
+      "coarse": "binary",
+      "rescore": "embedded",
+      "m": 25,
+      "ndcg_at_10": 0.7274098686565187,
+      "recall_of_rescore_top10": 0.6003333333333333,
+      "delta_vs_rescore_fullscan": -0.03032229129641928,
+      "hot_bytes_per_token": 16.0,
+      "total_bytes_per_token": 148.0
+    },
+    {
+      "coarse": "binary",
+      "rescore": "embedded",
+      "m": 50,
+      "ndcg_at_10": 0.7383737952213469,
+      "recall_of_rescore_top10": 0.6983333333333334,
+      "delta_vs_rescore_fullscan": -0.019358364731591027,
+      "hot_bytes_per_token": 16.0,
+      "total_bytes_per_token": 148.0
+    },
+    {
+      "coarse": "binary",
+      "rescore": "embedded",
+      "m": 100,
+      "ndcg_at_10": 0.7499075271779744,
+      "recall_of_rescore_top10": 0.8033333333333333,
+      "delta_vs_rescore_fullscan": -0.007824632774963591,
+      "hot_bytes_per_token": 16.0,
+      "total_bytes_per_token": 148.0
+    },
+    {
+      "coarse": "binary",
+      "rescore": "embedded",
+      "m": 200,
+      "ndcg_at_10": 0.7564295600494008,
+      "recall_of_rescore_top10": 0.8773333333333335,
+      "delta_vs_rescore_fullscan": -0.001302599903537205,
+      "hot_bytes_per_token": 16.0,
+      "total_bytes_per_token": 148.0
+    }
+  ],
+  "recipe": {
+    "script": "benchmarks/exp_cascade_rescoring.py",
+    "args": [
+      "caches-full/beir/beir-scifact-gte-moderncolbert.npz",
+      "--coarse",
+      "int4_pertoken",
+      "--coarse",
+      "binary"
+    ],
+    "cache": "beir-scifact-gte-moderncolbert.npz"
+  }
+}
