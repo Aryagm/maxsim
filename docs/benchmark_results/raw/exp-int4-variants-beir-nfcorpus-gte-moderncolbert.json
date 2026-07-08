@@ -4,5 +4,12 @@
     "int4_per_tensor": 0.3230944662628092,
     "int4_per_token": 0.360401396434259,
     "int4_per_channel": 0.35869187080376963
+  },
+  "recipe": {
+    "script": "benchmarks/exp_int4_variants.py",
+    "args": [
+      "caches-full/beir/beir-nfcorpus-gte-moderncolbert.npz"
+    ],
+    "cache": "beir-nfcorpus-gte-moderncolbert.npz"
   }
 }
