@@ -46,6 +46,11 @@ retriever.
 Use `device="cuda"` for production benchmark claims. CPU is available for
 correctness checks and small local experiments.
 
+Both `search` and `rerank` accept `reducer`, `query_weights`, and `temperature`
+with the same meanings as the low-level reducer API below. `rerank` passes the
+resolved candidate positions to the candidate-only scorer instead of scoring
+the full corpus. The calibrated `binary_q40` mode currently remains MaxSim-only.
+
 ## Low-Level API
 
 The lower-level kernel API exposes direct packed scoring:
@@ -68,6 +73,67 @@ applies stored scales by default. CUDA-resident `PackedDocs` upload stored
 per-document scales with the packed document bits, so resident `maxsim` and
 fused `topk_maxsim` can apply those scales on device. Host-packed CUDA and CPU
 paths still apply vector scales after native scoring.
+
+## CUDA reducer selection
+
+`maxsim.score` selects the token-to-document reduction without changing the
+packed binary or int4 representation. The default remains ordinary MaxSim, so
+existing `maxsim.maxsim(query_tokens, packed)` calls keep their behavior and
+their tuned legacy CUDA path.
+
+```python
+scores = maxsim.score(query_tokens, cuda_packed, reducer="maxsim")
+weighted = maxsim.score(
+    query_tokens,
+    cuda_packed,
+    reducer="weighted_maxsim",
+    query_weights=query_weights,
+)
+top4 = maxsim.score(query_tokens, cuda_packed, reducer="topk4")
+smooth = maxsim.score(
+    query_tokens,
+    cuda_packed,
+    reducer="smoothsim",
+    temperature=0.25,
+)
+
+# Score only these documents, returning columns in this exact order.
+candidate_scores = maxsim.score(
+    query_tokens,
+    cuda_packed,
+    reducer="topk2",
+    candidate_indices=np.array([19, 3, 11], dtype=np.int64),
+)
+```
+
+For query token `i`, document token `j`, similarity `s[i,j]`, and a document
+with `m` tokens, the supported reducers are:
+
+- `maxsim`: `sum_i max_j s[i,j]`.
+- `weighted_maxsim`: `sum_i w[i] max_j s[i,j]`. `query_weights` has shape
+  `[query_tokens]` or `[batch, query_tokens]`.
+- `topk2` and `topk4`: `sum_i mean(top_k_j s[i,j])`, with `k=2` or `k=4`.
+  A document shorter than `k` averages its available `min(k, m)` tokens.
+- `smoothsim`: `sum_i temperature * logsumexp_j(s[i,j] / temperature)`.
+  `temperature` must be finite and greater than zero. The CUDA policy uses a
+  max-shifted log-sum-exp so large logits remain finite.
+
+Empty documents score zero for every reducer. `candidate_indices` is an
+optional one-dimensional integer array of document positions. Candidate-only
+scoring reads only those documents and returns `[batch, candidates]` (or
+`[candidates]` for one unbatched query) in caller-provided order; it does not
+sort or deduplicate the positions.
+
+The same reducer arguments work with CUDA-resident `Int4PackedDocs` through
+`maxsim.score` or `maxsim.experimental.int4_maxsim`. Binary token scales and
+document scales, and the intrinsic int4 quantization scale, are applied in the
+similarity units expected by each reducer. In particular, SmoothSim applies
+reconstruction scale before log-sum-exp because that reduction is nonlinear.
+
+On a CUDA host, run `python benchmarks/run_cuda_reducers.py` to record PyTorch
+reference deltas plus best and median end-to-end latency for both formats, all
+reducers, and full-corpus versus candidate-only scoring. The default JSON output
+is `benchmark-results/cuda-reducers.json`.
 
 ## Experimental Centroid Binary
 

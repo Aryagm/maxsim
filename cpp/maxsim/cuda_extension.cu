@@ -4,6 +4,8 @@
 #include <cuda_runtime.h>
 
 #include <algorithm>
+#include <array>
+#include <cmath>
 #include <cstdint>
 #include <cstddef>
 #include <stdexcept>
@@ -15,6 +17,7 @@ namespace {
 
 constexpr int kBlockThreads = 128;
 constexpr int kTopkThreads = 256;
+constexpr float kLowestFloat = -3.402823466e+38F;
 
 // Runtime-tunable routing gate for the dim128 unrolled scoring kernel.
 // Corpora with at least this many average tokens per document use the
@@ -33,6 +36,11 @@ int g_dim128_unrolled_min_avg_tokens = 256;
 // values. Kept for evidence and future architectures; enable via
 // set_dim128_qtile_min_packed_bytes.
 std::size_t g_dim128_qtile_min_packed_bytes = ~static_cast<std::size_t>(0);
+
+// Shared reducer launch shape. Four warps is the measured general-purpose
+// default on SM89; zero preserves the block-wide baseline and eight remains
+// available for benchmark-driven tuning of high-query-token workloads.
+thread_local int g_shared_reducer_warps = 4;
 
 constexpr int kQTile = 8;
 
@@ -383,6 +391,546 @@ __device__ __forceinline__ float dot_int4(const float* query_row, const std::uin
     dot += static_cast<float>(signed_int4(byte >> 4)) * query_row[dim_idx + 1];
   }
   return dot;
+}
+
+// ---------------------------------------------------------------------------
+// Shared compressed multi-vector reduction framework.
+//
+// Loader policies own only packed-row decoding. Reducer policies own only the
+// per-query-token aggregation. The host performs a one-time runtime dispatch
+// to a concrete policy, so the inner token loop has no reducer branches. The
+// legacy MaxSim entry points below remain routed through their tuned kernels;
+// this framework backs generalized reducers and candidate-only scoring.
+// ---------------------------------------------------------------------------
+
+struct BinaryPackedLoader {
+  __device__ __forceinline__ static float load(
+      const float* query_row,
+      const std::uint8_t* packed,
+      std::int64_t token,
+      int dim) {
+    const int byte_dim = dim / 8;
+    const std::uint8_t* packed_row = packed + token * byte_dim;
+    float dot = 0.0F;
+    for (int byte_idx = 0; byte_idx < byte_dim; ++byte_idx) {
+      const std::uint8_t byte = packed_row[byte_idx];
+      for (int bit = 0; bit < 8; ++bit) {
+        const float sign = ((byte >> bit) & 1U) ? 1.0F : -1.0F;
+        dot += sign * query_row[byte_idx * 8 + bit];
+      }
+    }
+    return dot;
+  }
+};
+
+struct BinaryDim128UnrolledPackedLoader {
+  __device__ __forceinline__ static float load(
+      const float* query_row,
+      const std::uint8_t* packed,
+      std::int64_t token,
+      int) {
+    return dot_dim128_unrolled(query_row, packed + token * 16);
+  }
+};
+
+struct Int4PackedLoader {
+  __device__ __forceinline__ static float load(
+      const float* query_row,
+      const std::uint8_t* packed,
+      std::int64_t token,
+      int dim) {
+    return dot_int4(query_row, packed + token * (dim / 2), dim);
+  }
+};
+
+struct MaxSimReducerPolicy {
+  struct State {
+    float best;
+    int count;
+  };
+
+  static constexpr bool kScaleBeforeReduction = false;
+  static constexpr bool kRequiresWeights = false;
+
+  __device__ __forceinline__ static State identity() { return {kLowestFloat, 0}; }
+
+  __device__ __forceinline__ static void add(State& state, float value, float) {
+    state.best = state.count == 0 || value > state.best ? value : state.best;
+    ++state.count;
+  }
+
+  __device__ __forceinline__ static State merge(State left, State right, float) {
+    if (left.count == 0) {
+      return right;
+    }
+    if (right.count == 0) {
+      return left;
+    }
+    left.best = right.best > left.best ? right.best : left.best;
+    left.count += right.count;
+    return left;
+  }
+
+  __device__ __forceinline__ static State shuffle_down(State state, int delta, unsigned mask) {
+    state.best = __shfl_down_sync(mask, state.best, delta);
+    state.count = __shfl_down_sync(mask, state.count, delta);
+    return state;
+  }
+
+  __device__ __forceinline__ static float finish(State state, float, float) {
+    return state.count == 0 ? 0.0F : state.best;
+  }
+};
+
+struct WeightedMaxSimReducerPolicy : MaxSimReducerPolicy {
+  static constexpr bool kRequiresWeights = true;
+
+  __device__ __forceinline__ static float finish(State state, float weight, float) {
+    return state.count == 0 ? 0.0F : state.best * weight;
+  }
+};
+
+template <int K>
+struct TopKSimReducerPolicy {
+  static_assert(K == 2 || K == 4, "TopKSim is instantiated only for k=2 or k=4");
+
+  struct State {
+    float best[K];
+    int count;
+  };
+
+  static constexpr bool kScaleBeforeReduction = false;
+  static constexpr bool kRequiresWeights = false;
+
+  __device__ __forceinline__ static State identity() {
+    State state;
+#pragma unroll
+    for (int idx = 0; idx < K; ++idx) {
+      state.best[idx] = kLowestFloat;
+    }
+    state.count = 0;
+    return state;
+  }
+
+  __device__ __forceinline__ static void add(State& state, float value, float) {
+    // Fixed-size insertion keeps every TopK value in registers. A dynamic
+    // insertion position caused nvcc to spill the K=4 state to local memory.
+#pragma unroll
+    for (int idx = 0; idx < K; ++idx) {
+      if (value > state.best[idx]) {
+        const float displaced = state.best[idx];
+        state.best[idx] = value;
+        value = displaced;
+      }
+    }
+    state.count = state.count < K ? state.count + 1 : K;
+  }
+
+  __device__ __forceinline__ static State merge(State left, State right, float temperature) {
+    const int right_kept = right.count < K ? right.count : K;
+#pragma unroll
+    for (int idx = 0; idx < K; ++idx) {
+      if (idx < right_kept) {
+        add(left, right.best[idx], temperature);
+      }
+    }
+    return left;
+  }
+
+  __device__ __forceinline__ static State shuffle_down(State state, int delta, unsigned mask) {
+#pragma unroll
+    for (int idx = 0; idx < K; ++idx) {
+      state.best[idx] = __shfl_down_sync(mask, state.best[idx], delta);
+    }
+    state.count = __shfl_down_sync(mask, state.count, delta);
+    return state;
+  }
+
+  __device__ __forceinline__ static float finish(State state, float, float) {
+    const int kept = state.count < K ? state.count : K;
+    if (kept == 0) {
+      return 0.0F;
+    }
+    float total = 0.0F;
+#pragma unroll
+    for (int idx = 0; idx < K; ++idx) {
+      if (idx < kept) {
+        total += state.best[idx];
+      }
+    }
+    return total / static_cast<float>(kept);
+  }
+};
+
+struct SmoothSimReducerPolicy {
+  struct State {
+    float maximum;
+    float exp_sum;
+  };
+
+  // SmoothSim is nonlinear in the reconstruction scale. Apply the document
+  // scale to each similarity before the log-sum-exp reduction so temperature
+  // is expressed in the same units as the returned score.
+  static constexpr bool kScaleBeforeReduction = true;
+  static constexpr bool kRequiresWeights = false;
+
+  __device__ __forceinline__ static State identity() { return {kLowestFloat, 0.0F}; }
+
+  __device__ __forceinline__ static void add(State& state, float value, float temperature) {
+    if (state.exp_sum == 0.0F) {
+      state.maximum = value;
+      state.exp_sum = 1.0F;
+      return;
+    }
+    if (value == state.maximum) {
+      state.exp_sum += 1.0F;
+    } else if (value < state.maximum) {
+      state.exp_sum += expf((value - state.maximum) / temperature);
+    } else {
+      state.exp_sum = state.exp_sum * expf((state.maximum - value) / temperature) + 1.0F;
+      state.maximum = value;
+    }
+  }
+
+  __device__ __forceinline__ static State merge(State left, State right, float temperature) {
+    if (left.exp_sum == 0.0F) {
+      return right;
+    }
+    if (right.exp_sum == 0.0F) {
+      return left;
+    }
+    if (left.maximum == right.maximum) {
+      left.exp_sum += right.exp_sum;
+    } else if (right.maximum < left.maximum) {
+      left.exp_sum += right.exp_sum * expf((right.maximum - left.maximum) / temperature);
+    } else {
+      left.exp_sum = left.exp_sum * expf((left.maximum - right.maximum) / temperature) + right.exp_sum;
+      left.maximum = right.maximum;
+    }
+    return left;
+  }
+
+  __device__ __forceinline__ static State shuffle_down(State state, int delta, unsigned mask) {
+    state.maximum = __shfl_down_sync(mask, state.maximum, delta);
+    state.exp_sum = __shfl_down_sync(mask, state.exp_sum, delta);
+    return state;
+  }
+
+  __device__ __forceinline__ static float finish(State state, float, float temperature) {
+    return state.exp_sum == 0.0F ? 0.0F : state.maximum + temperature * logf(state.exp_sum);
+  }
+};
+
+enum class ReducerKind {
+  kMaxSim,
+  kWeightedMaxSim,
+  kTopK2,
+  kTopK4,
+  kSmoothSim,
+};
+
+ReducerKind parse_reducer_kind(const std::string& reducer) {
+  if (reducer == "maxsim") {
+    return ReducerKind::kMaxSim;
+  }
+  if (reducer == "weighted_maxsim") {
+    return ReducerKind::kWeightedMaxSim;
+  }
+  if (reducer == "topk2") {
+    return ReducerKind::kTopK2;
+  }
+  if (reducer == "topk4") {
+    return ReducerKind::kTopK4;
+  }
+  if (reducer == "smoothsim") {
+    return ReducerKind::kSmoothSim;
+  }
+  throw std::invalid_argument("reducer must be one of 'maxsim', 'weighted_maxsim', 'topk2', 'topk4', or 'smoothsim'");
+}
+
+template <typename Loader, typename Reducer>
+__global__ void compressed_score_batched_kernel(
+    const float* query,
+    const std::uint8_t* packed,
+    const std::int64_t* offsets,
+    const std::int64_t* candidate_indices,
+    float* output,
+    int batch,
+    int query_tokens,
+    int dim,
+    int num_targets,
+    float scale,
+    const float* scale_vector,
+    const float* token_scales,
+    const float* query_weights,
+    bool weights_batched,
+    float temperature) {
+  const int target_idx = blockIdx.x;
+  const int batch_idx = blockIdx.y;
+  const int tid = threadIdx.x;
+  __shared__ typename Reducer::State reductions[kBlockThreads];
+
+  if (target_idx >= num_targets || batch_idx >= batch) {
+    return;
+  }
+
+  const int doc_idx = candidate_indices == nullptr
+      ? target_idx
+      : static_cast<int>(candidate_indices[target_idx]);
+  const std::int64_t start = offsets[doc_idx];
+  const std::int64_t end = offsets[doc_idx + 1];
+  const float doc_scale = scale_vector == nullptr ? scale : scale_vector[doc_idx];
+  float doc_score = 0.0F;
+
+  for (int q = 0; q < query_tokens; ++q) {
+    typename Reducer::State local = Reducer::identity();
+    const float* query_row = query + (static_cast<std::int64_t>(batch_idx) * query_tokens + q) * dim;
+    for (std::int64_t token = start + tid; token < end; token += blockDim.x) {
+      float similarity = Loader::load(query_row, packed, token, dim);
+      if (token_scales != nullptr) {
+        similarity *= token_scales[token];
+      }
+      if constexpr (Reducer::kScaleBeforeReduction) {
+        similarity *= doc_scale;
+      }
+      Reducer::add(local, similarity, temperature);
+    }
+
+    reductions[tid] = local;
+    __syncthreads();
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+      if (tid < stride) {
+        reductions[tid] = Reducer::merge(reductions[tid], reductions[tid + stride], temperature);
+      }
+      __syncthreads();
+    }
+    if (tid == 0) {
+      float weight = 1.0F;
+      if constexpr (Reducer::kRequiresWeights) {
+        const int weight_row = weights_batched ? batch_idx : 0;
+        weight = query_weights[static_cast<std::int64_t>(weight_row) * query_tokens + q];
+      }
+      doc_score += Reducer::finish(reductions[0], weight, temperature);
+    }
+    __syncthreads();
+  }
+
+  if (tid == 0) {
+    if constexpr (!Reducer::kScaleBeforeReduction) {
+      doc_score *= doc_scale;
+    }
+    output[static_cast<std::int64_t>(batch_idx) * num_targets + target_idx] = doc_score;
+  }
+}
+
+template <typename Loader, typename Reducer, int NumWarps>
+__global__ void compressed_score_warp_batched_kernel(
+    const float* query,
+    const std::uint8_t* packed,
+    const std::int64_t* offsets,
+    const std::int64_t* candidate_indices,
+    float* output,
+    int batch,
+    int query_tokens,
+    int dim,
+    int num_targets,
+    float scale,
+    const float* scale_vector,
+    const float* token_scales,
+    const float* query_weights,
+    bool weights_batched,
+    float temperature) {
+  static_assert(NumWarps == 4 || NumWarps == 8, "shared reducer supports 4 or 8 warps per block");
+  constexpr unsigned kFullWarpMask = 0xFFFFFFFFU;
+
+  const int target_idx = blockIdx.x;
+  const int batch_idx = blockIdx.y;
+  const int tid = threadIdx.x;
+  const int lane = tid & 31;
+  const int warp_idx = tid >> 5;
+  __shared__ float warp_scores[NumWarps];
+
+  if (target_idx >= num_targets || batch_idx >= batch) {
+    return;
+  }
+
+  const int doc_idx = candidate_indices == nullptr
+      ? target_idx
+      : static_cast<int>(candidate_indices[target_idx]);
+  const std::int64_t start = offsets[doc_idx];
+  const std::int64_t end = offsets[doc_idx + 1];
+  const float doc_scale = scale_vector == nullptr ? scale : scale_vector[doc_idx];
+  float warp_score = 0.0F;
+
+  for (int q = warp_idx; q < query_tokens; q += NumWarps) {
+    typename Reducer::State local = Reducer::identity();
+    const float* query_row = query + (static_cast<std::int64_t>(batch_idx) * query_tokens + q) * dim;
+    for (std::int64_t token = start + lane; token < end; token += 32) {
+      float similarity = Loader::load(query_row, packed, token, dim);
+      if (token_scales != nullptr) {
+        similarity *= token_scales[token];
+      }
+      if constexpr (Reducer::kScaleBeforeReduction) {
+        similarity *= doc_scale;
+      }
+      Reducer::add(local, similarity, temperature);
+    }
+
+#pragma unroll
+    for (int delta = 16; delta > 0; delta >>= 1) {
+      const typename Reducer::State other = Reducer::shuffle_down(local, delta, kFullWarpMask);
+      if (lane < delta) {
+        local = Reducer::merge(local, other, temperature);
+      }
+    }
+
+    if (lane == 0) {
+      float weight = 1.0F;
+      if constexpr (Reducer::kRequiresWeights) {
+        const int weight_row = weights_batched ? batch_idx : 0;
+        weight = query_weights[static_cast<std::int64_t>(weight_row) * query_tokens + q];
+      }
+      warp_score += Reducer::finish(local, weight, temperature);
+    }
+  }
+
+  if (lane == 0) {
+    warp_scores[warp_idx] = warp_score;
+  }
+  __syncthreads();
+
+  if (tid == 0) {
+    float doc_score = 0.0F;
+#pragma unroll
+    for (int warp = 0; warp < NumWarps; ++warp) {
+      doc_score += warp_scores[warp];
+    }
+    if constexpr (!Reducer::kScaleBeforeReduction) {
+      doc_score *= doc_scale;
+    }
+    output[static_cast<std::int64_t>(batch_idx) * num_targets + target_idx] = doc_score;
+  }
+}
+
+template <typename Loader, typename Reducer>
+void launch_compressed_score_policy(
+    const float* d_query,
+    const std::uint8_t* d_packed,
+    const std::int64_t* d_offsets,
+    const std::int64_t* d_candidates,
+    float* d_output,
+    int batch,
+    int query_tokens,
+    int dim,
+    int num_targets,
+    float scale,
+    const float* d_scale_vector,
+    const float* d_token_scales,
+    const float* d_query_weights,
+    bool weights_batched,
+    float temperature) {
+  dim3 grid(num_targets, batch);
+  if (g_shared_reducer_warps == 4) {
+    compressed_score_warp_batched_kernel<Loader, Reducer, 4><<<grid, 4 * 32>>>(
+        d_query,
+        d_packed,
+        d_offsets,
+        d_candidates,
+        d_output,
+        batch,
+        query_tokens,
+        dim,
+        num_targets,
+        scale,
+        d_scale_vector,
+        d_token_scales,
+        d_query_weights,
+        weights_batched,
+        temperature);
+    return;
+  }
+  if (g_shared_reducer_warps == 8) {
+    compressed_score_warp_batched_kernel<Loader, Reducer, 8><<<grid, 8 * 32>>>(
+        d_query,
+        d_packed,
+        d_offsets,
+        d_candidates,
+        d_output,
+        batch,
+        query_tokens,
+        dim,
+        num_targets,
+        scale,
+        d_scale_vector,
+        d_token_scales,
+        d_query_weights,
+        weights_batched,
+        temperature);
+    return;
+  }
+  compressed_score_batched_kernel<Loader, Reducer><<<grid, kBlockThreads>>>(
+      d_query,
+      d_packed,
+      d_offsets,
+      d_candidates,
+      d_output,
+      batch,
+      query_tokens,
+      dim,
+      num_targets,
+      scale,
+      d_scale_vector,
+      d_token_scales,
+      d_query_weights,
+      weights_batched,
+      temperature);
+}
+
+template <typename Loader>
+void launch_compressed_score(
+    ReducerKind reducer,
+    const float* d_query,
+    const std::uint8_t* d_packed,
+    const std::int64_t* d_offsets,
+    const std::int64_t* d_candidates,
+    float* d_output,
+    int batch,
+    int query_tokens,
+    int dim,
+    int num_targets,
+    float scale,
+    const float* d_scale_vector,
+    const float* d_token_scales,
+    const float* d_query_weights,
+    bool weights_batched,
+    float temperature) {
+  switch (reducer) {
+    case ReducerKind::kMaxSim:
+      launch_compressed_score_policy<Loader, MaxSimReducerPolicy>(
+          d_query, d_packed, d_offsets, d_candidates, d_output, batch, query_tokens, dim, num_targets,
+          scale, d_scale_vector, d_token_scales, d_query_weights, weights_batched, temperature);
+      break;
+    case ReducerKind::kWeightedMaxSim:
+      launch_compressed_score_policy<Loader, WeightedMaxSimReducerPolicy>(
+          d_query, d_packed, d_offsets, d_candidates, d_output, batch, query_tokens, dim, num_targets,
+          scale, d_scale_vector, d_token_scales, d_query_weights, weights_batched, temperature);
+      break;
+    case ReducerKind::kTopK2:
+      launch_compressed_score_policy<Loader, TopKSimReducerPolicy<2>>(
+          d_query, d_packed, d_offsets, d_candidates, d_output, batch, query_tokens, dim, num_targets,
+          scale, d_scale_vector, d_token_scales, d_query_weights, weights_batched, temperature);
+      break;
+    case ReducerKind::kTopK4:
+      launch_compressed_score_policy<Loader, TopKSimReducerPolicy<4>>(
+          d_query, d_packed, d_offsets, d_candidates, d_output, batch, query_tokens, dim, num_targets,
+          scale, d_scale_vector, d_token_scales, d_query_weights, weights_batched, temperature);
+      break;
+    case ReducerKind::kSmoothSim:
+      launch_compressed_score_policy<Loader, SmoothSimReducerPolicy>(
+          d_query, d_packed, d_offsets, d_candidates, d_output, batch, query_tokens, dim, num_targets,
+          scale, d_scale_vector, d_token_scales, d_query_weights, weights_batched, temperature);
+      break;
+  }
 }
 
 __global__ void maxsim_int4_batched_kernel(
@@ -958,6 +1506,9 @@ class CudaPackedDocs {
     cudaFree(d_centroid_weights_);
     cudaFree(d_query_lut_);
     cudaFree(d_scores_);
+    cudaFree(d_reducer_weights_);
+    cudaFree(d_reducer_scales_);
+    cudaFree(d_candidates_);
     cudaFree(d_top_scores_);
     cudaFree(d_top_indices_);
     cudaFree(d_top_locks_);
@@ -1021,6 +1572,70 @@ class CudaPackedDocs {
     py::array_t<float> output({batch, num_docs_});
     check_cuda(cudaMemcpy(output.mutable_data(), d_scores_, output_bytes, cudaMemcpyDeviceToHost), "copy output to host");
     return output;
+  }
+
+  py::array_t<float> score_batch(
+      py::array_t<float, py::array::c_style | py::array::forcecast> query,
+      const std::string& reducer,
+      py::object query_weights,
+      float temperature,
+      float scale,
+      bool use_scale_vector = false,
+      bool use_token_scale = false,
+      py::object scale_vector_override = py::none()) {
+    return score_impl(
+        query,
+        reducer,
+        query_weights,
+        temperature,
+        scale,
+        use_scale_vector,
+        use_token_scale,
+        scale_vector_override,
+        nullptr,
+        num_docs_);
+  }
+
+  py::array_t<float> score_candidates_batch(
+      py::array_t<float, py::array::c_style | py::array::forcecast> query,
+      py::array_t<std::int64_t, py::array::c_style | py::array::forcecast> candidate_indices,
+      const std::string& reducer,
+      py::object query_weights,
+      float temperature,
+      float scale,
+      bool use_scale_vector = false,
+      bool use_token_scale = false,
+      py::object scale_vector_override = py::none()) {
+    validate_score_query(query);
+    if (candidate_indices.ndim() != 1) {
+      throw std::invalid_argument("candidate_indices must be a 1-D array");
+    }
+    const int num_candidates = static_cast<int>(candidate_indices.shape(0));
+    for (int idx = 0; idx < num_candidates; ++idx) {
+      const std::int64_t doc_idx = candidate_indices.data()[idx];
+      if (doc_idx < 0 || doc_idx >= num_docs_) {
+        throw std::invalid_argument("candidate_indices entries must be between 0 and num_docs - 1");
+      }
+    }
+    if (num_candidates == 0) {
+      const std::array<py::ssize_t, 2> shape{query.shape(0), 0};
+      return py::array_t<float>(shape);
+    }
+
+    const std::size_t candidate_bytes = static_cast<std::size_t>(num_candidates) * sizeof(std::int64_t);
+    ensure_device_capacity(&d_candidates_, &candidates_capacity_, candidate_bytes, "cudaMalloc reducer candidate cache");
+    check_cuda(cudaMemcpy(d_candidates_, candidate_indices.data(), candidate_bytes, cudaMemcpyHostToDevice), "copy reducer candidates to device");
+    return score_impl(
+        query,
+        reducer,
+        query_weights,
+        temperature,
+        scale,
+        use_scale_vector,
+        use_token_scale,
+        scale_vector_override,
+        d_candidates_,
+        num_candidates);
   }
 
   py::tuple topk_batch(
@@ -1324,6 +1939,174 @@ class CudaPackedDocs {
     return d_token_scales_;
   }
 
+  std::pair<int, int> validate_score_query(
+      const py::array_t<float, py::array::c_style | py::array::forcecast>& query) const {
+    if (query.ndim() != 3) {
+      throw std::invalid_argument("query must have shape [batch, query_tokens, dim]");
+    }
+    if (query.shape(2) != dim_) {
+      throw std::invalid_argument("query shape does not match dim");
+    }
+    return {static_cast<int>(query.shape(0)), static_cast<int>(query.shape(1))};
+  }
+
+  const float* upload_reducer_weights(
+      py::object query_weights,
+      ReducerKind reducer,
+      int batch,
+      int query_tokens,
+      bool* weights_batched) {
+    const bool requires_weights = reducer == ReducerKind::kWeightedMaxSim;
+    if (query_weights.is_none()) {
+      if (requires_weights) {
+        throw std::invalid_argument("query_weights are required for reducer='weighted_maxsim'");
+      }
+      *weights_batched = false;
+      return nullptr;
+    }
+    if (!requires_weights) {
+      throw std::invalid_argument("query_weights are only valid for reducer='weighted_maxsim'");
+    }
+
+    auto weights = py::array_t<float, py::array::c_style | py::array::forcecast>::ensure(query_weights);
+    if (!weights) {
+      throw std::invalid_argument("query_weights must be convertible to a float32 array");
+    }
+
+    std::size_t weight_count = 0;
+    if (weights.ndim() == 1 && weights.shape(0) == query_tokens) {
+      *weights_batched = false;
+      weight_count = static_cast<std::size_t>(query_tokens);
+    } else if (weights.ndim() == 2 && weights.shape(1) == query_tokens &&
+               (weights.shape(0) == 1 || weights.shape(0) == batch)) {
+      *weights_batched = weights.shape(0) == batch;
+      weight_count = static_cast<std::size_t>(weights.shape(0)) * static_cast<std::size_t>(query_tokens);
+    } else {
+      throw std::invalid_argument("query_weights must have shape [query_tokens] or [batch, query_tokens]");
+    }
+
+    const std::size_t weight_bytes = weight_count * sizeof(float);
+    if (weight_bytes == 0) {
+      return nullptr;
+    }
+    ensure_device_capacity(&d_reducer_weights_, &reducer_weights_capacity_, weight_bytes, "cudaMalloc reducer query-weight cache");
+    check_cuda(cudaMemcpy(d_reducer_weights_, weights.data(), weight_bytes, cudaMemcpyHostToDevice), "copy reducer query weights to device");
+    return d_reducer_weights_;
+  }
+
+  const float* resolve_reducer_scale_vector(
+      bool use_resident_scale_vector,
+      py::object scale_vector_override) {
+    if (scale_vector_override.is_none()) {
+      return scale_vector_ptr(use_resident_scale_vector);
+    }
+    if (use_resident_scale_vector) {
+      throw std::invalid_argument(
+          "scale_vector_override and use_scale_vector cannot both be set");
+    }
+
+    auto values = py::array_t<float, py::array::c_style | py::array::forcecast>::ensure(
+        scale_vector_override);
+    if (!values || values.ndim() != 1 || values.shape(0) != num_docs_) {
+      throw std::invalid_argument("scale_vector_override must have shape [num_docs]");
+    }
+
+    const std::size_t scale_bytes = static_cast<std::size_t>(num_docs_) * sizeof(float);
+    ensure_device_capacity(
+        &d_reducer_scales_,
+        &reducer_scales_capacity_,
+        scale_bytes,
+        "cudaMalloc reducer scale-vector cache");
+    check_cuda(
+        cudaMemcpy(d_reducer_scales_, values.data(), scale_bytes, cudaMemcpyHostToDevice),
+        "copy reducer scale-vector override to device");
+    return d_reducer_scales_;
+  }
+
+  py::array_t<float> score_impl(
+      const py::array_t<float, py::array::c_style | py::array::forcecast>& query,
+      const std::string& reducer_name,
+      py::object query_weights,
+      float temperature,
+      float scale,
+      bool use_scale_vector,
+      bool use_token_scale,
+      py::object scale_vector_override,
+      const std::int64_t* d_candidates,
+      int num_targets) {
+    const auto shape = validate_score_query(query);
+    const int batch = shape.first;
+    const int query_tokens = shape.second;
+    const ReducerKind reducer = parse_reducer_kind(reducer_name);
+    if (!(temperature > 0.0F) || !std::isfinite(temperature)) {
+      throw std::invalid_argument("temperature must be finite and > 0");
+    }
+
+    bool weights_batched = false;
+    const float* d_weights = upload_reducer_weights(query_weights, reducer, batch, query_tokens, &weights_batched);
+    if (batch == 0 || num_targets == 0) {
+      const std::array<py::ssize_t, 2> output_shape{batch, num_targets};
+      return py::array_t<float>(output_shape);
+    }
+    if (query_tokens == 0) {
+      const std::array<py::ssize_t, 2> output_shape{batch, num_targets};
+      py::array_t<float> output(output_shape);
+      std::fill_n(output.mutable_data(), static_cast<std::size_t>(output.size()), 0.0F);
+      return output;
+    }
+    const std::size_t query_bytes = static_cast<std::size_t>(query.size()) * sizeof(float);
+    const std::size_t output_bytes = static_cast<std::size_t>(batch) * static_cast<std::size_t>(num_targets) * sizeof(float);
+    ensure_device_capacity(&d_query_, &query_capacity_, query_bytes, "cudaMalloc reducer query cache");
+    ensure_device_capacity(&d_scores_, &scores_capacity_, output_bytes, "cudaMalloc reducer score cache");
+    check_cuda(cudaMemcpy(d_query_, query.data(), query_bytes, cudaMemcpyHostToDevice), "copy reducer query to device");
+
+    const float* d_scale_vector = resolve_reducer_scale_vector(
+        use_scale_vector, scale_vector_override);
+    const float* d_token_scales = token_scale_vector_ptr(use_token_scale);
+    if (use_dim128_unrolled()) {
+      launch_compressed_score<BinaryDim128UnrolledPackedLoader>(
+          reducer,
+          d_query_,
+          d_packed_,
+          d_offsets_,
+          d_candidates,
+          d_scores_,
+          batch,
+          query_tokens,
+          dim_,
+          num_targets,
+          scale,
+          d_scale_vector,
+          d_token_scales,
+          d_weights,
+          weights_batched,
+          temperature);
+    } else {
+      launch_compressed_score<BinaryPackedLoader>(
+          reducer,
+          d_query_,
+          d_packed_,
+          d_offsets_,
+          d_candidates,
+          d_scores_,
+          batch,
+          query_tokens,
+          dim_,
+          num_targets,
+          scale,
+          d_scale_vector,
+          d_token_scales,
+          d_weights,
+          weights_batched,
+          temperature);
+    }
+    check_cuda(cudaGetLastError(), "launch shared binary reducer kernel");
+
+    py::array_t<float> output({batch, num_targets});
+    check_cuda(cudaMemcpy(output.mutable_data(), d_scores_, output_bytes, cudaMemcpyDeviceToHost), "copy reducer output to host");
+    return output;
+  }
+
   void launch_maxsim(float* d_query, float* d_output, int batch, int query_tokens, float scale, const float* d_scale_vector, const float* d_token_scales, const char* label) {
     dim3 grid(num_docs_, batch);
     if (dim_ == 128 && packed_size_ >= g_dim128_qtile_min_packed_bytes) {
@@ -1421,6 +2204,9 @@ class CudaPackedDocs {
   float* d_centroid_weights_ = nullptr;
   float* d_query_lut_ = nullptr;
   float* d_scores_ = nullptr;
+  float* d_reducer_weights_ = nullptr;
+  float* d_reducer_scales_ = nullptr;
+  std::int64_t* d_candidates_ = nullptr;
   float* d_top_scores_ = nullptr;
   std::int64_t* d_top_indices_ = nullptr;
   int* d_top_locks_ = nullptr;
@@ -1438,6 +2224,9 @@ class CudaPackedDocs {
   std::size_t centroid_weights_capacity_ = 0;
   std::size_t query_lut_capacity_ = 0;
   std::size_t scores_capacity_ = 0;
+  std::size_t reducer_weights_capacity_ = 0;
+  std::size_t reducer_scales_capacity_ = 0;
+  std::size_t candidates_capacity_ = 0;
   std::size_t top_scores_capacity_ = 0;
   std::size_t top_indices_capacity_ = 0;
   std::size_t top_locks_capacity_ = 0;
@@ -1502,6 +2291,8 @@ class CudaInt4PackedDocs {
     cudaFree(d_query_words_);
     cudaFree(d_query_scales_);
     cudaFree(d_scores_);
+    cudaFree(d_reducer_weights_);
+    cudaFree(d_candidates_);
     cudaFree(d_top_scores_);
     cudaFree(d_top_indices_);
   }
@@ -1529,6 +2320,42 @@ class CudaInt4PackedDocs {
     py::array_t<float> output({batch, num_docs_});
     check_cuda(cudaMemcpy(output.mutable_data(), d_scores_, output_bytes, cudaMemcpyDeviceToHost), "copy int4 output to host");
     return output;
+  }
+
+  py::array_t<float> score_batch(
+      py::array_t<float, py::array::c_style | py::array::forcecast> query,
+      const std::string& reducer,
+      py::object query_weights,
+      float temperature) {
+    return score_impl(query, reducer, query_weights, temperature, nullptr, num_docs_);
+  }
+
+  py::array_t<float> score_candidates_batch(
+      py::array_t<float, py::array::c_style | py::array::forcecast> query,
+      py::array_t<std::int64_t, py::array::c_style | py::array::forcecast> candidate_indices,
+      const std::string& reducer,
+      py::object query_weights,
+      float temperature) {
+    validate_score_query(query);
+    if (candidate_indices.ndim() != 1) {
+      throw std::invalid_argument("candidate_indices must be a 1-D array");
+    }
+    const int num_candidates = static_cast<int>(candidate_indices.shape(0));
+    for (int idx = 0; idx < num_candidates; ++idx) {
+      const std::int64_t doc_idx = candidate_indices.data()[idx];
+      if (doc_idx < 0 || doc_idx >= num_docs_) {
+        throw std::invalid_argument("candidate_indices entries must be between 0 and num_docs - 1");
+      }
+    }
+    if (num_candidates == 0) {
+      const std::array<py::ssize_t, 2> shape{query.shape(0), 0};
+      return py::array_t<float>(shape);
+    }
+
+    const std::size_t candidate_bytes = static_cast<std::size_t>(num_candidates) * sizeof(std::int64_t);
+    ensure_device_capacity(&d_candidates_, &candidates_capacity_, candidate_bytes, "cudaMalloc int4 reducer candidate cache");
+    check_cuda(cudaMemcpy(d_candidates_, candidate_indices.data(), candidate_bytes, cudaMemcpyHostToDevice), "copy int4 reducer candidates to device");
+    return score_impl(query, reducer, query_weights, temperature, d_candidates_, num_candidates);
   }
 
   py::tuple topk_batch(py::array_t<float, py::array::c_style | py::array::forcecast> query, int k) {
@@ -1627,6 +2454,118 @@ class CudaInt4PackedDocs {
     *capacity = bytes;
   }
 
+  std::pair<int, int> validate_score_query(
+      const py::array_t<float, py::array::c_style | py::array::forcecast>& query) const {
+    if (query.ndim() != 3) {
+      throw std::invalid_argument("query must have shape [batch, query_tokens, dim]");
+    }
+    if (query.shape(2) != dim_) {
+      throw std::invalid_argument("query shape does not match dim");
+    }
+    return {static_cast<int>(query.shape(0)), static_cast<int>(query.shape(1))};
+  }
+
+  const float* upload_reducer_weights(
+      py::object query_weights,
+      ReducerKind reducer,
+      int batch,
+      int query_tokens,
+      bool* weights_batched) {
+    const bool requires_weights = reducer == ReducerKind::kWeightedMaxSim;
+    if (query_weights.is_none()) {
+      if (requires_weights) {
+        throw std::invalid_argument("query_weights are required for reducer='weighted_maxsim'");
+      }
+      *weights_batched = false;
+      return nullptr;
+    }
+    if (!requires_weights) {
+      throw std::invalid_argument("query_weights are only valid for reducer='weighted_maxsim'");
+    }
+
+    auto weights = py::array_t<float, py::array::c_style | py::array::forcecast>::ensure(query_weights);
+    if (!weights) {
+      throw std::invalid_argument("query_weights must be convertible to a float32 array");
+    }
+
+    std::size_t weight_count = 0;
+    if (weights.ndim() == 1 && weights.shape(0) == query_tokens) {
+      *weights_batched = false;
+      weight_count = static_cast<std::size_t>(query_tokens);
+    } else if (weights.ndim() == 2 && weights.shape(1) == query_tokens &&
+               (weights.shape(0) == 1 || weights.shape(0) == batch)) {
+      *weights_batched = weights.shape(0) == batch;
+      weight_count = static_cast<std::size_t>(weights.shape(0)) * static_cast<std::size_t>(query_tokens);
+    } else {
+      throw std::invalid_argument("query_weights must have shape [query_tokens] or [batch, query_tokens]");
+    }
+
+    const std::size_t weight_bytes = weight_count * sizeof(float);
+    if (weight_bytes == 0) {
+      return nullptr;
+    }
+    ensure_device_capacity(&d_reducer_weights_, &reducer_weights_capacity_, weight_bytes, "cudaMalloc int4 reducer query-weight cache");
+    check_cuda(cudaMemcpy(d_reducer_weights_, weights.data(), weight_bytes, cudaMemcpyHostToDevice), "copy int4 reducer query weights to device");
+    return d_reducer_weights_;
+  }
+
+  py::array_t<float> score_impl(
+      const py::array_t<float, py::array::c_style | py::array::forcecast>& query,
+      const std::string& reducer_name,
+      py::object query_weights,
+      float temperature,
+      const std::int64_t* d_candidates,
+      int num_targets) {
+    const auto shape = validate_score_query(query);
+    const int batch = shape.first;
+    const int query_tokens = shape.second;
+    const ReducerKind reducer = parse_reducer_kind(reducer_name);
+    if (!(temperature > 0.0F) || !std::isfinite(temperature)) {
+      throw std::invalid_argument("temperature must be finite and > 0");
+    }
+
+    bool weights_batched = false;
+    const float* d_weights = upload_reducer_weights(query_weights, reducer, batch, query_tokens, &weights_batched);
+    if (batch == 0 || num_targets == 0) {
+      const std::array<py::ssize_t, 2> output_shape{batch, num_targets};
+      return py::array_t<float>(output_shape);
+    }
+    if (query_tokens == 0) {
+      const std::array<py::ssize_t, 2> output_shape{batch, num_targets};
+      py::array_t<float> output(output_shape);
+      std::fill_n(output.mutable_data(), static_cast<std::size_t>(output.size()), 0.0F);
+      return output;
+    }
+    const std::size_t query_bytes = static_cast<std::size_t>(query.size()) * sizeof(float);
+    const std::size_t output_bytes = static_cast<std::size_t>(batch) * static_cast<std::size_t>(num_targets) * sizeof(float);
+    ensure_device_capacity(&d_query_, &query_capacity_, query_bytes, "cudaMalloc int4 reducer query cache");
+    ensure_device_capacity(&d_scores_, &scores_capacity_, output_bytes, "cudaMalloc int4 reducer score cache");
+    check_cuda(cudaMemcpy(d_query_, query.data(), query_bytes, cudaMemcpyHostToDevice), "copy int4 reducer query to device");
+
+    launch_compressed_score<Int4PackedLoader>(
+        reducer,
+        d_query_,
+        d_packed_,
+        d_offsets_,
+        d_candidates,
+        d_scores_,
+        batch,
+        query_tokens,
+        dim_,
+        num_targets,
+        scale_,
+        nullptr,
+        nullptr,
+        d_weights,
+        weights_batched,
+        temperature);
+    check_cuda(cudaGetLastError(), "launch shared int4 reducer kernel");
+
+    py::array_t<float> output({batch, num_targets});
+    check_cuda(cudaMemcpy(output.mutable_data(), d_scores_, output_bytes, cudaMemcpyDeviceToHost), "copy int4 reducer output to host");
+    return output;
+  }
+
   void launch_maxsim(float* d_query, float* d_output, int batch, int query_tokens, const char* label) {
     dim3 grid(num_docs_, batch);
     maxsim_int4_batched_kernel<<<grid, kBlockThreads>>>(d_query, d_packed_, d_offsets_, d_output, batch, query_tokens, dim_, num_docs_, scale_);
@@ -1674,6 +2613,8 @@ class CudaInt4PackedDocs {
   std::int32_t* d_query_words_ = nullptr;
   float* d_query_scales_ = nullptr;
   float* d_scores_ = nullptr;
+  float* d_reducer_weights_ = nullptr;
+  std::int64_t* d_candidates_ = nullptr;
   float* d_top_scores_ = nullptr;
   std::int64_t* d_top_indices_ = nullptr;
   int dim_ = 0;
@@ -1685,6 +2626,8 @@ class CudaInt4PackedDocs {
   std::size_t query_words_capacity_ = 0;
   std::size_t query_scales_capacity_ = 0;
   std::size_t scores_capacity_ = 0;
+  std::size_t reducer_weights_capacity_ = 0;
+  std::size_t candidates_capacity_ = 0;
   std::size_t top_scores_capacity_ = 0;
   std::size_t top_indices_capacity_ = 0;
 };
@@ -1809,6 +2752,8 @@ PYBIND11_MODULE(_maxsim_cuda, m) {
       .def("set_token_scale_vector", &CudaPackedDocs::set_token_scale_vector, py::arg("token_scales"))
       .def("clear_token_scale_vector", &CudaPackedDocs::clear_token_scale_vector)
       .def("maxsim_batch", &CudaPackedDocs::maxsim_batch, py::arg("query"), py::arg("scale") = 1.0F, py::arg("use_scale_vector") = false, py::arg("use_token_scale") = false)
+      .def("score_batch", &CudaPackedDocs::score_batch, py::arg("query"), py::arg("reducer") = "maxsim", py::arg("query_weights") = py::none(), py::arg("temperature") = 1.0F, py::arg("scale") = 1.0F, py::arg("use_scale_vector") = false, py::arg("use_token_scale") = false, py::arg("scale_vector_override") = py::none())
+      .def("score_candidates_batch", &CudaPackedDocs::score_candidates_batch, py::arg("query"), py::arg("candidate_indices"), py::arg("reducer") = "maxsim", py::arg("query_weights") = py::none(), py::arg("temperature") = 1.0F, py::arg("scale") = 1.0F, py::arg("use_scale_vector") = false, py::arg("use_token_scale") = false, py::arg("scale_vector_override") = py::none())
       .def("topk_batch", &CudaPackedDocs::topk_batch, py::arg("query"), py::arg("k"), py::arg("scale") = 1.0F, py::arg("use_scale_vector") = false, py::arg("use_token_scale") = false)
       .def("topk_centroid_batch", &CudaPackedDocs::topk_centroid_batch, py::arg("query"), py::arg("weights"), py::arg("k"), py::arg("scale") = 1.0F, py::arg("use_scale_vector") = false, py::arg("use_token_scale") = false)
       .def("topk_lut_batch", &CudaPackedDocs::topk_lut_batch, py::arg("query"), py::arg("k"), py::arg("scale") = 1.0F, py::arg("use_scale_vector") = false, py::arg("use_token_scale") = false)
@@ -1830,6 +2775,8 @@ PYBIND11_MODULE(_maxsim_cuda, m) {
 	           int,
 	           float>())
       .def("maxsim_batch", &CudaInt4PackedDocs::maxsim_batch, py::arg("query"))
+      .def("score_batch", &CudaInt4PackedDocs::score_batch, py::arg("query"), py::arg("reducer") = "maxsim", py::arg("query_weights") = py::none(), py::arg("temperature") = 1.0F)
+      .def("score_candidates_batch", &CudaInt4PackedDocs::score_candidates_batch, py::arg("query"), py::arg("candidate_indices"), py::arg("reducer") = "maxsim", py::arg("query_weights") = py::none(), py::arg("temperature") = 1.0F)
       .def("topk_batch", &CudaInt4PackedDocs::topk_batch, py::arg("query"), py::arg("k"))
       .def("maxsim_batch_int8q", &CudaInt4PackedDocs::maxsim_batch_int8q, py::arg("query"))
       .def("topk_batch_int8q", &CudaInt4PackedDocs::topk_batch_int8q, py::arg("query"), py::arg("k"))
@@ -1843,4 +2790,11 @@ PYBIND11_MODULE(_maxsim_cuda, m) {
   m.def("get_dim128_unrolled_min_avg_tokens", []() { return g_dim128_unrolled_min_avg_tokens; });
   m.def("set_dim128_qtile_min_packed_bytes", [](std::size_t value) { g_dim128_qtile_min_packed_bytes = value; }, py::arg("value"));
   m.def("get_dim128_qtile_min_packed_bytes", []() { return g_dim128_qtile_min_packed_bytes; });
+  m.def("set_shared_reducer_warps", [](int value) {
+    if (value != 0 && value != 4 && value != 8) {
+      throw std::invalid_argument("shared reducer warps must be one of 0, 4, or 8");
+    }
+    g_shared_reducer_warps = value;
+  }, py::arg("value"));
+  m.def("get_shared_reducer_warps", []() { return g_shared_reducer_warps; });
 }

@@ -342,36 +342,99 @@ class Reranker:
     def load(cls, path, *, device: Literal["cpu", "cuda"] = "cpu") -> "Reranker":
         return cls.from_corpus(Corpus.load(path), device=device)
 
-    def search(self, query_embeddings, *, k: int = 10):
+    def search(
+        self,
+        query_embeddings,
+        *,
+        k: int = 10,
+        reducer: str = "maxsim",
+        query_weights=None,
+        temperature: float = 1.0,
+    ):
         _validate_k(k, self.corpus.num_docs)
         actual_k = min(k, self.corpus.num_docs)
         if self.corpus.mode in {"binary", "binary_token_scale", "binary_token_scale_u8", "binary_token_scale_u4", "pooled_binary"}:
-            scores, indices = topk_maxsim(query_embeddings, self.corpus.packed, actual_k, device="auto")
+            scores, indices = topk_maxsim(
+                query_embeddings,
+                self.corpus.packed,
+                actual_k,
+                device="auto",
+                reducer=reducer,
+                query_weights=query_weights,
+                temperature=temperature,
+            )
         elif self.corpus.mode == "binary_q40":
+            _require_maxsim_reducer(self.corpus.mode, reducer, query_weights, temperature)
             scores, indices = topk_dim_centroid_maxsim(query_embeddings, self.corpus.packed, self.corpus.calibration, actual_k, device="auto")
         elif self.corpus.mode == "int4":
             scores, indices = topk_int4_maxsim(
-                query_embeddings, self.corpus.int4_packed, actual_k, device="auto", prefer_int8_query=self.int4_query == "int8"
+                query_embeddings,
+                self.corpus.int4_packed,
+                actual_k,
+                device="auto",
+                prefer_int8_query=self.int4_query == "int8",
+                reducer=reducer,
+                query_weights=query_weights,
+                temperature=temperature,
             )
         else:
             raise ValueError(f"unsupported corpus mode: {self.corpus.mode}")
         return _format_topk_results(scores, indices, self.corpus.doc_ids)
 
-    def rerank(self, query_embeddings, candidate_ids, *, k: int = 10):
+    def rerank(
+        self,
+        query_embeddings,
+        candidate_ids,
+        *,
+        k: int = 10,
+        reducer: str = "maxsim",
+        query_weights=None,
+        temperature: float = 1.0,
+    ):
         candidates = _dedupe_candidate_ids(candidate_ids)
         candidate_indices = self._candidate_indices(candidates)
         if not candidates:
             return [] if _as_numpy(query_embeddings).ndim == 2 else []
-        scores = self._score_all(query_embeddings)
-        return _format_candidate_results(scores, candidate_indices, candidates, min(k, len(candidates)))
+        scores = self._score_candidates(
+            query_embeddings,
+            candidate_indices,
+            reducer=reducer,
+            query_weights=query_weights,
+            temperature=temperature,
+        )
+        candidate_positions = np.arange(len(candidates), dtype=np.int64)
+        return _format_candidate_results(scores, candidate_positions, candidates, min(k, len(candidates)))
 
-    def _score_all(self, query_embeddings):
+    def _score_candidates(self, query_embeddings, candidate_indices, *, reducer, query_weights, temperature):
         if self.corpus.mode in {"binary", "binary_token_scale", "binary_token_scale_u8", "binary_token_scale_u4", "pooled_binary"}:
-            return maxsim(query_embeddings, self.corpus.packed, device="auto")
+            return maxsim(
+                query_embeddings,
+                self.corpus.packed,
+                device="auto",
+                reducer=reducer,
+                query_weights=query_weights,
+                temperature=temperature,
+                candidate_indices=candidate_indices,
+            )
         if self.corpus.mode == "binary_q40":
-            return dim_centroid_maxsim(query_embeddings, self.corpus.packed, self.corpus.calibration, device="auto")
+            _require_maxsim_reducer(self.corpus.mode, reducer, query_weights, temperature)
+            return dim_centroid_maxsim(
+                query_embeddings,
+                self.corpus.packed,
+                self.corpus.calibration,
+                device="auto",
+                candidate_indices=candidate_indices,
+            )
         if self.corpus.mode == "int4":
-            return int4_maxsim(query_embeddings, self.corpus.int4_packed, device="auto")
+            return int4_maxsim(
+                query_embeddings,
+                self.corpus.int4_packed,
+                device="auto",
+                reducer=reducer,
+                query_weights=query_weights,
+                temperature=temperature,
+                candidate_indices=candidate_indices,
+            )
         raise ValueError(f"unsupported corpus mode: {self.corpus.mode}")
 
     def _candidate_indices(self, candidate_ids: tuple[str, ...]) -> np.ndarray:
@@ -495,6 +558,19 @@ def _validate_k(k: int, max_count: int) -> None:
         raise ValueError("k must be >= 1")
     if max_count < 1:
         raise ValueError("corpus must contain at least one document")
+
+
+def _require_maxsim_reducer(mode: str, reducer, query_weights, temperature) -> None:
+    if reducer != "maxsim":
+        raise ValueError(f"corpus mode '{mode}' currently supports only reducer='maxsim'")
+    if query_weights is not None:
+        raise ValueError("query_weights is only supported with reducer='weighted_maxsim'")
+    try:
+        temperature_value = float(temperature)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("temperature must be a finite value greater than 0") from exc
+    if not np.isfinite(temperature_value) or temperature_value <= 0.0:
+        raise ValueError("temperature must be a finite value greater than 0")
 
 
 def _dedupe_candidate_ids(candidate_ids) -> tuple[str, ...]:

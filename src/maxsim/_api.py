@@ -16,6 +16,10 @@ except ImportError:  # pragma: no cover - exercised only in CUDA builds
     _maxsim_cuda = None
 
 
+Reducer = Literal["maxsim", "weighted_maxsim", "topk2", "topk4", "smoothsim"]
+_REDUCERS = frozenset(("maxsim", "weighted_maxsim", "topk2", "topk4", "smoothsim"))
+
+
 @dataclass(frozen=True)
 class PackedDocs:
     data: object
@@ -50,7 +54,7 @@ def pack_signs(doc_embeddings, doc_offsets=None, *, dim=None, scale=None, token_
         packed[:, bit_idx // 8] |= positive[:, bit_idx].astype(np.uint8) << (bit_idx % 8)
 
     stored_scale: object
-    if scale == "global":
+    if isinstance(scale, str) and scale == "global":
         stored_scale = float(np.mean(np.abs(docs), dtype=np.float64))
     elif isinstance(scale, str) and scale in {"doc", "per_doc"}:
         stored_scale = _doc_mean_abs_scale(docs, offsets)
@@ -145,7 +149,93 @@ def to_device(packed: PackedDocs, device: Literal["cpu", "cuda"] = "cuda") -> Pa
     )
 
 
-def maxsim(query_tokens, packed: PackedDocs, *, scale=None, device="auto"):
+def score(
+    query_tokens,
+    packed,
+    *,
+    reducer: Reducer = "maxsim",
+    query_weights=None,
+    temperature: float = 1.0,
+    candidate_indices=None,
+    scale=None,
+    device="auto",
+):
+    """Score compressed multi-vector documents with a selected reducer.
+
+    Unlike :func:`maxsim`, this generalized entry point always dispatches
+    CUDA-resident inputs through the reducer-policy kernel, including when
+    ``reducer="maxsim"``. This keeps the legacy MaxSim fast path stable while
+    making the shared reducer implementation directly accessible.
+    """
+    if isinstance(packed, PackedDocs):
+        return _score_binary(
+            query_tokens,
+            packed,
+            scale=scale,
+            device=device,
+            reducer=reducer,
+            query_weights=query_weights,
+            temperature=temperature,
+            candidate_indices=candidate_indices,
+            force_generalized=True,
+        )
+
+    # Import lazily because maxsim.experimental imports helpers from this
+    # module. The public score API can still dispatch both resident loaders.
+    from maxsim.experimental import Int4PackedDocs, _int4_score
+
+    if isinstance(packed, Int4PackedDocs):
+        if scale is not None:
+            raise ValueError("scale is stored by Int4PackedDocs and cannot be overridden")
+        return _int4_score(
+            query_tokens,
+            packed,
+            device=device,
+            reducer=reducer,
+            query_weights=query_weights,
+            temperature=temperature,
+            candidate_indices=candidate_indices,
+            force_generalized=True,
+        )
+    raise TypeError("packed must be a PackedDocs or Int4PackedDocs instance")
+
+
+def maxsim(
+    query_tokens,
+    packed: PackedDocs,
+    *,
+    scale=None,
+    device="auto",
+    reducer: Reducer = "maxsim",
+    query_weights=None,
+    temperature: float = 1.0,
+    candidate_indices=None,
+):
+    return _score_binary(
+        query_tokens,
+        packed,
+        scale=scale,
+        device=device,
+        reducer=reducer,
+        query_weights=query_weights,
+        temperature=temperature,
+        candidate_indices=candidate_indices,
+        force_generalized=False,
+    )
+
+
+def _score_binary(
+    query_tokens,
+    packed: PackedDocs,
+    *,
+    scale,
+    device,
+    reducer,
+    query_weights,
+    temperature,
+    candidate_indices,
+    force_generalized: bool,
+):
     if device not in ("auto", "cpu", "cuda"):
         raise ValueError("device must be 'auto', 'cpu', or 'cuda'")
     effective_device = "cuda" if device == "auto" and isinstance(packed, PackedDocs) and packed.device == "cuda" else device
@@ -168,13 +258,63 @@ def maxsim(query_tokens, packed: PackedDocs, *, scale=None, device="auto"):
         raise ValueError(f"query dim={batches.shape[2]} does not match packed dim={packed.dim}")
 
     query_float = batches.astype(np.float32, copy=False)
-    result = np.empty((query_float.shape[0], packed.num_docs), dtype=np.float32)
+    reducer_value, weight_values, temperature_value = _normalize_reducer_options(
+        reducer,
+        query_weights,
+        temperature,
+        batch=query_float.shape[0],
+        query_tokens=query_float.shape[1],
+    )
+    candidates = _normalize_candidate_indices(candidate_indices, packed.num_docs)
+    num_targets = packed.num_docs if candidates is None else candidates.shape[0]
+    result_shape = (query_float.shape[0], num_targets)
     resolved_scale = _resolve_scale(scale, packed)
     kernel_scale = _kernel_scale(resolved_scale)
     use_token_scale = isinstance(packed.token_scale, np.ndarray)
+    use_generalized = force_generalized or reducer_value != "maxsim" or candidates is not None
+
+    if num_targets == 0 or query_float.shape[0] == 0:
+        result = np.empty(result_shape, dtype=np.float32)
+        return result[0] if squeeze else result
+    if query_float.shape[1] == 0:
+        result = np.zeros(result_shape, dtype=np.float32)
+        return result[0] if squeeze else result
 
     if effective_device == "cuda" and packed.device == "cuda":
         use_resident_vector_scale = _can_use_cuda_resident_vector_scale(resolved_scale, packed)
+        if use_generalized:
+            method_name = "score_batch" if candidates is None else "score_candidates_batch"
+            method = getattr(packed.data, method_name, None)
+            if method is None:
+                raise NotImplementedError(f"this CUDA build does not provide {method_name}")
+            contiguous_query = np.ascontiguousarray(query_float, dtype=np.float32)
+            temporary_scale_vector = (
+                reducer_value == "smoothsim"
+                and _scale_is_vector(resolved_scale)
+                and not use_resident_vector_scale
+            )
+            kernel_uses_scale_vector = use_resident_vector_scale or temporary_scale_vector
+            common_args = (
+                reducer_value,
+                weight_values,
+                float(temperature_value),
+                float(kernel_scale),
+                kernel_uses_scale_vector,
+                use_token_scale,
+            )
+            if temporary_scale_vector:
+                override_args = (*common_args[:-2], False, common_args[-1], resolved_scale)
+            else:
+                override_args = common_args
+            if candidates is None:
+                batch_result = method(contiguous_query, *override_args)
+            else:
+                batch_result = method(contiguous_query, candidates, *override_args)
+            if _scale_is_vector(resolved_scale) and not kernel_uses_scale_vector:
+                selected_scale = resolved_scale if candidates is None else resolved_scale[candidates]
+                batch_result = _apply_vector_scale(batch_result, selected_scale)
+            return batch_result[0] if squeeze else batch_result
+
         batch_result = _cuda_resident_maxsim_batch(
             packed.data,
             np.ascontiguousarray(query_float, dtype=np.float32),
@@ -186,6 +326,30 @@ def maxsim(query_tokens, packed: PackedDocs, *, scale=None, device="auto"):
         return batch_result[0] if squeeze else batch_result
 
     if effective_device == "cuda":
+        if use_generalized:
+            upload_packed = packed
+            if resolved_scale is not packed.scale and _scale_is_vector(resolved_scale):
+                upload_packed = PackedDocs(
+                    data=packed.data,
+                    doc_offsets=packed.doc_offsets,
+                    dim=packed.dim,
+                    num_docs=packed.num_docs,
+                    scale=resolved_scale,
+                    device="cpu",
+                    token_scale=packed.token_scale,
+                )
+                scale = None
+            return _score_binary(
+                query_tokens,
+                to_device(upload_packed, "cuda"),
+                scale=scale,
+                device="cuda",
+                reducer=reducer_value,
+                query_weights=weight_values,
+                temperature=temperature_value,
+                candidate_indices=candidates,
+                force_generalized=True,
+            )
         if use_token_scale:
             raise NotImplementedError("token scale scoring on CUDA requires CUDA-resident PackedDocs; call maxsim.to_device(packed, 'cuda') first")
         packed_data = np.ascontiguousarray(packed.data, dtype=np.uint8)
@@ -202,6 +366,7 @@ def maxsim(query_tokens, packed: PackedDocs, *, scale=None, device="auto"):
             batch_result = _apply_vector_scale(batch_result, resolved_scale)
             return batch_result[0] if squeeze else batch_result
 
+        result = np.empty(result_shape, dtype=np.float32)
         for batch_idx, query in enumerate(query_float):
             result[batch_idx] = _maxsim_cuda.maxsim_cuda(
                 np.ascontiguousarray(query, dtype=np.float32),
@@ -213,9 +378,10 @@ def maxsim(query_tokens, packed: PackedDocs, *, scale=None, device="auto"):
         result = _apply_vector_scale(result, resolved_scale)
         return result[0] if squeeze else result
 
-    if _maxsim_cpp is not None and not use_token_scale:
+    if _maxsim_cpp is not None and not use_token_scale and not use_generalized:
         packed_data = np.ascontiguousarray(packed.data, dtype=np.uint8)
         offsets = np.ascontiguousarray(packed.doc_offsets, dtype=np.int64)
+        result = np.empty(result_shape, dtype=np.float32)
         for batch_idx, query in enumerate(query_float):
             result[batch_idx] = _maxsim_cpp.maxsim_lut(
                 np.ascontiguousarray(query, dtype=np.float32),
@@ -229,25 +395,44 @@ def maxsim(query_tokens, packed: PackedDocs, *, scale=None, device="auto"):
 
     signs = _unpack_signs(packed.data, packed.dim)
     token_scales = packed.token_scale if use_token_scale else None
-    for batch_idx, query in enumerate(query_float):
-        for doc_idx in range(packed.num_docs):
+    selected_docs = range(packed.num_docs) if candidates is None else candidates
+    result = np.empty(result_shape, dtype=np.float32)
+    for batch_idx, query_matrix in enumerate(query_float):
+        batch_weights = None if weight_values is None else weight_values[batch_idx]
+        for output_idx, doc_idx_value in enumerate(selected_docs):
+            doc_idx = int(doc_idx_value)
             start = int(packed.doc_offsets[doc_idx])
             end = int(packed.doc_offsets[doc_idx + 1])
             doc = signs[start:end]
             if doc.shape[0] == 0:
-                result[batch_idx, doc_idx] = 0.0
+                result[batch_idx, output_idx] = 0.0
                 continue
-            dots = query @ doc.T
+            dots = query_matrix @ doc.T
             if token_scales is not None:
                 dots = dots * token_scales[start:end][np.newaxis, :]
-            score = np.max(dots, axis=1).sum(dtype=np.float32)
-            result[batch_idx, doc_idx] = np.float32(score * kernel_scale)
+            doc_scale = resolved_scale[doc_idx] if _scale_is_vector(resolved_scale) else np.float32(resolved_scale)
+            if reducer_value == "smoothsim":
+                dots = dots * np.float32(doc_scale)
+                doc_score = _reduce_similarities(dots, reducer_value, batch_weights, temperature_value)
+            else:
+                doc_score = _reduce_similarities(dots, reducer_value, batch_weights, temperature_value)
+                doc_score = np.float32(doc_score * np.float32(doc_scale))
+            result[batch_idx, output_idx] = doc_score
 
-    result = _apply_vector_scale(result, resolved_scale)
     return result[0] if squeeze else result
 
 
-def topk_maxsim(query_tokens, packed: PackedDocs, k: int, *, scale=None, device="auto"):
+def topk_maxsim(
+    query_tokens,
+    packed: PackedDocs,
+    k: int,
+    *,
+    scale=None,
+    device="auto",
+    reducer: Reducer = "maxsim",
+    query_weights=None,
+    temperature: float = 1.0,
+):
     if k < 1:
         raise ValueError("k must be >= 1")
     if k > packed.num_docs:
@@ -257,24 +442,32 @@ def topk_maxsim(query_tokens, packed: PackedDocs, k: int, *, scale=None, device=
     resolved_scale = _resolve_scale(scale, packed)
     use_resident_vector_scale = _can_use_cuda_resident_vector_scale(resolved_scale, packed)
     use_token_scale = isinstance(packed.token_scale, np.ndarray)
+    query = _as_numpy(query_tokens)
+    if query.ndim == 2:
+        batches = query[np.newaxis, :, :]
+        squeeze = True
+    elif query.ndim == 3:
+        batches = query
+        squeeze = False
+    else:
+        raise ValueError("query_tokens must have shape [query_tokens, dim] or [batch, query_tokens, dim]")
+    if batches.shape[2] != packed.dim:
+        raise ValueError(f"query dim={batches.shape[2]} does not match packed dim={packed.dim}")
+    reducer_value, weight_values, temperature_value = _normalize_reducer_options(
+        reducer,
+        query_weights,
+        temperature,
+        batch=batches.shape[0],
+        query_tokens=batches.shape[1],
+    )
     if (
-        effective_device == "cuda"
+        reducer_value == "maxsim"
+        and effective_device == "cuda"
         and packed.device == "cuda"
         and hasattr(packed.data, "topk_batch")
         and (not _scale_is_vector(resolved_scale) or use_resident_vector_scale)
     ):
-        query = _as_numpy(query_tokens)
         prefer_lut_topk = np.issubdtype(query.dtype, np.integer) and packed.dim == 128 and packed.num_docs > 128
-        if query.ndim == 2:
-            batches = query[np.newaxis, :, :]
-            squeeze = True
-        elif query.ndim == 3:
-            batches = query
-            squeeze = False
-        else:
-            raise ValueError("query_tokens must have shape [query_tokens, dim] or [batch, query_tokens, dim]")
-        if batches.shape[2] != packed.dim:
-            raise ValueError(f"query dim={batches.shape[2]} does not match packed dim={packed.dim}")
         scores, indices = _cuda_resident_topk_batch(
             packed.data,
             np.ascontiguousarray(batches, dtype=np.float32),
@@ -286,7 +479,15 @@ def topk_maxsim(query_tokens, packed: PackedDocs, k: int, *, scale=None, device=
         )
         return (scores[0], indices[0]) if squeeze else (scores, indices)
 
-    scores = maxsim(query_tokens, packed, scale=scale, device=device)
+    scores = maxsim(
+        query_tokens,
+        packed,
+        scale=scale,
+        device=device,
+        reducer=reducer_value,
+        query_weights=weight_values,
+        temperature=temperature_value,
+    )
     if scores.ndim == 1:
         indices = _topk_indices_1d(scores, k)
         return scores[indices], indices
@@ -306,6 +507,82 @@ def _as_numpy(value) -> np.ndarray:
         return cpu.numpy()
 
     return np.asarray(value)
+
+
+def _normalize_reducer_options(reducer, query_weights, temperature, *, batch: int, query_tokens: int):
+    if not isinstance(reducer, str) or reducer not in _REDUCERS:
+        choices = ", ".join(sorted(_REDUCERS))
+        raise ValueError(f"reducer must be one of: {choices}")
+
+    try:
+        temperature_value = float(temperature)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("temperature must be a finite value greater than 0") from exc
+    if not np.isfinite(temperature_value) or temperature_value <= 0.0:
+        raise ValueError("temperature must be a finite value greater than 0")
+
+    if reducer != "weighted_maxsim":
+        if query_weights is not None:
+            raise ValueError("query_weights is only supported with reducer='weighted_maxsim'")
+        return reducer, None, temperature_value
+    if query_weights is None:
+        raise ValueError("query_weights is required with reducer='weighted_maxsim'")
+
+    weights = _as_numpy(query_weights).astype(np.float32, copy=False)
+    if weights.ndim == 1:
+        if weights.shape[0] != query_tokens:
+            raise ValueError("query_weights must have shape [query_tokens] or [batch, query_tokens]")
+        weights = np.broadcast_to(weights[np.newaxis, :], (batch, query_tokens))
+    elif weights.ndim == 2:
+        if weights.shape != (batch, query_tokens):
+            raise ValueError("query_weights must have shape [query_tokens] or [batch, query_tokens]")
+    else:
+        raise ValueError("query_weights must have shape [query_tokens] or [batch, query_tokens]")
+    if not np.all(np.isfinite(weights)):
+        raise ValueError("query_weights must contain only finite values")
+    return reducer, np.ascontiguousarray(weights, dtype=np.float32), temperature_value
+
+
+def _normalize_candidate_indices(candidate_indices, num_docs: int) -> np.ndarray | None:
+    if candidate_indices is None:
+        return None
+    values = _as_numpy(candidate_indices)
+    if values.ndim != 1 or not np.issubdtype(values.dtype, np.integer):
+        raise ValueError("candidate_indices must be a one-dimensional integer array")
+    normalized = np.ascontiguousarray(values, dtype=np.int64)
+    if np.any(normalized < 0) or np.any(normalized >= num_docs):
+        raise ValueError("candidate_indices must be between 0 and packed.num_docs - 1")
+    return normalized
+
+
+def _reduce_similarities(
+    similarities: np.ndarray,
+    reducer: str,
+    query_weights: np.ndarray | None,
+    temperature: float,
+) -> np.float32:
+    if similarities.shape[1] == 0 or similarities.shape[0] == 0:
+        return np.float32(0.0)
+    values = np.asarray(similarities, dtype=np.float32)
+    if reducer == "maxsim":
+        return np.float32(np.max(values, axis=1).sum(dtype=np.float32))
+    if reducer == "weighted_maxsim":
+        maxima = np.max(values, axis=1)
+        return np.float32(np.sum(maxima * query_weights, dtype=np.float32))
+    if reducer in {"topk2", "topk4"}:
+        requested = 2 if reducer == "topk2" else 4
+        count = min(requested, values.shape[1])
+        top_values = np.partition(values, values.shape[1] - count, axis=1)[:, -count:]
+        pooled = np.mean(top_values, axis=1, dtype=np.float32)
+        return np.float32(np.sum(pooled, dtype=np.float32))
+    if reducer == "smoothsim":
+        tau = np.float32(temperature)
+        maxima = np.max(values, axis=1)
+        shifted = (values - maxima[:, np.newaxis]) / tau
+        sum_exp = np.sum(np.exp(shifted), axis=1, dtype=np.float32)
+        pooled = maxima + tau * np.log(sum_exp)
+        return np.float32(np.sum(pooled, dtype=np.float32))
+    raise AssertionError(f"unhandled reducer: {reducer}")
 
 
 def _normalize_offsets(doc_offsets, num_tokens: int) -> np.ndarray:
