@@ -1,0 +1,11 @@
+\begin{tabular}{lrr}
+\toprule
+Production operation & P50 (ms) & P95 (ms) \\
+\midrule
+Per-token int4 full scan (fp32 query) & 8.34 & 8.38 \\
+Per-token int4 top-$k$ (int8 query) & 2.72 & 2.84 \\
+Residual int4 full scan & 16.11 & 16.72 \\
+Residual int4, 512 candidates & 2.80 & 2.86 \\
+Prefix scan $+$ 512-candidate cascade & 15.87 & 16.09 \\
+\bottomrule
+\end{tabular}

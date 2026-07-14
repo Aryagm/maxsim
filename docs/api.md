@@ -1,17 +1,17 @@
-# bitmax API
+# maxsim API
 
 The production SDK path is `Corpus` plus `Reranker`:
 
 ```python
-corpus = bitmax.Corpus.from_embeddings(
+corpus = maxsim.Index.from_embeddings(
     doc_ids=doc_ids,
     embeddings=doc_embeddings,
     offsets=doc_offsets,
-    mode="binary_q40",
+    mode="auto",
 )
-corpus.save("docs.bitmax.npz")
+corpus.save("docs.maxsim.npz")
 
-reranker = bitmax.Reranker.load("docs.bitmax.npz", device="cuda")
+reranker = maxsim.Reranker.load("docs.maxsim.npz", device="cuda")
 results = reranker.search(query_embeddings, k=10)
 reranked = reranker.rerank(query_embeddings, candidate_ids=["doc-a", "doc-b"], k=2)
 ```
@@ -33,7 +33,16 @@ Modes:
 
 - `binary`: fastest, 32x fp32 document compression on large corpora.
 - `binary_q40`: experimental 32x-ish q40 centroid calibration.
-- `int4`: experimental accuracy-first mode, 8x fp32 document compression.
+- `int4`: tensor-scale int4 control, 8x fp32 document compression.
+- `int4_per_token`: quality-first int4 with a float32 scale per document token;
+  7.53x fp32 compression at dim 128. This is what `auto` and `max_quality` use.
+- `int4_residual`: two per-token int4 streams. With `rescore_candidates`,
+  search scans the prefix and candidate reranking fuses prefix plus residual
+  before reduction. Without a candidate budget, search scores the full fused
+  representation for accuracy.
+
+`Corpus.memory_report()` separates logical encoded bytes, live host arrays,
+resident CUDA index bytes, CUDA workspace, and actual serialized file size.
 
 ## SDK Reranker
 
@@ -43,24 +52,41 @@ only the requested candidates sorted by compressed MaxSim score. Candidate IDs
 can come from Qdrant, LanceDB, Elasticsearch, Vespa, pgvector, or a custom
 retriever.
 
-Use `device="cuda"` for production benchmark claims. CPU is available for
-correctness checks and small local experiments.
+Use `device="cuda"` to reproduce the published binary and tensor-scale int4
+benchmark paths. CPU is available for correctness checks and small local
+experiments.
+
+`Reranker(..., int4_query="int8")` selects the dp4a query path only for
+full-corpus MaxSim search on supported CUDA dim-128 int4 indexes. It does not
+change candidate-only reranking, residual rescoring, or non-MaxSim reducers;
+those operations use fp32 queries.
 
 Both `search` and `rerank` accept `reducer`, `query_weights`, and `temperature`
 with the same meanings as the low-level reducer API below. `rerank` passes the
 resolved candidate positions to the candidate-only scorer instead of scoring
 the full corpus. The calibrated `binary_q40` mode currently remains MaxSim-only.
 
+For an `int4_residual` index, one call performs coarse prefix retrieval and
+fused candidate-only residual scoring:
+
+```python
+results = reranker.search(query_embeddings, k=10, rescore_candidates=512)
+```
+
+CUDA parity tests for the production per-token and residual paths are included
+in the repository, but those paths have not yet completed the paper's full
+end-to-end multimodal latency and corpus-scale benchmark sweeps.
+
 ## Low-Level API
 
 The lower-level kernel API exposes direct packed scoring:
 
 ```python
-packed = bitmax.pack_signs(doc_embeddings, doc_offsets=None, scale=None)
-scores = bitmax.maxsim(query_tokens, packed)
-scores, indices = bitmax.topk_maxsim(query_tokens, packed, k=10)
-bitmax.save_packed("docs.bitmax.npz", packed)
-bundle = bitmax.load_packed("docs.bitmax.npz")
+packed = maxsim.pack_signs(doc_embeddings, doc_offsets=None, scale=None)
+scores = maxsim.maxsim(query_tokens, packed)
+scores, indices = maxsim.topk_maxsim(query_tokens, packed, k=10)
+maxsim.save_packed("docs.maxsim.npz", packed)
+bundle = maxsim.load_packed("docs.maxsim.npz")
 ```
 
 If `doc_offsets` is omitted, every input row is treated as a single-token
@@ -137,13 +163,13 @@ is `benchmark-results/cuda-reducers.json`.
 
 ## Experimental Centroid Binary
 
-`bitmax.experimental` includes a one-bit per-dimension centroid calibration path.
+`maxsim.experimental` includes a one-bit per-dimension centroid calibration path.
 It fits positive/negative centroids per dimension, packs thresholded document
 signs, and transforms query vectors before calling the same binary MaxSim
 kernel.
 
 ```python
-from bitmax.experimental import (
+from maxsim.experimental import (
     dim_centroid_maxsim,
     fit_dim_centroid_calibration,
     pack_dim_centroid_signs,
@@ -181,27 +207,38 @@ packed, calibration = pack_dim_centroid_signs(
 )
 ```
 
-## Experimental Int4
+## Int4 And Residual Scoring
 
-`bitmax.experimental` also includes symmetric signed-int4 document packing. It
-stores two 4-bit signed values per byte plus one tensor scale. This is the
-current high-accuracy compression option when 8x fp32 document reduction is
-acceptable.
+`maxsim.experimental` includes symmetric signed-int4 document packing with
+either one tensor scale or one scale per document token. Per-token scales are
+applied to each similarity before MaxSim, TopK, weighted MaxSim, or SmoothSim.
 
 ```python
-from bitmax.experimental import (
+from maxsim.experimental import (
     int4_maxsim,
     int4_to_device,
     pack_int4_symmetric,
     topk_int4_maxsim,
 )
 
-packed = pack_int4_symmetric(doc_embeddings, doc_offsets)
+packed = pack_int4_symmetric(
+    doc_embeddings, doc_offsets, scale_granularity="token"
+)
 scores = int4_maxsim(query_tokens, packed)
 
 cuda_packed = int4_to_device(packed)
 top_scores, top_indices = topk_int4_maxsim(query_tokens, cuda_packed, k=10)
 ```
 
-The int4 API is experimental and may change. It exists to measure the
-accuracy/storage/speed frontier before promoting a stable public kernel.
+The residual API is available from the package root:
+
+```python
+packed = maxsim.pack_residual_int4(doc_embeddings, doc_offsets)
+coarse_scores, coarse_indices = maxsim.prefix_topk(query_tokens, packed, k=512)
+fine = maxsim.residual_score(
+    query_tokens, packed, candidate_indices=np.array([19, 3, 11])
+)
+scores, indices = maxsim.cascade_topk(
+    query_tokens, packed, k=10, candidates=512
+)
+```

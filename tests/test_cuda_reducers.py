@@ -168,6 +168,128 @@ def test_cuda_int4_reducers_match_torch_for_full_and_candidate_scoring(reducer):
 
 
 @pytest.mark.cuda
+@pytest.mark.parametrize("reducer", REDUCERS)
+def test_cuda_per_token_int4_reducers_match_torch_for_full_and_candidate_scoring(reducer):
+    _require_cuda()
+    from maxsim.experimental import int4_to_device, pack_int4_symmetric
+
+    docs, offsets, query, query_weights, candidates = _fixture()
+    cpu_packed = pack_int4_symmetric(docs, offsets, scale_granularity="token")
+    packed = int4_to_device(cpu_packed)
+    reconstructed = (
+        cpu_packed.values.astype(np.float32)
+        * np.float32(cpu_packed.scale)
+        * cpu_packed.token_scale[:, None]
+    )
+    kwargs = _reducer_kwargs(reducer, query_weights)
+
+    full = maxsim.score(query, packed, reducer=reducer, device="cuda", **kwargs)
+    candidate = maxsim.score(
+        query,
+        packed,
+        reducer=reducer,
+        candidate_indices=candidates,
+        device="cuda",
+        **kwargs,
+    )
+    expected_full = _torch_reference(query, reconstructed, offsets, reducer=reducer, **kwargs)
+    expected_candidate = _torch_reference(
+        query,
+        reconstructed,
+        offsets,
+        reducer=reducer,
+        candidate_indices=candidates,
+        **kwargs,
+    )
+
+    np.testing.assert_allclose(full, expected_full, rtol=2e-5, atol=2e-3)
+    np.testing.assert_allclose(candidate, expected_candidate, rtol=2e-5, atol=2e-3)
+    np.testing.assert_allclose(candidate, np.take(full, candidates, axis=-1), rtol=0, atol=0)
+
+
+@pytest.mark.cuda
+def test_cuda_per_token_int4_legacy_maxsim_and_topk_match_reconstructed_reference():
+    _require_cuda()
+    from maxsim.experimental import int4_maxsim, int4_to_device, pack_int4_symmetric, topk_int4_maxsim
+
+    docs, offsets, query, _query_weights, _candidates = _fixture()
+    cpu_packed = pack_int4_symmetric(docs, offsets, scale_granularity="token")
+    packed = int4_to_device(cpu_packed)
+    reconstructed = (
+        cpu_packed.values.astype(np.float32)
+        * np.float32(cpu_packed.scale)
+        * cpu_packed.token_scale[:, None]
+    )
+    expected = _torch_reference(query, reconstructed, offsets, reducer="maxsim")
+
+    actual = int4_maxsim(query, packed, device="cuda")
+    top_scores, top_indices = topk_int4_maxsim(query, packed, k=4, device="cuda")
+    expected_indices = np.stack(
+        [np.lexsort((np.arange(packed.num_docs, dtype=np.int64), -row))[:4] for row in expected]
+    )
+
+    np.testing.assert_allclose(actual, expected, rtol=2e-5, atol=2e-3)
+    np.testing.assert_array_equal(top_indices, expected_indices)
+    np.testing.assert_allclose(
+        top_scores,
+        np.take_along_axis(expected, expected_indices, axis=1),
+        rtol=2e-5,
+        atol=2e-3,
+    )
+
+
+@pytest.mark.cuda
+def test_cuda_int4_handle_reports_resident_per_token_scale_properties():
+    _require_cuda()
+    from maxsim.experimental import int4_to_device, pack_int4_symmetric
+
+    docs, offsets, _query, _query_weights, _candidates = _fixture()
+    tensor_packed = int4_to_device(pack_int4_symmetric(docs, offsets))
+    token_packed = int4_to_device(
+        pack_int4_symmetric(docs, offsets, scale_granularity="token")
+    )
+
+    assert tensor_packed.data.num_tokens == docs.shape[0]
+    assert tensor_packed.data.has_token_scale_vector is False
+    assert tensor_packed.data.token_scale_vector_size == 0
+    assert token_packed.data.num_tokens == docs.shape[0]
+    assert token_packed.data.has_token_scale_vector is True
+    assert token_packed.data.token_scale_vector_size == docs.shape[0]
+    assert token_packed.data.resident_bytes >= (
+        token_packed.data.packed_size
+        + offsets.nbytes
+        + token_packed.token_scale.nbytes
+    )
+
+
+@pytest.mark.cuda
+def test_cuda_int4_handle_rejects_invalid_token_scale_vectors_without_mutation():
+    _require_cuda()
+    from maxsim.experimental import int4_to_device, pack_int4_symmetric
+
+    docs, offsets, _query, _query_weights, _candidates = _fixture()
+    handle = int4_to_device(pack_int4_symmetric(docs, offsets)).data
+    valid = np.ones(docs.shape[0], dtype=np.float32)
+
+    with pytest.raises(ValueError, match="shape"):
+        handle.set_token_scale_vector(valid[:-1])
+    for invalid_value in (0.0, -1.0, np.nan, np.inf):
+        invalid = valid.copy()
+        invalid[3] = invalid_value
+        with pytest.raises(ValueError, match="finite and > 0"):
+            handle.set_token_scale_vector(invalid)
+    assert handle.has_token_scale_vector is False
+    assert handle.token_scale_vector_size == 0
+
+    handle.set_token_scale_vector(valid)
+    assert handle.has_token_scale_vector is True
+    assert handle.token_scale_vector_size == docs.shape[0]
+    handle.clear_token_scale_vector()
+    assert handle.has_token_scale_vector is False
+    assert handle.token_scale_vector_size == 0
+
+
+@pytest.mark.cuda
 @pytest.mark.parametrize("reducer", ["maxsim", "smoothsim"])
 def test_cuda_binary_reducers_apply_token_and_document_scales_before_candidate_selection(reducer):
     _require_cuda()

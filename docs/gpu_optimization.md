@@ -86,7 +86,7 @@ Next GPU optimization hypotheses:
 
 Change: CUDA-resident `PackedDocs` handles now expose `topk_batch`, and
 `bitmax.topk_maxsim` uses it directly when the packed docs are already resident
-on GPU. The fused path computes the full exact score matrix on device, selects
+on GPU. The fused path computes the full compressed-representation score matrix on device, selects
 top-k on device with deterministic lower-doc-id tie breaking, and returns only
 top-k scores and indices to the host.
 
@@ -656,8 +656,8 @@ regularization.
 Adopted: `token_scale="mean_abs_u4"` in pack_signs, SDK mode
 `binary_token_scale_u4` with true 4-bit nibble-packed codes on disk, and the
 `compact` preset now maps to it (retiring u8 from the presets; the mode
-remains). `balanced` (fp16 scales) stays the default pending validation on a
-second embedding model.
+remains). At this point, `balanced` (fp16 scales) stayed the default pending
+validation on a second embedding model.
 
 Also measured and rejected: cluster-mass-aware scales for the pooled tier
 (size or sqrt(size) weighting collapses NDCG to 0.29-0.80 — under MaxSim a
@@ -727,21 +727,22 @@ pool3 ties fast-plaid on recall@10 at 28x its compression and ~370x its
 measured latency. Token scales again below plain binary at 10k (third
 independent corpus build confirming the small-corpus-only verdict).
 
-## 2026-07-05 — Multimodal families and the universal per-token int4 tier
+## 2026-07-05 — Multimodal families and the per-token int4 default
 
 All experiments local CPU (archived caches) except audio (Vast 4090, instance
 43959730, destroyed). Artifacts: `exp-scale-inversion-*.json`,
 `exp-int4-variants-*.json`, `exp-eval-*.json`, `exp-pool-scaling-*.json`.
 
-- **Per-token int4 scales are the universal 8x-class tier**: beats binary on
-  all three BEIR text sets (.698/.360/.339 vs .678/.267/.277), best on the
-  visual 10k 2k-query subsample (.6074), ties on audio. Our earlier -0.011
-  rejection on a 256-doc slice was a small-slice artifact. CUDA kernel
-  (scale-before-max, as in the binary token-scale kernels) is roadmap #1;
-  until then the format is simulation-validated only.
+- **Per-token int4 scales are the most consistent 8x-class tier**: beats binary
+  on all three BEIR text sets (.698/.360/.339 vs .678/.267/.277), wins on the
+  visual 10k 2k-query subsample (.6074), and ties the other int4 variants on
+  audio. Per-channel narrowly leads SciFact and audio. Our earlier -0.011
+  rejection on a 256-doc slice was a small-slice artifact. A scale-before-max
+  CUDA kernel was roadmap #1 at the time; the format was then
+  simulation-validated only.
 - **Audio validated (Clotho x ColQwen-Omni, 1,045 clips)**: dense .3129,
   int4 .3133 (ties dense), binary .2904, pool2/3 .276. Non-unit-norm; the
-  auto geometry rule extends to a third modality unchanged.
+  then-proposed auto geometry rule extended to a third modality unchanged.
 - **Scale inversion refuted with mechanism confirmed**: inverse-mean-abs
   beats mean-abs on both text sets (direction proof of the anti-sparsity
   mechanism) but nothing beats flat binary; spikiness weights collapse to ~0.
@@ -756,3 +757,80 @@ All experiments local CPU (archived caches) except audio (Vast 4090, instance
 - Ops notes: vast direct ssh (`vastai ssh-url`) beats the flaky gateways;
   colqwen-omni needs colpali-engine + matched torchvision; Clotho pulls from
   Zenodo + p7zip. Audio cache archived in `caches-full/multimodal/`.
+
+## 2026-07-13 - Production Per-Token And Residual Paths
+
+The July 5 conclusions are now implemented rather than simulation-only:
+
+- `auto` and `max_quality` resolve unconditionally to per-token int4. The
+  production dim-128 payload is 64 B of codes plus one float32 scale per token,
+  or 68 B/token (7.53x versus fp32).
+- CUDA applies token scales before reduction for full-corpus and candidate-only
+  MaxSim, weighted MaxSim, TopK2, TopK4, and SmoothSim. The dim-128 int8-query
+  path also preserves scale-before-max semantics for full-corpus MaxSim.
+- `int4_residual` stores two per-token q4 streams (136 B/token at dim 128). Its
+  cascade scans the prefix, performs stable top-M selection in expected
+  O(num_docs + M log M) time over the returned scores, then fuses prefix and
+  residual similarities before the requested reducer. A full-corpus candidate
+  budget bypasses the coarse pass.
+- The geometry-dependent binary and pooling findings remain available through
+  explicit presets; they no longer drive `auto`.
+
+CPU reference and CUDA parity tests are in-tree. PR CI now compiles and links a
+fixed-SM CUDA wheel. The production paths are runtime-validated below; only the
+end-to-end multimodal and corpus-scale production sweeps remain.
+
+## 2026-07-14 - Production CUDA Validation And Residual Tuning
+
+Artifacts: `docs/benchmark_results/raw/cuda-step1-rtx4090-20260714.json`,
+`cuda-residual-routing-rtx4090-20260714.json`, and
+`cuda-validation-rtx4090-20260714.json`. The exact benchmark runtime source is
+stored as `cuda-step1-source-20260714.tgz` (SHA-256
+`0e96e50482927623f01abb1f05d71da1e2120cd038a810998c184c113600c59d`).
+VAST instance 44834296 was created for this run and destroyed after retrieval;
+the pre-existing account instance 44275269 was not modified.
+
+Environment: RTX 4090 (SM89), driver 580.126.09, CUDA 12.4, PyTorch 2.4.0.
+The extension contains `cuda_extension.sm_89.cubin`. Shape: 4,096 documents,
+64-192 tokens/document, query `[4, 32, 128]`, top-k 10, three independent runs
+of 20 calls after five warmups.
+
+| production operation | P50 | P95 |
+| --- | ---: | ---: |
+| tensor-scale int4 full scan, fp32 query | 8.32 ms | 8.69 ms |
+| per-token int4 full scan, fp32 query | 8.34 ms | 8.38 ms |
+| per-token int4 top-k, int8 query | 2.72 ms | 2.84 ms |
+| fused residual full scan | 16.11 ms | 16.72 ms |
+| fused residual, 512 candidates | 2.80 ms | 2.86 ms |
+| prefix scan + 512-candidate cascade | 15.87 ms | 16.09 ms |
+
+All 65 applied release gates passed. Per-token scaling adds 0.2% to
+tensor-scale full-scan latency. Int8-query top-k is 3.08x faster than
+fp32-query top-k. Residual candidate scoring at M=512 is 5.75x faster than the
+residual full scan, and the complete M=512 cascade is 1.02x faster than that
+full scan. The dedicated PyTorch-reference matrix has maximum error 6.10e-5;
+the largest production-path parity difference is 3.05e-4, and all five
+full-scan repeat comparisons are exact.
+
+Two optimizations were made from the measured failures:
+
+1. The old device top-M selector scales as O(num_docs * M). Stable host
+   selection in expected O(num_docs + M log M) time over the already returned
+   coarse scores removes the M=512 and M=2048 cascade blow-up; M=num_docs skips
+   the redundant prefix scan.
+2. Residual reduction now has independent 4/8-warp variants. The thread-scoped
+   default policy uses four warps below eight query tokens and eight warps from
+   eight upward; single-stream reducers remain at four. At four query tokens
+   this improves full/candidate scoring by 2.7%/5.6%. Across one to seven query
+   tokens, four warps improves full scoring by 2.1-2.7% and candidate scoring
+   by 5.1-6.0%. At 32 query tokens, eight warps improves full scoring by
+   3.2-4.2% and candidate scoring by 11.7-12.6% across MaxSim, TopK4, and
+   SmoothSim. The adaptive policy remains within 2.53% of the best forced route
+   in every measured group. `cuobjdump` reports zero stack and local bytes for
+   all 15 residual block/4-warp/8-warp kernel variants.
+
+Final validation: 80 CUDA tests and 223 non-CUDA tests passed. Compute
+Sanitizer memcheck, initcheck, racecheck, and synccheck all passed on the full
+dim-128 correctness harness and eight targeted block/4-warp/8-warp adaptive
+and forced-route tests;
+memcheck reported zero leaked bytes, and racecheck reported zero hazards.

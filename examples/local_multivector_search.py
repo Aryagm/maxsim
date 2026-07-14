@@ -21,7 +21,7 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
     parser.add_argument("--input", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--device", default="cuda", choices=["cpu", "cuda"])
-    parser.add_argument("--modes", default="binary,binary_q40,int4")
+    parser.add_argument("--modes", default="binary,binary_q40,int4,int4_per_token")
     parser.add_argument("--k", type=int, default=10)
     parser.add_argument("--repeat", type=int, default=3)
     parser.add_argument("--limit-queries", type=int, default=None)

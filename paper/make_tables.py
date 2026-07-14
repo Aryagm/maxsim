@@ -1,4 +1,4 @@
-"""Generate the paper's exact-value LaTeX tables from the committed ledger.
+"""Generate the paper's exact-value LaTeX tables from the artifact ledger.
 
 Writes paper/tables/*.tex; main.tex \\input{}s them. Run from the repo root:
     python paper/make_tables.py
@@ -125,6 +125,111 @@ def table_kernels():
     print("wrote kernels.tex", f"({len(gate)} shapes)")
 
 
+def table_production_cuda():
+    data = json.loads(
+        (RAW / "cuda-step1-rtx4090-20260714.json").read_text()
+    )
+    if data.get("schema_version") != 2:
+        raise ValueError("production CUDA artifact must use schema version 2")
+    if not data.get("gate_passed") or len(data["cases"]) != 1:
+        raise ValueError("production CUDA artifact must contain one passing case")
+    metadata = data.get("metadata", {})
+    required_metadata = (
+        "run_utc",
+        "git_commit",
+        "source_archive_sha256",
+        "source_archive_path",
+        "vast_instance_id",
+        "container_image",
+        "build_command",
+        "benchmark_command",
+        "nvcc_version",
+        "residual_reducer_warps",
+        "residual_reducer_force_warps",
+    )
+    missing_metadata = [name for name in required_metadata if not metadata.get(name)]
+    if missing_metadata:
+        raise ValueError(
+            "production CUDA artifact is missing metadata: "
+            + ", ".join(missing_metadata)
+        )
+    expected_config = {
+        "doc_counts": [4096],
+        "candidate_counts": [32, 128, 512, 2048, 4096],
+        "min_doc_tokens": 64,
+        "max_doc_tokens": 192,
+        "batch": 4,
+        "query_tokens": 32,
+        "k": 10,
+        "warmup": 5,
+        "repeat": 20,
+        "runs": 3,
+        "seed": 20260713,
+        "dim": 128,
+        "correctness_only": False,
+        "performance_gates_enabled": True,
+    }
+    if data.get("config") != expected_config:
+        raise ValueError("production CUDA artifact does not match the release matrix")
+    if (
+        metadata.get("gpu") != "NVIDIA GeForce RTX 4090"
+        or metadata.get("compute_capability") != [8, 9]
+    ):
+        raise ValueError("production CUDA artifact must come from an RTX 4090/SM89")
+    if (
+        metadata.get("residual_reducer_warps") != 8
+        or metadata.get("residual_reducer_force_warps") != -1
+    ):
+        raise ValueError("production CUDA artifact must use adaptive residual routing")
+
+    timings = data["cases"][0]["timings"]
+    rows = {
+        (row["operation"], row.get("candidate_count")): row
+        for row in timings
+    }
+    full_rows = [row for row in timings if row.get("scope") == "full"]
+    if not full_rows or any(
+        row.get("max_abs_error_vs_reference_scores") is None
+        for row in full_rows
+    ):
+        raise ValueError("every full-scan row must include measured parity")
+    cascade_rows = [
+        row for row in timings if row["operation"] == "int4_residual_cascade"
+    ]
+    if not cascade_rows or any(
+        row.get("max_abs_error_vs_full_scores") is None for row in cascade_rows
+    ):
+        raise ValueError("every cascade row must include full-score parity")
+    full_cascade = next(
+        (row for row in cascade_rows if row.get("candidate_count") == 4096),
+        None,
+    )
+    if full_cascade is None or full_cascade.get("indices_exact_vs_stable_full") is not True:
+        raise ValueError("full-budget cascade must exactly match stable full top-k")
+    spec = [
+        ("int4_per_token_full_fp32", None, "Per-token int4 full scan (fp32 query)"),
+        ("int4_per_token_topk_int8", None, "Per-token int4 top-$k$ (int8 query)"),
+        ("int4_residual_full_fp32", None, "Residual int4 full scan"),
+        ("int4_residual_candidates_fp32", 512, "Residual int4, 512 candidates"),
+        ("int4_residual_cascade", 512, "Prefix scan $+$ 512-candidate cascade"),
+    ]
+    lines = [
+        "\\begin{tabular}{lrr}",
+        "\\toprule",
+        "Production operation & P50 (ms) & P95 (ms) \\\\",
+        "\\midrule",
+    ]
+    for operation, candidate_count, label in spec:
+        row = rows[(operation, candidate_count)]
+        lines.append(
+            f"{label} & {row['latency_p50_ms']:.2f} & "
+            f"{row['latency_p95_ms']:.2f} \\\\"
+        )
+    lines += ["\\bottomrule", "\\end{tabular}"]
+    (OUT / "production_cuda.tex").write_text("\n".join(lines) + "\n")
+    print("wrote production_cuda.tex")
+
+
 def table_tenk():
     data = json.loads((RAW / "paper-unique-10k-final.json").read_text())
     rows = {r["implementation"]: r for r in data["results"] if not r.get("status") or r["status"] == "ok"}
@@ -215,5 +320,6 @@ if __name__ == "__main__":
     table_per_dataset("paper-vidore-*colpali*-r3.json", "per_dataset_colpali.tex", " colpali")
     table_significance()
     table_kernels()
+    table_production_cuda()
     table_tenk()
     table_text_beir()

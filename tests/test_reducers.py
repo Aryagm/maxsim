@@ -69,11 +69,14 @@ def test_binary_cpu_reducers_and_candidates_match_reference(reducer):
     assert actual.shape == (2, 3)
 
 
+@pytest.mark.parametrize("scale_granularity", ["tensor", "token"])
 @pytest.mark.parametrize("reducer", REDUCERS)
-def test_int4_cpu_reducers_and_candidates_match_reference(reducer):
+def test_int4_cpu_reducers_and_candidates_match_reference(reducer, scale_granularity):
     docs, offsets, query, weights = _fixture()
-    packed = pack_int4_symmetric(docs, offsets)
+    packed = pack_int4_symmetric(docs, offsets, scale_granularity=scale_granularity)
     dequantized = packed.values.astype(np.float32) * np.float32(packed.scale)
+    if packed.token_scale is not None:
+        dequantized = dequantized * packed.token_scale[:, None]
     candidates = np.array([1, 3, 2], dtype=np.int64)
     kwargs = {"reducer": reducer, "candidate_indices": candidates, "temperature": 0.35}
     if reducer == "weighted_maxsim":

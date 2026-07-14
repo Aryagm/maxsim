@@ -38,12 +38,14 @@
 Multi-vector retrieval models such as ColBERT, ColPali, and ColQwen deliver
 state-of-the-art quality by storing hundreds to thousands of token or patch
 vectors per document --- which makes storage and scoring, not the model, the
-main barrier to deployment. We present \sysname{}, a compressed exact-MaxSim
-runtime for fixed-dimensional multi-vector embeddings: exact CUDA scoring
-kernels over a systematically measured frontier of five compression tiers
-spanning $8\times$ to $96\times$ versus fp32 storage, so that existing
+main barrier to deployment. We present \sysname{}, a compressed late-interaction
+runtime for fixed-dimensional multi-vector embeddings: parity-tested CUDA
+reducers that are exact over stored compressed similarities, paired with a
+systematically measured primary-index frontier spanning
+$7.5\times$ to $96\times$ versus fp32 storage, so that existing
 late-interaction systems become dramatically smaller and faster without
-changing the model or approximating the score. We validate the frontier on
+changing the model. Full scans add no approximation beyond compression;
+candidate cascades are exact only at a full-corpus budget. We validate the frontier on
 visual document retrieval, the setting where the storage problem is most
 acute. On the full ViDoRe benchmark (10 datasets, complete test splits,
 8{,}443 queries), a symmetric int4 format scored by a dp4a int8-query kernel
@@ -63,12 +65,14 @@ visual embedding model, and a text-ColBERT replication on BEIR shows the
 frontier is additionally \emph{modality-dependent}: under the unit-normalized
 token embeddings conventional in text late interaction, magnitude
 side-information becomes a sparsity statistic that down-weights informative
-tokens, inverting its value --- so the released library selects tiers from
-measured embedding geometry, not assumptions. We correct a $27\times$ latency
+tokens, inverting its value. The released library therefore uses per-token
+int4 as its cross-modal quality-first default and leaves the geometry-sensitive
+binary and pooling alternatives explicit. We correct a $27\times$ latency
 inflation in a na\"ive dense baseline before citing speedups, and report a
 catalogue of measured negative results.
-All kernels are parity-tested, and every number derives from committed JSON
-artifacts with stored per-query metrics.
+Every kernel supporting a reported latency number is parity-tested, and every
+result derives from JSON artifacts in the release ledger: retrieval evaluations store
+per-query metrics, while production benchmarks store raw timing samples.
 \end{abstract}
 
 \section{Introduction}
@@ -80,10 +84,11 @@ document as a sum of per-query-token maxima over document token vectors
 the same everywhere: a document is hundreds to thousands of vectors, so a
 corpus of only $10^4$ visual pages already occupies gigabytes at fp32 ---
 storage, not compute, dominates deployment. \sysname{} addresses this as a
-runtime layer: it applies to any fixed-dimensional multi-vector embedding
-scored with dot-product MaxSim, independent of the producing model. Its
-\emph{interface} is that general; the primary \emph{empirical validation} in
-this paper is visual document retrieval, the setting where the storage
+runtime layer: its representations support fixed-dimensional dot-product late
+interaction, independent of the producing model, and the shipped CUDA reducers
+cover MaxSim, weighted MaxSim, TopK2/TopK4, and SmoothSim. Its \emph{interface}
+is that general; the primary \emph{empirical validation} in this paper uses
+MaxSim on visual document retrieval, the setting where the storage
 problem is most acute, with a text-ColBERT replication
 (Section~\ref{sec:text}) that measures --- rather than assumes --- the
 transfer.
@@ -100,7 +105,8 @@ contributions:
 binary signs ($32\times$), binary with fp16 or 4-bit-log per-token scales
 ($28.4\times$/$31\times$), symmetric int4 ($8\times$), and token-pooled binary
 ($63.9\times$/$95.9\times$) --- evaluated jointly on quality, storage, and
-wall-clock latency with exact, parity-tested CUDA kernels, including a dp4a
+wall-clock latency with parity-tested CUDA kernels that reduce the stored
+compressed similarities exactly, including a dp4a
 int8-query kernel that accelerates int4 scoring $4.2\times$ with bit-identical
 ranking.
 \item \textbf{A scale-dependence finding} (Figure~\ref{fig:scaleflip}):
@@ -108,7 +114,9 @@ per-token magnitude restoration is a \emph{small-corpus} optimization --- a
 significant gain at $\le$\,500 documents that inverts into a significant loss
 at $10^4$+ documents --- while token pooling improves relatively with scale,
 to the point that a $95.9\times$-compressed pooled tier beats uncompressed-bit
-binary at 10k and 25k documents. Tier defaults should be corpus-size-aware.
+binary at 10k and 25k documents under the 256-query protocol; a full-query
+re-evaluation reverses the small 10k gap. Binary side-information and pooling choices
+should therefore be corpus-size-aware.
 \item \textbf{Measurement hygiene results} that materially change headline
 claims: a vectorized dense baseline (score-identical to the na\"ive
 per-document loop) is $27\times$ faster, deflating ``speedup vs.\ dense''
@@ -150,11 +158,12 @@ Figure~\ref{fig:formats} shows the exact byte budget of every format.
 \begin{figure}[t]
 \centering
 \includegraphics[width=.8\linewidth]{figures/format_layout.pdf}
-\caption{Stored bytes per 128-dimensional token for every format in this
-paper (log scale). $^{\dagger}$Pooled tiers store 16 bytes per \emph{cluster};
+\caption{Stored bytes per 128-dimensional token for every released format
+(log scale). $^{\dagger}$Pooled tiers store 16 bytes per \emph{cluster};
 the effective per-original-token budget shown here divides by the pooling
-factor. Compression factors are measured on the 10k corpus, including offsets
-and scale side-information.}
+factor. Compression labels include offsets and scale side-information, using
+the 10k corpus for the original frontier and the Table~\ref{tab:production-cuda}
+shape for per-token and residual int4.}
 \label{fig:formats}
 \end{figure}
 
@@ -170,9 +179,19 @@ indistinguishable from fp16 (paired $\Delta = -0.00003$, $p{=}1.0$ over
 8{,}443 queries; Table~\ref{tab:significance}), so \texttt{u4} strictly
 dominates \texttt{u8}.
 
-\textbf{Symmetric int4 (8$\times$).} Two signed 4-bit values per byte with one
-per-tensor scale. A per-token int4 scale variant was evaluated in exact-kernel
-simulation and rejected ($-0.011$ \ndcg{}).
+\textbf{Symmetric int4 (8$\times$/7.53$\times$).} Two signed 4-bit values per
+byte with either one per-tensor scale or one float32 scale per token. The
+released per-token representation occupies 68 bytes per dim-128 token. An
+early 256-document exact-grid simulation rejected that variant ($-0.011$
+\ndcg{}); the larger text, visual, and audio evaluations in
+Section~\ref{sec:text} reverse that conclusion.
+
+\textbf{Residual int4 (3.76$\times$).} Two per-token int4 streams encode a
+coarse prefix and its quantized residual. Candidate scoring reconstructs their
+combined similarity before reduction; the cascade uses the prefix for coarse
+selection and reads both streams only for the selected documents. Thus
+$M<N$ may miss documents from the full-residual top-$k$; $M=N$ bypasses coarse
+selection and exactly matches stable full-residual ranking.
 
 \textbf{Pooled binary (63.9$\times$/95.9$\times$).} Ward clustering of each
 document's tokens on the unit sphere to $\lceil n_d/f \rceil$ clusters
@@ -188,12 +207,28 @@ determined by a warm-up$+$median microbenchmark sweep;
 Table~\ref{tab:kernels}) extends from its original $\le$128-document
 restriction to all long-document corpora for a $\sim$2$\times$ gain at every
 corpus size tested; and a dp4a kernel for int4 that quantizes queries to int8
-on-device (per-token symmetric scales, applied after the max --- rank-safe),
-permutes them to match the nibble interleave, and accumulates with
+on-device (one positive scale per query token, applied after that token's
+document-token maximum), permutes them to match the nibble interleave, and accumulates with
 \texttt{\_\_dp4a}, yielding $4.2\times$ over fp32-query int4 scoring with
-quality identical to four decimals. All kernels preserve exact empty-document
-semantics and deterministic lower-index tie-breaking, verified by parity tests
-against CPU references.
+quality identical to four decimals. Document-token scales are instead applied
+to every similarity \emph{before} MaxSim or another reducer. The two-stream
+residual path fuses prefix and residual similarities in the same reduction and
+uses an independently tuned adaptive launch on SM89: four warps below eight
+query tokens and eight warps from eight upward. All kernels preserve
+exact empty-document semantics and deterministic lower-index tie-breaking,
+verified by parity tests against CPU references.
+
+\begin{table}[t]
+\centering
+\small
+\input{tables/production_cuda}
+\caption{Production MaxSim CUDA validation on one RTX 4090: 4,096 documents,
+64--192 tokens/document, query shape $4\times32\times128$, three runs of 20
+calls. Per-token full-scan overhead over tensor-scale int4 is 0.2\%; the
+int8-query top-$k$ path is $3.08\times$ faster than fp32-query top-$k$.
+All correctness and performance gates pass.}
+\label{tab:production-cuda}
+\end{table}
 
 \section{Experimental Setup}
 
@@ -331,11 +366,12 @@ to magnitude heterogeneity across a mixed corpus --- high-norm tokens from
 foreign documents win per-query-token maxima that sign information alone
 would not grant them --- and pooling's relative strength at scale to its
 denoising of near-duplicate patches, which grow more confusable as the corpus
-grows. Practical consequence: \textbf{compression defaults should be selected
-by corpus size}, and small-slice benchmarks actively mislead tier selection.
-The released library ships this finding as behavior: its default
-\texttt{auto} tier selects per-token scales below 500 documents and int4
-above.
+grows. Practical consequence: \textbf{binary side-information and pooling
+choices should be evaluated at the target corpus size}, and small-slice
+benchmarks actively mislead tier selection. The released library does not
+infer a format from corpus size: its default \texttt{auto} tier uses per-token
+int4 unconditionally, the most consistent 8$\times$-class format across the broader
+cross-modal evaluation in Section~\ref{sec:text}.
 
 \subsection{The 10k frontier and baselines}
 
@@ -442,7 +478,8 @@ tier's deficit itself grows with text corpus size ($-0.08$ at 5k, $-0.18$ at
 
 \textbf{A tuned tier closes most of the text gap.} The int4 failure isolates
 to its \emph{scale granularity}. Re-quantizing with one scale per
-\emph{token} (2 bytes/token; $7.8\times$ total) in exact-grid simulation:
+\emph{token} (stored as float32 in the released format; 68 bytes/token and
+$7.53\times$ total at dim 128) in exact-grid simulation:
 
 \begin{center}
 \footnotesize
@@ -450,7 +487,7 @@ to its \emph{scale granularity}. Re-quantizing with one scale per
 \toprule
  & binary ($32\times$) & int4/tensor & int4/token & int4/channel & dense \\
 \midrule
-SciFact & 0.678 & 0.505 & \textbf{0.698} & 0.700 & 0.761 \\
+SciFact & 0.678 & 0.505 & 0.698 & \textbf{0.700} & 0.761 \\
 NFCorpus & 0.267 & 0.323 & \textbf{0.360} & 0.359 & 0.377 \\
 FiQA 57k & 0.277 & 0.209 & \textbf{0.339} & 0.286 & 0.456 \\
 visual 10k$^{\dagger}$ & 0.597 & 0.605 & \textbf{0.607} & 0.606 & --- \\
@@ -460,9 +497,10 @@ visual 10k$^{\dagger}$ & 0.597 & 0.605 & \textbf{0.607} & 0.606 & --- \\
 
 Per-token int4 beats binary on \emph{every} text dataset ($+0.02$ to
 $+0.09$; NFCorpus reaches $-0.017$ from dense) and is also the best
-measured variant on the visual corpus ($^{\dagger}$2{,}000 sampled
-queries) --- making it the strongest \emph{universal} tier at the
-$8\times$ class. Notably, we had rejected per-token int4 scales earlier on a
+measured variant on the visual corpus ($^{\dagger}$2{,}000 sampled queries).
+It wins three of these four datasets; per-channel int4 leads SciFact by
+0.0022, making per-token the most consistent default rather than a universal
+winner. Notably, we had rejected per-token int4 scales earlier on a
 256-document slice ($-0.011$, Section~\ref{sec:negative}); at realistic
 scale and across modalities the sign flips --- our own negative result was a
 small-slice artifact, which is precisely this paper's thesis applied to
@@ -470,25 +508,24 @@ itself.
 
 \textbf{Audio replication.} Embedding the Clotho evaluation split (1{,}045
 audio clips, caption-to-clip retrieval) with the audio-capable
-late-interaction model \texttt{ColQwen-Omni-v0.1}: dense 0.3129, int4
-\textbf{0.3133} (ties dense at $8\times$), binary 0.2904, pool2/pool3
-0.2761/0.2760. Audio-token embeddings are not unit-normalized, and the
-frontier behaves exactly like the visual one --- int4 lossless, pooling
-costly --- so the geometry rule shipped in \texttt{auto} extends to a third
-modality unchanged.
+late-interaction model \texttt{ColQwen-Omni-v0.1}: dense 0.3129, per-token
+int4 0.3130, tensor-scale int4 0.3133, per-channel int4 0.3134, binary 0.2904,
+and pool2/pool3 0.2761/0.2760. Audio-token embeddings are not unit-normalized;
+all three int4 variants tie dense within 0.0005 while pooling is costly.
 
-Across three modalities, the released \texttt{auto} tier inspects token-norm
-dispersion and routes unit-normalized corpora to plain binary (per-token
-int4 kernels are future work; the format is validated above), avoiding every
-measured-catastrophic configuration. The modality-dependence of magnitude
-restoration, quantization granularity, \emph{and} pooling is the strongest
-form of this paper's thesis: tier choice must be measured, not assumed.
+Across the evaluated text, visual, and audio families, the released
+\texttt{auto} tier therefore selects per-token int4 unconditionally; it does
+not inspect token-norm dispersion or corpus size. Binary magnitude
+restoration and pooling remain geometry- and scale-dependent explicit modes.
+That distinction is the strongest form of this paper's thesis: format choices
+beyond the cross-modal default must be measured, not assumed.
 
 \section{Negative Results}
 \label{sec:negative}
 
-Six techniques were implemented, measured, and rejected; we report them
-because each looks attractive on paper. (i)~\emph{dp4a for the binary path}:
+Six techniques were implemented, measured, and rejected; a seventh early
+negative reversed at realistic scale. We report all seven because each looks
+attractive on paper. (i)~\emph{dp4a for the binary path}:
 quality-clean but 5--17\% slower --- the unrolled fp32 kernel is
 bandwidth-bound, so ALU savings cannot pay for the quantization pass.
 (ii)~\emph{One-pass query-tiled scoring}: $\sim$9$\times$ slower from 12\,MB
@@ -502,8 +539,9 @@ centroid combinations, salience-aware and similarity-threshold pooling):
 all neutral-to-worse; plain mean-absolute scales are a local optimum.
 (v)~\emph{Cluster-mass-weighted pooled scales}: catastrophic (\ndcg{}
 0.29--0.80) --- under MaxSim, large background clusters must not amplify their
-match scores. (vi)~\emph{Per-token int4 scales}: $-0.011$ \ndcg{} in
-exact-semantics simulation. (vii)~\emph{Inverted and spikiness scales on
+match scores. (vi)~\emph{An initial per-token int4 trial}: $-0.011$ \ndcg{}
+on a 256-document slice, a negative result reversed by the larger evaluation
+in Section~\ref{sec:text}. (vii)~\emph{Inverted and spikiness scales on
 unit-norm text}: the anti-sparsity mechanism of Section~\ref{sec:text}
 suggests \emph{inverting} the scale should recover salience; measured on
 both BEIR datasets, inversion indeed beats mean-abs (0.371/0.186 vs.\
@@ -525,18 +563,28 @@ across three runs, two of which used identical tuned parameters
 time co-varying (14.2\,s/29.8\,s/107.8\,s), while its quality stayed within
 0.5103--0.5119. We therefore cite its quality only; the instability deserves
 its own investigation before any comparative latency claim. The text
-replication (Section~\ref{sec:text}) covers two BEIR datasets and one text
+replication (Section~\ref{sec:text}) covers three BEIR datasets (two through
+the full kernel harness and FiQA through exact CPU simulation) and one text
 model; its per-dataset heterogeneity (the int4/binary flip) means text tier
 recommendations rest on thinner evidence than the visual ones, and
-text-tuned formats remain future work. The scale-dependence mechanism is
-supported but not proven by our attribution analysis.
+broader text-model coverage and additional text-specific formats remain future
+work. The production per-token and residual CUDA paths are runtime-validated
+at the synthetic production shape in Table~\ref{tab:production-cuda}, but have
+not yet been run through the paper's full end-to-end multimodal latency and
+corpus-scale sweeps; their quality numbers here come from the stated exact-grid
+evaluations. The scale-dependence mechanism is supported but not proven by our
+attribution analysis.
 
 \section*{Reproducibility Statement}
-Every reported number derives from a JSON artifact committed under
+Every reported number derives from a JSON artifact under
 \texttt{docs/\allowbreak benchmark\_results/\allowbreak raw/} in the
-\sysname{} repository, including per-query metric vectors for all suite rows.
-Paper figures and exact-value tables regenerate deterministically from those
-artifacts (\texttt{paper/\allowbreak make\_figures.py},
+\sysname{} repository. Retrieval artifacts include per-query metric vectors
+for all suite rows; the production CUDA artifact includes every timing sample,
+gate, and environment field used in Table~\ref{tab:production-cuda}. The exact
+benchmark runtime-source archive, routing sweep, and sanitizer/resource validation manifest are
+stored alongside it. Paper figures and generated exact-value tables
+regenerate deterministically from
+those artifacts (\texttt{paper/\allowbreak make\_figures.py},
 \texttt{paper/\allowbreak make\_tables.py}); the statistical analysis is
 \texttt{benchmarks/\allowbreak significance.py} with a fixed seed. Embedding caches
 rebuild via \texttt{benchmarks/\allowbreak reproduce.py} recipes at batch size~1; kernel
@@ -546,10 +594,12 @@ and 1 H100-hour of rented capacity.
 
 \section{Conclusion}
 Compressed late-interaction retrieval is not a single trade-off but a family
-of them, and the right choice moves with corpus size. A practitioner can hold
-dense quality to within $0.002$ \ndcg{} at $8\times$ compression
-(int4$+$dp4a), or accept $\sim$$0.01$ at $96\times$ (pool3) --- at 5--13$\times$
-the speed of an honestly-implemented dense baseline on the same GPU. All
+of them, and choices beyond the cross-modal quality-first default move with
+corpus size. A practitioner can hold
+dense quality to within $0.002$ mean \ndcg{} over the evaluated suite at
+$8\times$ compression (int4$+$dp4a), or accept $\sim$$0.01$ at $96\times$
+(pool3). On the measured 10k-document MaxSim benchmark these tiers run
+5--13$\times$ faster than an honestly implemented dense baseline on the same GPU. All
 kernels, benchmarks, artifacts, and negative results are released with the
 library.
 
@@ -612,7 +662,7 @@ B.~Clavi{\'e}, A.~Chaffin, and G.~Adams.
 \begin{table}[h]
 \centering
 \caption{Exact \ndcg{} for every tier on every ViDoRe dataset, ColQwen2
-embeddings, full test splits, repeat-3. Generated from the committed artifact
+embeddings, full test splits, repeat-3. Generated from the artifact
 ledger by \texttt{paper/make\_tables.py}.}
 \label{tab:perdataset-full}
 \footnotesize

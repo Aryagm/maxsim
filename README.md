@@ -3,15 +3,16 @@
 [![ci](https://github.com/Aryagm/maxsim/actions/workflows/ci.yml/badge.svg)](https://github.com/Aryagm/maxsim/actions/workflows/ci.yml)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**Run ColPali/ColBERT-style retrieval with 8–96× less storage.**
+**Compress ColPali/ColBERT-style indexes by 7.5–96×, with optional residual reranking.**
 
 `maxsim` is the compression and scoring layer for multi-vector retrieval: it
-compresses token/patch embeddings and scores them with **exact** (not
-approximate) CUDA MaxSim kernels. If your model produces multi-vector
-embeddings and ranks with MaxSim, `maxsim` makes your index dramatically
-smaller and faster **without changing the model or approximating the score**
-— within 0.002–0.010 NDCG@10 of full dense scoring, at 5–13× the speed of a
-vectorized dense fp16 baseline on the same GPU.
+compresses token/patch embeddings and scores the stored compressed similarities
+with exact CUDA reductions for MaxSim, weighted MaxSim, TopK2/TopK4, and
+SmoothSim. Full scans add no approximation beyond the chosen compression;
+residual cascades with fewer candidates than documents additionally approximate
+selection. The measured MaxSim suite mean is within 0.002–0.010 NDCG@10 of
+full dense scoring, and the measured 10k-document benchmark runs 5–13× faster
+than a vectorized dense fp16 baseline on the same GPU.
 
 ```python
 import maxsim
@@ -24,9 +25,9 @@ reranker = maxsim.Reranker.load("docs.maxsim.npz", device="cuda")
 results = reranker.search(query_embeddings, k=10)
 ```
 
-It works with **any fixed-dimensional multi-vector embedding model scored
-with dot-product MaxSim** (dim divisible by 8; the fastest kernel paths are
-tuned for dim 128, the ColBERT/ColPali standard). Validated end-to-end on
+It works with **fixed-dimensional multi-vector embedding models using
+dot-product late interaction** (dim divisible by 8; the fastest kernel paths
+are tuned for dim 128, the ColBERT/ColPali standard). Validated end-to-end on
 ColQwen2 and ColPali-v1.3 visual-document embeddings; designed to support
 ColBERT/ColPali/ColQwen-style late-interaction systems generally.
 
@@ -36,10 +37,10 @@ compressed scoring and reranking primitive those systems can call.
 ## Choosing a tier
 
 ```text
-auto      (default) picks the tier from embedding geometry + corpus size
-int4      dense-like quality on visual corpora, 8× smaller, dp4a-accelerated
+auto      (default) uses per-token int4, the cross-modal quality-first tier
+int4      tensor-scale int4 control, 8× smaller, dp4a-accelerated
 binary    strong all-rounder, 32× smaller — the robust tier for text models
-pool3     extreme compression, 96× smaller — best at 10k+ docs
+pool3     extreme compression, 96× smaller — quality is query-set dependent
 ```
 
 `Index.from_embeddings(..., mode=...)` accepts these directly or the full
@@ -47,19 +48,22 @@ preset/mode names:
 
 | preset | recipe | pick when |
 | --- | --- | --- |
-| `auto` *(default)* | unit-normalized embeddings (text ColBERT) → binary; else ≤500 docs → binary + fp16 token scales, larger → int4 | you want the measured-best default for your embeddings |
-| `max_quality` | int4 + dp4a int8-query scoring (`Reranker(..., int4_query="int8")`) | quality SLAs at any corpus size — the strongest all-scale tier |
+| `auto` *(default)* | per-token int4 (64 B codes + 4 B scale per dim-128 token; 7.53× vs fp32) | you want the cross-modal quality-first default |
+| `max_quality` | per-token int4 with fp32 queries | the most consistent quality-first tier across the evaluated families |
 | `balanced` | binary + fp16 per-token scales | small corpora (≲500 docs), where magnitude restoration measurably helps |
 | `compact` | binary + 4-bit log per-token scales | as `balanced`, 9% smaller index, statistically identical quality |
 | `max_speed` | binary signs | large corpora when storage is tight and latency is king |
-| `max_compression` | pooled binary (`pool_factor=2\|3`, needs `pip install -e ".[pooling]"`) | 10k+ docs where size dominates — pool3 *beats* plain binary at scale |
+| `max_compression` | pool3 binary by default (override with `pool_factor=2`; needs `pip install -e ".[pooling]"`) | 10k+ docs where size dominates |
 
-**The tier ranking is corpus-size- and geometry-dependent** (the paper's
-central finding): per-token scales help small visual corpora and hurt at
-10k+, pooling strengthens with scale — and on **unit-normalized text ColBERT
-embeddings** magnitude side-information inverts entirely (it becomes a
-sparsity statistic that down-weights informative tokens). `auto` measures
-your embeddings and encodes exactly this.
+Binary side-information and pooling remain corpus-size- and geometry-dependent.
+Per-token int4 is different: among the int4 variants it is the most consistent
+cross-modal default, winning three of five evaluated datasets/families and
+remaining within 0.0023 NDCG@10 of the best variant on the other two. `auto`
+therefore no longer relies on an unvalidated geometry heuristic. Direct `int4`
+remains the tensor-scale control.
+On CUDA dim-128 indexes, `int4_query="int8"` optionally selects the dp4a path
+for full-corpus MaxSim search only. Candidate-only reranking, residual
+rescoring, and non-MaxSim reducers keep the fp32-query path.
 
 <p align="center">
   <img src="docs/figures/scale_flip.png" width="620" alt="Each tier's NDCG delta versus plain binary across four corpus scales: token scales invert from gain to loss, pooling strengthens monotonically">
@@ -74,7 +78,7 @@ one RTX 4090, repeat 3
 | tier | NDCG@10 | recall@10 | latency (256 q) | compression vs fp32 |
 | --- | ---: | ---: | ---: | ---: |
 | dense fp16 (vectorized) | 0.5068 | 0.6016 | 6.04 s | 2× |
-| **int4 + dp4a** (`max_quality`) | **0.5008** | 0.6055 | **1.12 s** | 8× |
+| **tensor-scale int4 + dp4a** | **0.5008** | 0.6055 | **1.12 s** | 8× |
 | binary (`max_speed`) | 0.4856 | 0.5898 | 0.68 s | 32× |
 | pool2 binary | 0.4864 | 0.5938 | 0.45 s | 63.9× |
 | **pool3 binary** (`max_compression`) | **0.4968** | **0.6133** | **0.46 s** | **95.9×** |
@@ -82,6 +86,28 @@ one RTX 4090, repeat 3
 <p align="center">
   <img src="docs/figures/pareto_10k.png" width="620" alt="Quality vs compression at 10k documents, with the efficient frontier and exact NDCG/latency annotations per tier">
 </p>
+
+Production-path MaxSim validation on one RTX 4090, 4,096 ragged documents
+(64-192 tokens/document), query shape `[4, 32, 128]`, three runs of 20 calls
+(`docs/benchmark_results/raw/cuda-step1-rtx4090-20260714.json`):
+
+| operation | P50 | P95 |
+| --- | ---: | ---: |
+| per-token int4 full scan, fp32 query | 8.34 ms | 8.38 ms |
+| per-token int4 top-k, int8 query | 2.72 ms | 2.84 ms |
+| fused residual full scan | 16.11 ms | 16.72 ms |
+| fused residual, 512 candidates | 2.80 ms | 2.86 ms |
+| prefix scan + 512-candidate cascade | 15.87 ms | 16.09 ms |
+
+Per-token scales add 0.2% to tensor-scale full-scan latency. The int8-query
+top-k path is 3.08x faster than fp32-query top-k; 512-candidate residual
+scoring is 5.75x faster than a residual full scan. All 65 applied release gates
+passed.
+
+The companion routing sweep and CUDA validation manifest live beside
+the benchmark as `cuda-residual-routing-rtx4090-20260714.json` and
+`cuda-validation-rtx4090-20260714.json`; the exact runtime-source snapshot they
+identify is `cuda-step1-source-20260714.tgz` (SHA-256 `0e96e50482927623f01abb1f05d71da1e2120cd038a810998c184c113600c59d`).
 
 For calibration: FAISS GPU mean-pooling (single-vector) collapses to NDCG@10
 0.036 on this corpus, and a PLAID-style baseline (`fast-plaid`) matches dense
@@ -105,15 +131,17 @@ per-query analysis with 10k-sample bootstrap CIs and two-sided sign tests
 | pool2 binary | −0.0073 | [−0.0095, −0.0051] | 3×10⁻¹¹ |
 | pool3 binary | −0.0089 | [−0.0112, −0.0066] | 6×10⁻¹³ |
 
-Every format's exact byte budget per stored token:
+Byte budgets for every released format, including the 68 B/token per-token and
+136 B/token residual representations:
 
 <p align="center">
-  <img src="docs/figures/format_layout.png" width="620" alt="Stored bytes per 128-dim token for each format, from 512 B fp32 down to 5.33 B pool3 binary">
+  <img src="docs/figures/format_layout.png" width="620" alt="Stored bytes per 128-dim token for each released format, including residual and per-token int4">
 </p>
 
-All numbers derive from committed JSON artifacts with stored per-query
-metrics; see `paper/` for the full write-up and `docs/gpu_optimization.md`
-for the complete measurement history, including negative results.
+All numbers derive from JSON artifacts in the release ledger. Retrieval evaluations retain
+per-query metrics; production benchmarks retain raw timing samples and gates.
+See `paper/` for the full write-up and `docs/gpu_optimization.md` for the
+complete measurement history, including negative results.
 
 ## Install
 
@@ -132,18 +160,37 @@ Reranking an external candidate set (ids from your ANN/BM25/vector-DB stage):
 reranked = reranker.rerank(query_embeddings, candidate_ids=["doc-17", "doc-03"], k=3)
 ```
 
+Build the residual format when a small candidate set should receive a second,
+higher-fidelity pass. The prefix scans the corpus; the fused prefix+residual
+kernel reads only the selected documents and combines both streams before the
+reducer. Candidate selection is approximate when `rescore_candidates` is less
+than the corpus size; a full-corpus budget bypasses the coarse pass and is exact
+for the stored residual representation:
+
+```python
+index = maxsim.Index.from_embeddings(
+    doc_ids, embeddings, offsets, mode="int4_residual"
+)
+reranker = maxsim.Reranker.from_corpus(index, device="cuda")
+results = reranker.search(query_embeddings, k=10, rescore_candidates=512)
+```
+
+`index.memory_report()` reports encoded payload, live NumPy arrays, resident
+CUDA index allocations, CUDA workspace, and serialized file bytes separately.
+
 ## What's inside
 
 - **Formats**: packed 1-bit signs (16 B/token at dim 128), optional per-token
   scales (fp16 / 4-bit log / 8-bit log, applied pre-max), per-dimension
-  centroid calibration (`binary_q40`), symmetric int4, and Ward-clustered
-  token pooling.
+  centroid calibration (`binary_q40`), tensor/per-token int4, two-stream
+  residual int4, and Ward-clustered token pooling.
 - **CUDA kernels** (`cpp/maxsim/cuda_extension.cu`): GPU-resident packed
   corpora; generic + unrolled dim-128 scoring (routed by a measured
   tokens/doc gate); query-byte LUT top-k for integer queries; a dp4a
-  int8-query × int4-doc kernel (4.2× over fp32-query int4, rank-identical);
-  fused top-k with deterministic tie-breaking. All parity-tested against CPU
-  references (`pytest -m cuda`).
+  int8-query × int4-doc kernel with scale-before-max semantics; fused residual
+  candidate rescoring; fused top-k with deterministic tie-breaking. CUDA parity
+  tests are included under `pytest -m cuda`; per-token and residual paths are
+  production-shape validated and still need the end-to-end sweeps listed below.
 - **Kept but unrouted, with evidence**: streaming top-k, dp4a-for-binary, and
   a one-pass q-tiled kernel — each measured slower than what ships, each
   documented in `docs/gpu_optimization.md` so nobody rebuilds them on a hunch.
@@ -158,9 +205,8 @@ reranked = reranker.rerank(query_embeddings, candidate_ids=["doc-17", "doc-03"],
 - `benchmarks/significance.py` — paired bootstrap CIs + sign tests from the
   stored per-query vectors.
 - `paper/make_figures.py` / `paper/make_tables.py` — regenerate every figure
-  (PDF + README PNG) and every exact-value LaTeX table from the committed
-  ledger (`docs/benchmark_results/raw/`); no number in the paper is
-  hand-typed.
+  (PDF + README PNG) and the generated exact-value LaTeX tables from the
+  artifact ledger (`docs/benchmark_results/raw/`).
 - `python -m benchmarks.reproduce --suite ...` — canonical cache-building and
   comparison recipes. Embedding caches must be built at `--batch-size 1`
   (the builder is not batch-faithful; see docs). For fast rebuilds, run many
@@ -172,7 +218,7 @@ cost 27×), and fast-plaid latency is not cited because it varied 23.5–820 s
 across three runs — two at identical tuned parameters — while its quality
 stayed at parity (0.5103–0.5119).
 
-Note on provenance: the committed benchmark artifacts predate the project's
+Note on provenance: the historical benchmark artifacts predate the project's
 rename and use implementation keys prefixed `bitmax_` (the former name); the
 keys are preserved verbatim so every historical artifact stays reproducible.
 
@@ -185,25 +231,22 @@ tables generated from the artifact ledger by `paper/make_figures.py` and
 
 ## Status & limitations
 
-- Latency validated on RTX 4090 (kernel findings may shift on other
-  architectures); dim-128 embeddings are the tested path (dim must be
-  divisible by 8; several fast paths are dim-128-specific).
-- Text ColBERT is measured (GTE-ModernColBERT on BEIR SciFact/NFCorpus,
-  `docs/benchmark_results/raw/text-beir-*.json`): binary/pooled binary retain
-  ~86–89% of dense NDCG@10 on SciFact at 32–96×, but the absolute gap
-  (−0.08 to −0.11) is ~10× larger than on visual corpora, and tier ordering
-  varies by dataset. Treat text as measured-with-caveats; text-tuned formats
-  (per-channel int4 scales) are the top roadmap item.
+- Published latency for the previously benchmarked binary and tensor-scale
+  int4 paths and the production per-token/residual validation was measured on
+  RTX 4090 (kernel findings may shift on other architectures). End-to-end
+  multimodal latency sweeps remain to be run with the production kernels.
+  Dim-128 embeddings are the tested path (dim must be divisible by 8; several
+  fast paths are dim-128-specific).
+- Text ColBERT is measured (GTE-ModernColBERT on BEIR); its absolute compressed
+  quality gap remains larger than on the visual suites. Per-token int4 improves
+  the 8×-class tier across the evaluated text sets, but broader model and
+  dataset coverage is still required before calling the result universal.
 - No prebuilt CUDA wheels yet; build from source.
 
 ## Roadmap
 
-1. Per-token int4 kernels — the format is validated across text, visual, and
-   audio (beats binary on all three BEIR text sets, ties dense on Clotho
-   audio); CUDA scoring for it is the next kernel.
-   (jina-embeddings-v4 as a fourth family is deferred: its remote code is
-   incompatible with our benchmark environment across three transformers
-   versions.)
+1. Run end-to-end multimodal and corpus-scale sweeps through the now-validated
+   production per-token and residual kernels.
 2. Prebuilt CUDA wheels (`pip install maxsim` with no toolkit required).
 3. Adapters for PyLate/Byaldi/Qdrant-style workflows.
 4. Batched-query serving kernels and a hosted demo.
@@ -223,7 +266,8 @@ MIT — see [LICENSE](LICENSE).
 
 ```bash
 python -m venv .venv
-.venv/bin/python -m pip install -e ".[dev]"
-pytest -m "not cuda"                                      # CPU suite
-MAXSIM_BUILD_CUDA=1 pip install -e ".[dev]" && pytest -m cuda   # kernel parity suite
+.venv/bin/python -m pip install -e ".[dev,pooling]"
+.venv/bin/python -m pytest -m "not cuda"                  # CPU suite
+MAXSIM_BUILD_CUDA=1 .venv/bin/python -m pip install -e ".[dev,pooling]"
+.venv/bin/python -m pytest -m cuda                        # kernel parity suite
 ```

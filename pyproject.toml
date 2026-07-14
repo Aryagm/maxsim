@@ -5,13 +5,13 @@ build-backend = "scikit_build_core.build"
 [project]
 name = "maxsim"
 version = "0.1.0"
-description = "Compressed exact-MaxSim runtime for multi-vector retrieval: 8-96x smaller ColBERT/ColPali-style indexes with exact CUDA scoring."
+description = "Compressed late-interaction runtime for multi-vector retrieval: 7.5-96x smaller ColBERT/ColPali-style indexes with exact CUDA reducers."
 readme = "README.md"
 license = {file = "LICENSE"}
 authors = [{name = "Arya Manjaramkar", email = "arya@e3group.ai"}]
 requires-python = ">=3.9"
 dependencies = ["numpy>=1.24"]
-keywords = ["retrieval", "late-interaction", "colbert", "colpali", "quantization", "maxsim", "cuda"]
+keywords = ["retrieval", "late-interaction", "multi-vector", "colbert", "colpali", "quantization", "maxsim", "cuda"]
 classifiers = [
   "Development Status :: 4 - Beta",
   "Intended Audience :: Science/Research",

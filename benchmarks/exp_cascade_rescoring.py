@@ -8,9 +8,9 @@ coarse top-m to -inf ranks identically to rescoring only the m survivors
 (ties at -inf never enter the top-10 for m >= 10).
 
 The headline configuration is the single-index EMBEDDED RESIDUAL code:
-store per-token int4 (66 B/token at dim 128) plus an int4-quantized residual
-(66 B more). The scan reads only the int4 prefix; the rescore reconstructs
-prefix + residual (int8-class fidelity, 132 B/token total, ~3.9x vs fp32) —
+store per-token int4 (68 B/token at dim 128) plus an int4-quantized residual
+(68 B more). The scan reads only the int4 prefix; the rescore reconstructs
+prefix + residual (int8-class fidelity, 136 B/token total, ~3.8x vs fp32) —
 dense-quality retrieval with no dense vectors stored anywhere. Measured on
 BEIR (GTE-ModernColBERT): SciFact 0.7587 vs dense 0.7608 at m=100,
 FiQA-57k 0.4529 vs 0.4536 embedded ceiling / 0.4556 dense at m=200
@@ -32,13 +32,13 @@ import numpy as np
 
 from benchmarks.exp_text_scale_inversion import ndcg10
 
-# nominal stored bytes per 128-dim token (fp16 scales included where per-token)
+# Nominal production payload bytes per 128-dim token (float32 token scales).
 BYTES_PER_TOKEN = {
     "dense": 512.0,  # fp32 reference frame for compression factors
     "binary": 16.0,
-    "int4_pertoken": 66.0,
-    "int8_pertoken": 130.0,
-    "embedded": 132.0,  # int4 prefix + int4 residual + two fp16 scales
+    "int4_pertoken": 68.0,
+    "int8_pertoken": 132.0,
+    "embedded": 136.0,  # int4 prefix + int4 residual + two float32 scales
     "pool3_binary": 16.0 / 3.0,
 }
 
@@ -50,13 +50,13 @@ def _sign(x: np.ndarray) -> np.ndarray:
 def _int4_pertoken(x: np.ndarray) -> np.ndarray:
     s = np.abs(x).max(axis=1, keepdims=True) / 7.0
     s[s == 0] = 1.0
-    return (np.clip(np.round(x / s), -8, 7) * s).astype(np.float32)
+    return (np.clip(np.round(x / s), -7, 7) * s).astype(np.float32)
 
 
 def _int8_pertoken(x: np.ndarray) -> np.ndarray:
     s = np.abs(x).max(axis=1, keepdims=True) / 127.0
     s[s == 0] = 1.0
-    return (np.clip(np.round(x / s), -128, 127) * s).astype(np.float32)
+    return (np.clip(np.round(x / s), -127, 127) * s).astype(np.float32)
 
 
 def _embedded(x: np.ndarray) -> np.ndarray:

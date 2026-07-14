@@ -183,9 +183,9 @@ def test_sdk_mode_presets_resolve():
     doc_ids = [f"doc-{i}" for i in range(4)]
     assert MODE_PRESETS["balanced"] == "binary_token_scale"
     default_corpus = Corpus.from_embeddings(doc_ids, docs, offsets)
-    assert default_corpus.mode == "binary_token_scale"
+    assert default_corpus.mode == "int4_per_token"
     quality = Corpus.from_embeddings(doc_ids, docs, offsets, mode="max_quality")
-    assert quality.mode == "int4"
+    assert quality.mode == "int4_per_token"
     compact = Corpus.from_embeddings(doc_ids, docs, offsets, mode="compact")
     assert compact.mode == "binary_token_scale_u4"
     speed = Corpus.from_embeddings(doc_ids, docs, offsets, mode="max_speed")
@@ -227,7 +227,7 @@ def test_sdk_pooled_binary_corpus(tmp_path):
 
     corpus = Corpus.from_embeddings(doc_ids, docs, offsets, mode="max_compression")
     assert corpus.mode == "pooled_binary"
-    assert corpus.metadata["pool_factor"] == 2
+    assert corpus.metadata["pool_factor"] == 3
     assert corpus.metadata["pooled_tokens"] < corpus.metadata["original_tokens"]
     plain = Corpus.from_embeddings(doc_ids, docs, offsets, mode="binary")
     assert corpus.storage_bytes < plain.storage_bytes
@@ -236,7 +236,7 @@ def test_sdk_pooled_binary_corpus(tmp_path):
     corpus.save(path)
     loaded = Corpus.load(path)
     assert loaded.mode == "pooled_binary"
-    assert loaded.metadata["pool_factor"] == 2
+    assert loaded.metadata["pool_factor"] == 3
 
     rng2 = np.random.default_rng(157)
     query = rng2.standard_normal((3, 16)).astype(np.float32)

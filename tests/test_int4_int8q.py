@@ -19,6 +19,8 @@ def _reference_int8q_scores(packed, query):
                 scores[batch_idx, doc_idx] = 0.0
                 continue
             dots = q_int @ values[start:end].T
+            if packed.token_scale is not None:
+                dots = dots * packed.token_scale[start:end][np.newaxis, :]
             best = dots.max(axis=1).astype(np.float64)
             scores[batch_idx, doc_idx] = np.float32(float((best * q_scales).sum()) * packed.scale)
     return scores
@@ -33,14 +35,35 @@ def _ragged_fixture(num_docs, seed):
     return docs, offsets
 
 
+def test_int4_int8q_empty_queries_return_without_requiring_cuda():
+    packed = pack_int4_symmetric(
+        np.ones((3, 128), dtype=np.float32),
+        np.arange(4, dtype=np.int64),
+        scale_granularity="token",
+    )
+
+    empty_batch = int4_maxsim_int8q(
+        np.empty((0, 2, 128), dtype=np.float32),
+        packed,
+    )
+    empty_tokens = int4_maxsim_int8q(
+        np.empty((0, 128), dtype=np.float32),
+        packed,
+    )
+
+    assert empty_batch.shape == (0, 3)
+    np.testing.assert_array_equal(empty_tokens, np.zeros(3, dtype=np.float32))
+
+
 @pytest.mark.cuda
-def test_cuda_int4_int8q_matches_numpy_reference():
+@pytest.mark.parametrize("scale_granularity", ["tensor", "token"])
+def test_cuda_int4_int8q_matches_numpy_reference(scale_granularity):
     pytest.importorskip("maxsim._maxsim_cuda")
     docs, offsets = _ragged_fixture(150, seed=71)
     rng = np.random.default_rng(73)
     query = rng.standard_normal((2, 5, 128)).astype(np.float32)
 
-    packed = pack_int4_symmetric(docs, offsets)
+    packed = pack_int4_symmetric(docs, offsets, scale_granularity=scale_granularity)
     cuda_packed = int4_to_device(packed)
     kernel_scores = int4_maxsim_int8q(query, cuda_packed, device="cuda")
     reference = _reference_int8q_scores(packed, query)
@@ -56,7 +79,7 @@ def test_cuda_int4_int8q_zero_query_rows_and_empty_docs():
     query = rng.standard_normal((1, 4, 128)).astype(np.float32)
     query[0, -1] = 0.0  # padded row
 
-    packed = pack_int4_symmetric(docs, offsets)
+    packed = pack_int4_symmetric(docs, offsets, scale_granularity="token")
     cuda_packed = int4_to_device(packed)
     kernel_scores = int4_maxsim_int8q(query, cuda_packed, device="cuda")
     reference = _reference_int8q_scores(packed, query)
@@ -65,13 +88,14 @@ def test_cuda_int4_int8q_zero_query_rows_and_empty_docs():
 
 
 @pytest.mark.cuda
-def test_cuda_int4_int8q_topk_matches_maxsim_ranking():
+@pytest.mark.parametrize("scale_granularity", ["tensor", "token"])
+def test_cuda_int4_int8q_topk_matches_maxsim_ranking(scale_granularity):
     pytest.importorskip("maxsim._maxsim_cuda")
     docs, offsets = _ragged_fixture(150, seed=89)
     rng = np.random.default_rng(97)
     query = rng.standard_normal((2, 4, 128)).astype(np.float32)
 
-    packed = pack_int4_symmetric(docs, offsets)
+    packed = pack_int4_symmetric(docs, offsets, scale_granularity=scale_granularity)
     cuda_packed = int4_to_device(packed)
     scores = int4_maxsim_int8q(query, cuda_packed, device="cuda")
     top_scores, top_indices = cuda_packed.data.topk_batch_int8q(np.ascontiguousarray(query), 10)
@@ -80,3 +104,31 @@ def test_cuda_int4_int8q_topk_matches_maxsim_ranking():
         order = np.lexsort((np.arange(reference_row.shape[0], dtype=np.int64), -reference_row))[:10]
         np.testing.assert_array_equal(row_indices, order)
         np.testing.assert_allclose(row_scores, reference_row[order], rtol=0, atol=1e-3)
+
+
+@pytest.mark.cuda
+def test_cuda_int4_int8q_applies_per_token_scale_before_maximum():
+    pytest.importorskip("maxsim._maxsim_cuda")
+    docs = np.stack(
+        [
+            np.ones(128, dtype=np.float32),
+            np.concatenate(
+                [np.full(64, 10.0, dtype=np.float32), np.zeros(64, dtype=np.float32)]
+            ),
+        ]
+    )
+    offsets = np.array([0, 2], dtype=np.int64)
+    query = np.ones((1, 1, 128), dtype=np.float32)
+    packed = pack_int4_symmetric(docs, offsets, scale_granularity="token")
+    cuda_packed = int4_to_device(packed)
+
+    raw_code_dots = packed.values.astype(np.float32) @ np.ones(128, dtype=np.float32)
+    assert raw_code_dots[0] > raw_code_dots[1]
+    reconstructed_dots = raw_code_dots * packed.token_scale * np.float32(packed.scale)
+    assert reconstructed_dots[1] > reconstructed_dots[0]
+
+    actual = int4_maxsim_int8q(query, cuda_packed, device="cuda")
+    expected = _reference_int8q_scores(packed, query)
+
+    np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=1e-3)
+    np.testing.assert_allclose(actual, np.array([[640.0]], dtype=np.float32), rtol=0, atol=1e-3)

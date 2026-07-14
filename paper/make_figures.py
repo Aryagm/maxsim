@@ -1,4 +1,4 @@
-"""Generate the paper figures from the committed benchmark ledger.
+"""Generate the paper figures from the benchmark artifact ledger.
 
 Reads docs/benchmark_results/raw/*.json and writes PDFs into paper/figures/
 plus PNG twins into docs/figures/ for the README. Run from the repo root:
@@ -27,6 +27,8 @@ COLORS = {
     "ts": "#0e9668",
     "u4": "#c98500",
     "int4": "#008300",
+    "int4_token": "#007d8a",
+    "residual": "#7b579b",
     "pool2": "#4a3aa7",
     "pool3": "#d43d3c",
     "dense": "#5c6672",
@@ -84,6 +86,8 @@ def fig_format_layout():
     tiers = [
         ("fp32 (reference)", 512.0, "dense", "1.0×"),
         ("fp16 dense", 256.0, "dense", "2×"),
+        ("residual int4 (q4 + q4)", 136.0, "residual", "3.76×"),
+        ("int4 + fp32 token scale", 68.0, "int4_token", "7.52×"),
         ("int4 (per-tensor scale)", 64.0, "int4", "8×"),
         ("binary + fp16 scale", 18.0, "ts", "28.4×"),
         ("binary + u4 scale", 16.5, "u4", "31×"),
@@ -91,7 +95,7 @@ def fig_format_layout():
         ("pool2 binary$^{\\dagger}$", 8.0, "pool2", "63.9×"),
         ("pool3 binary$^{\\dagger}$", 5.33, "pool3", "95.9×"),
     ]
-    fig, ax = plt.subplots(figsize=(5.4, 2.7))
+    fig, ax = plt.subplots(figsize=(5.4, 3.25))
     ax.grid(axis="y", visible=False)
     import numpy as np
     for i, (label, size_b, key, comp) in enumerate(tiers):

@@ -20,3 +20,39 @@ jobs:
         run: pip install -e ".[dev,pooling]"
       - name: CPU test suite
         run: pytest -m "not cuda" -q
+
+  cuda-compile:
+    name: CUDA extension compile (SM80)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 25
+    container: nvidia/cuda:12.6.3-devel-ubuntu22.04
+    steps:
+      - name: Install Python build tools
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential ca-certificates git python3 python3-dev python3-pip
+      - uses: actions/checkout@v4
+      - name: Build CUDA wheel
+        env:
+          CUDACXX: /usr/local/cuda/bin/nvcc
+          MAXSIM_BUILD_CUDA: "1"
+          MAXSIM_CUDA_ARCH: "80"
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip wheel . --no-deps --wheel-dir wheelhouse
+      - name: Verify CUDA extension is packaged
+        run: |
+          python3 - <<'PY'
+          import glob
+          import zipfile
+
+          wheels = glob.glob("wheelhouse/*.whl")
+          assert len(wheels) == 1, wheels
+          with zipfile.ZipFile(wheels[0]) as wheel:
+              members = wheel.namelist()
+          assert any(
+              name.startswith("maxsim/_maxsim_cuda") and name.endswith(".so")
+              for name in members
+          ), members
+          PY

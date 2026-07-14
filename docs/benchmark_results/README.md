@@ -5,7 +5,7 @@ repo. The raw artifacts are mirrored from `benchmark-results/` into
 `docs/benchmark_results/raw/` because `benchmark-results/` itself is ignored to
 avoid accidentally committing generated embedding caches.
 
-Last refreshed: 2026-06-30.
+Last refreshed: 2026-07-14.
 
 ## What Is Tracked
 
@@ -23,6 +23,10 @@ Important summary artifacts:
 - `raw/docscale-stress-5k-10k-25k-rich-summary.json`
 - `raw/open-source-comparison-expanded-limit256-cuda.json`
 - `raw/sdk-demo-local-search-limit256-cuda.json`
+- `raw/cuda-step1-rtx4090-20260714.json`
+- `raw/cuda-residual-routing-rtx4090-20260714.json`
+- `raw/cuda-validation-rtx4090-20260714.json`
+- `raw/cuda-step1-source-20260714.tgz`
 
 ## What Is Not Tracked
 
@@ -41,6 +45,7 @@ rsync -av \
   --include='*/' \
   --include='*.json' \
   --include='*.png' \
+  --include='*.tgz' \
   --exclude='*' \
   benchmark-results/ docs/benchmark_results/raw/
 ```

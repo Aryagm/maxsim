@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 namespace py = pybind11;
 
@@ -41,6 +42,36 @@ std::size_t g_dim128_qtile_min_packed_bytes = ~static_cast<std::size_t>(0);
 // default on SM89; zero preserves the block-wide baseline and eight remains
 // available for benchmark-driven tuning of high-query-token workloads.
 thread_local int g_shared_reducer_warps = 4;
+
+// Residual scoring reads two int4 streams. Eight query-parallel warps was the
+// best SM89 production-shape variant across MaxSim, TopK4, and SmoothSim.
+// This benchmark override is thread-scoped. The default eight-warp policy
+// steps down to four warps below eight query tokens; a forced-route sweep found
+// that policy within 5% of the best measured route across the release matrix.
+thread_local int g_residual_reducer_warps = 8;
+
+// Benchmark-only override for measuring every residual launch shape at every
+// query length. Negative one keeps the adaptive production policy above;
+// zero, four, and eight force the corresponding block or warp reducer.
+thread_local int g_residual_reducer_force_warps = -1;
+
+int effective_residual_reducer_warps(int query_tokens) {
+  if (query_tokens <= 0) {
+    throw std::invalid_argument("query tokens must be positive");
+  }
+  if (g_residual_reducer_force_warps >= 0) {
+    return g_residual_reducer_force_warps;
+  }
+  if (g_residual_reducer_warps == 8) {
+    if (query_tokens >= 8) {
+      return 8;
+    }
+    return 4;
+  }
+  return g_residual_reducer_warps <= query_tokens
+      ? g_residual_reducer_warps
+      : 0;
+}
 
 constexpr int kQTile = 8;
 
@@ -933,6 +964,307 @@ void launch_compressed_score(
   }
 }
 
+template <typename Reducer>
+__global__ void residual_int4_score_batched_kernel(
+    const float* query,
+    const std::uint8_t* prefix_packed,
+    const std::uint8_t* residual_packed,
+    const std::int64_t* offsets,
+    const std::int64_t* candidate_indices,
+    float* output,
+    int batch,
+    int query_tokens,
+    int dim,
+    int num_targets,
+    float prefix_scale,
+    const float* prefix_token_scales,
+    float residual_scale,
+    const float* residual_token_scales,
+    const float* query_weights,
+    bool weights_batched,
+    float temperature) {
+  const int target_idx = blockIdx.x;
+  const int batch_idx = blockIdx.y;
+  const int tid = threadIdx.x;
+  __shared__ typename Reducer::State reductions[kBlockThreads];
+
+  if (target_idx >= num_targets || batch_idx >= batch) {
+    return;
+  }
+
+  const int doc_idx = candidate_indices == nullptr
+      ? target_idx
+      : static_cast<int>(candidate_indices[target_idx]);
+  const std::int64_t start = offsets[doc_idx];
+  const std::int64_t end = offsets[doc_idx + 1];
+  float doc_score = 0.0F;
+
+  for (int q = 0; q < query_tokens; ++q) {
+    typename Reducer::State local = Reducer::identity();
+    const float* query_row = query +
+        (static_cast<std::int64_t>(batch_idx) * query_tokens + q) * dim;
+    for (std::int64_t token = start + tid; token < end; token += blockDim.x) {
+      const float prefix_token_scale =
+          prefix_token_scales == nullptr ? 1.0F : prefix_token_scales[token];
+      const float residual_token_scale = residual_token_scales[token];
+      const float similarity =
+          Int4PackedLoader::load(query_row, prefix_packed, token, dim) *
+              prefix_scale * prefix_token_scale +
+          Int4PackedLoader::load(query_row, residual_packed, token, dim) *
+              residual_scale * residual_token_scale;
+      Reducer::add(local, similarity, temperature);
+    }
+
+    reductions[tid] = local;
+    __syncthreads();
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+      if (tid < stride) {
+        reductions[tid] = Reducer::merge(
+            reductions[tid], reductions[tid + stride], temperature);
+      }
+      __syncthreads();
+    }
+    if (tid == 0) {
+      float weight = 1.0F;
+      if constexpr (Reducer::kRequiresWeights) {
+        const int weight_row = weights_batched ? batch_idx : 0;
+        weight = query_weights[
+            static_cast<std::int64_t>(weight_row) * query_tokens + q];
+      }
+      doc_score += Reducer::finish(reductions[0], weight, temperature);
+    }
+    __syncthreads();
+  }
+
+  if (tid == 0) {
+    output[static_cast<std::int64_t>(batch_idx) * num_targets + target_idx] =
+        doc_score;
+  }
+}
+
+template <typename Reducer, int NumWarps>
+__global__ void residual_int4_score_warp_batched_kernel(
+    const float* query,
+    const std::uint8_t* prefix_packed,
+    const std::uint8_t* residual_packed,
+    const std::int64_t* offsets,
+    const std::int64_t* candidate_indices,
+    float* output,
+    int batch,
+    int query_tokens,
+    int dim,
+    int num_targets,
+    float prefix_scale,
+    const float* prefix_token_scales,
+    float residual_scale,
+    const float* residual_token_scales,
+    const float* query_weights,
+    bool weights_batched,
+    float temperature) {
+  static_assert(
+      NumWarps == 4 || NumWarps == 8,
+      "residual reducer supports 4 or 8 warps per block");
+  constexpr unsigned kFullWarpMask = 0xFFFFFFFFU;
+
+  const int target_idx = blockIdx.x;
+  const int batch_idx = blockIdx.y;
+  const int tid = threadIdx.x;
+  const int lane = tid & 31;
+  const int warp_idx = tid >> 5;
+  __shared__ float warp_scores[NumWarps];
+
+  if (target_idx >= num_targets || batch_idx >= batch) {
+    return;
+  }
+
+  const int doc_idx = candidate_indices == nullptr
+      ? target_idx
+      : static_cast<int>(candidate_indices[target_idx]);
+  const std::int64_t start = offsets[doc_idx];
+  const std::int64_t end = offsets[doc_idx + 1];
+  float warp_score = 0.0F;
+
+  for (int q = warp_idx; q < query_tokens; q += NumWarps) {
+    typename Reducer::State local = Reducer::identity();
+    const float* query_row = query +
+        (static_cast<std::int64_t>(batch_idx) * query_tokens + q) * dim;
+    for (std::int64_t token = start + lane; token < end; token += 32) {
+      const float prefix_token_scale =
+          prefix_token_scales == nullptr ? 1.0F : prefix_token_scales[token];
+      const float residual_token_scale = residual_token_scales[token];
+      const float similarity =
+          Int4PackedLoader::load(query_row, prefix_packed, token, dim) *
+              prefix_scale * prefix_token_scale +
+          Int4PackedLoader::load(query_row, residual_packed, token, dim) *
+              residual_scale * residual_token_scale;
+      Reducer::add(local, similarity, temperature);
+    }
+
+#pragma unroll
+    for (int delta = 16; delta > 0; delta >>= 1) {
+      const typename Reducer::State other =
+          Reducer::shuffle_down(local, delta, kFullWarpMask);
+      if (lane < delta) {
+        local = Reducer::merge(local, other, temperature);
+      }
+    }
+
+    if (lane == 0) {
+      float weight = 1.0F;
+      if constexpr (Reducer::kRequiresWeights) {
+        const int weight_row = weights_batched ? batch_idx : 0;
+        weight = query_weights[
+            static_cast<std::int64_t>(weight_row) * query_tokens + q];
+      }
+      warp_score += Reducer::finish(local, weight, temperature);
+    }
+  }
+
+  if (lane == 0) {
+    warp_scores[warp_idx] = warp_score;
+  }
+  __syncthreads();
+
+  if (tid == 0) {
+    float doc_score = 0.0F;
+#pragma unroll
+    for (int warp = 0; warp < NumWarps; ++warp) {
+      doc_score += warp_scores[warp];
+    }
+    output[static_cast<std::int64_t>(batch_idx) * num_targets + target_idx] =
+        doc_score;
+  }
+}
+
+template <typename Reducer>
+void launch_residual_int4_score_policy(
+    const float* d_query,
+    const std::uint8_t* d_prefix_packed,
+    const std::uint8_t* d_residual_packed,
+    const std::int64_t* d_offsets,
+    const std::int64_t* d_candidates,
+    float* d_output,
+    int batch,
+    int query_tokens,
+    int dim,
+    int num_targets,
+    float prefix_scale,
+    const float* d_prefix_token_scales,
+    float residual_scale,
+    const float* d_residual_token_scales,
+    const float* d_query_weights,
+    bool weights_batched,
+    float temperature) {
+  dim3 grid(num_targets, batch);
+  const int residual_reducer_warps =
+      effective_residual_reducer_warps(query_tokens);
+  if (residual_reducer_warps == 4) {
+    residual_int4_score_warp_batched_kernel<Reducer, 4><<<grid, 4 * 32>>>(
+        d_query,
+        d_prefix_packed,
+        d_residual_packed,
+        d_offsets,
+        d_candidates,
+        d_output,
+        batch,
+        query_tokens,
+        dim,
+        num_targets,
+        prefix_scale,
+        d_prefix_token_scales,
+        residual_scale,
+        d_residual_token_scales,
+        d_query_weights,
+        weights_batched,
+        temperature);
+    return;
+  }
+  if (residual_reducer_warps == 8) {
+    residual_int4_score_warp_batched_kernel<Reducer, 8><<<grid, 8 * 32>>>(
+        d_query,
+        d_prefix_packed,
+        d_residual_packed,
+        d_offsets,
+        d_candidates,
+        d_output,
+        batch,
+        query_tokens,
+        dim,
+        num_targets,
+        prefix_scale,
+        d_prefix_token_scales,
+        residual_scale,
+        d_residual_token_scales,
+        d_query_weights,
+        weights_batched,
+        temperature);
+    return;
+  }
+  residual_int4_score_batched_kernel<Reducer><<<grid, kBlockThreads>>>(
+      d_query,
+      d_prefix_packed,
+      d_residual_packed,
+      d_offsets,
+      d_candidates,
+      d_output,
+      batch,
+      query_tokens,
+      dim,
+      num_targets,
+      prefix_scale,
+      d_prefix_token_scales,
+      residual_scale,
+      d_residual_token_scales,
+      d_query_weights,
+      weights_batched,
+      temperature);
+}
+
+void launch_residual_int4_score(
+    ReducerKind reducer,
+    const float* d_query,
+    const std::uint8_t* d_prefix_packed,
+    const std::uint8_t* d_residual_packed,
+    const std::int64_t* d_offsets,
+    const std::int64_t* d_candidates,
+    float* d_output,
+    int batch,
+    int query_tokens,
+    int dim,
+    int num_targets,
+    float prefix_scale,
+    const float* d_prefix_token_scales,
+    float residual_scale,
+    const float* d_residual_token_scales,
+    const float* d_query_weights,
+    bool weights_batched,
+    float temperature) {
+#define MAXSIM_LAUNCH_RESIDUAL_INT4(Policy) \
+  launch_residual_int4_score_policy<Policy>( \
+      d_query, d_prefix_packed, d_residual_packed, d_offsets, d_candidates, \
+      d_output, batch, query_tokens, dim, num_targets, prefix_scale, \
+      d_prefix_token_scales, residual_scale, d_residual_token_scales, \
+      d_query_weights, weights_batched, temperature)
+  switch (reducer) {
+    case ReducerKind::kMaxSim:
+      MAXSIM_LAUNCH_RESIDUAL_INT4(MaxSimReducerPolicy);
+      break;
+    case ReducerKind::kWeightedMaxSim:
+      MAXSIM_LAUNCH_RESIDUAL_INT4(WeightedMaxSimReducerPolicy);
+      break;
+    case ReducerKind::kTopK2:
+      MAXSIM_LAUNCH_RESIDUAL_INT4(TopKSimReducerPolicy<2>);
+      break;
+    case ReducerKind::kTopK4:
+      MAXSIM_LAUNCH_RESIDUAL_INT4(TopKSimReducerPolicy<4>);
+      break;
+    case ReducerKind::kSmoothSim:
+      MAXSIM_LAUNCH_RESIDUAL_INT4(SmoothSimReducerPolicy);
+      break;
+  }
+#undef MAXSIM_LAUNCH_RESIDUAL_INT4
+}
+
 __global__ void maxsim_int4_batched_kernel(
     const float* query,
     const std::uint8_t* packed,
@@ -942,7 +1274,8 @@ __global__ void maxsim_int4_batched_kernel(
     int query_tokens,
     int dim,
     int num_docs,
-    float scale) {
+    float scale,
+    const float* token_scales) {
   const int doc_idx = blockIdx.x;
   const int batch_idx = blockIdx.y;
   const int tid = threadIdx.x;
@@ -962,7 +1295,10 @@ __global__ void maxsim_int4_batched_kernel(
     const float* query_row = query + (static_cast<std::int64_t>(batch_idx) * query_tokens + q) * dim;
     for (std::int64_t token = start + tid; token < end; token += blockDim.x) {
       const std::uint8_t* packed_row = packed + token * byte_dim;
-      const float dot = dot_int4(query_row, packed_row, dim);
+      float dot = dot_int4(query_row, packed_row, dim);
+      if (token_scales != nullptr) {
+        dot *= token_scales[token];
+      }
       local_best = dot > local_best ? dot : local_best;
     }
 
@@ -1227,6 +1563,69 @@ __global__ void maxsim_int4_int8q_dim128_kernel(
   }
 }
 
+// Per-token document scales must be applied before the maximum. The scalar
+// int4 path above can reduce integer dots, but token-scaled dots require a
+// floating-point reduction to preserve that ordering.
+__global__ void maxsim_int4_int8q_token_scale_dim128_kernel(
+    const std::int32_t* query_int8_words,
+    const float* query_scales,
+    const std::uint8_t* packed,
+    const std::int64_t* offsets,
+    const float* token_scales,
+    float* output,
+    int batch,
+    int query_tokens,
+    int num_docs,
+    float scale) {
+  const int doc_idx = blockIdx.x;
+  const int batch_idx = blockIdx.y;
+  const int tid = threadIdx.x;
+  __shared__ float reductions[kBlockThreads];
+
+  if (doc_idx >= num_docs || batch_idx >= batch) {
+    return;
+  }
+
+  const std::int64_t start = offsets[doc_idx];
+  const std::int64_t end = offsets[doc_idx + 1];
+  float doc_score = 0.0F;
+
+  for (int q = 0; q < query_tokens; ++q) {
+    const std::int64_t row = static_cast<std::int64_t>(batch_idx) * query_tokens + q;
+    const std::int32_t* q_words_global = query_int8_words + row * 32;
+    std::int32_t q_words[32];
+#pragma unroll
+    for (int word = 0; word < 32; ++word) {
+      q_words[word] = q_words_global[word];
+    }
+
+    float local_best = -3.402823466e+38F;
+    for (std::int64_t token = start + tid; token < end; token += blockDim.x) {
+      const std::uint32_t* doc_words = reinterpret_cast<const std::uint32_t*>(packed + token * 64);
+      const float dot = static_cast<float>(dot_int4_int8q_dim128(q_words, doc_words)) * token_scales[token];
+      local_best = dot > local_best ? dot : local_best;
+    }
+
+    reductions[tid] = local_best;
+    __syncthreads();
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+      if (tid < stride) {
+        const float other = reductions[tid + stride];
+        reductions[tid] = other > reductions[tid] ? other : reductions[tid];
+      }
+      __syncthreads();
+    }
+    if (tid == 0 && start != end) {
+      doc_score += reductions[0] * query_scales[row];
+    }
+    __syncthreads();
+  }
+
+  if (tid == 0) {
+    output[static_cast<std::int64_t>(batch_idx) * num_docs + doc_idx] = doc_score * scale;
+  }
+}
+
 __global__ void topk_kernel(
     const float* scores,
     float* top_scores,
@@ -1404,6 +1803,26 @@ __global__ void streaming_topk_batched_kernel(
   }
 }
 
+void validate_offsets_values(
+    const py::array_t<std::int64_t, py::array::c_style | py::array::forcecast>& offsets,
+    std::int64_t num_tokens) {
+  if (offsets.ndim() != 1 || offsets.shape(0) < 2) {
+    throw std::invalid_argument("offsets must contain at least [0, num_doc_tokens]");
+  }
+  const std::int64_t* values = offsets.data();
+  if (values[0] != 0) {
+    throw std::invalid_argument("offsets must start at 0");
+  }
+  if (values[offsets.shape(0) - 1] != num_tokens) {
+    throw std::invalid_argument("offsets must end at num_doc_tokens");
+  }
+  for (py::ssize_t idx = 1; idx < offsets.shape(0); ++idx) {
+    if (values[idx] < values[idx - 1]) {
+      throw std::invalid_argument("offsets must be monotonically nondecreasing");
+    }
+  }
+}
+
 void validate_inputs(
     const py::array_t<float, py::array::c_style | py::array::forcecast>& query,
     const py::array_t<std::uint8_t, py::array::c_style | py::array::forcecast>& packed,
@@ -1424,6 +1843,7 @@ void validate_inputs(
   if (query.shape(1) != dim || packed.shape(1) != dim / 8) {
     throw std::invalid_argument("query/packed shapes do not match dim");
   }
+  validate_offsets_values(offsets, static_cast<std::int64_t>(packed.shape(0)));
 }
 
 void validate_batch_inputs(
@@ -1446,6 +1866,7 @@ void validate_batch_inputs(
   if (query.shape(2) != dim || packed.shape(1) != dim / 8) {
     throw std::invalid_argument("query/packed shapes do not match dim");
   }
+  validate_offsets_values(offsets, static_cast<std::int64_t>(packed.shape(0)));
 }
 
 class CudaPackedDocs {
@@ -1474,13 +1895,18 @@ class CudaPackedDocs {
     if (offsets.shape(0) < 2) {
       throw std::invalid_argument("offsets must contain at least [0, num_doc_tokens]");
     }
+    validate_offsets_values(offsets, num_tokens_);
 
     const std::size_t packed_bytes = packed_size_ * sizeof(std::uint8_t);
     const std::size_t offsets_bytes = offsets_size_ * sizeof(std::int64_t);
-    check_cuda(cudaMalloc(&d_packed_, packed_bytes), "cudaMalloc packed docs");
-    check_cuda(cudaMalloc(&d_offsets_, offsets_bytes), "cudaMalloc offsets");
     try {
-      check_cuda(cudaMemcpy(d_packed_, packed.data(), packed_bytes, cudaMemcpyHostToDevice), "copy packed docs to device");
+      if (packed_bytes > 0) {
+        check_cuda(cudaMalloc(&d_packed_, packed_bytes), "cudaMalloc packed docs");
+      }
+      check_cuda(cudaMalloc(&d_offsets_, offsets_bytes), "cudaMalloc offsets");
+      if (packed_bytes > 0) {
+        check_cuda(cudaMemcpy(d_packed_, packed.data(), packed_bytes, cudaMemcpyHostToDevice), "copy packed docs to device");
+      }
       check_cuda(cudaMemcpy(d_offsets_, offsets.data(), offsets_bytes, cudaMemcpyHostToDevice), "copy offsets to device");
     } catch (...) {
       cudaFree(d_packed_);
@@ -1536,7 +1962,9 @@ class CudaPackedDocs {
 
     const std::size_t token_scale_bytes = static_cast<std::size_t>(num_tokens_) * sizeof(float);
     ensure_device_capacity(&d_token_scales_, &token_scales_capacity_, token_scale_bytes, "cudaMalloc resident token scale vector");
-    check_cuda(cudaMemcpy(d_token_scales_, token_scales.data(), token_scale_bytes, cudaMemcpyHostToDevice), "copy token scale vector to device");
+    if (token_scale_bytes > 0) {
+      check_cuda(cudaMemcpy(d_token_scales_, token_scales.data(), token_scale_bytes, cudaMemcpyHostToDevice), "copy token scale vector to device");
+    }
     has_token_scale_vector_ = true;
   }
 
@@ -1894,11 +2322,23 @@ class CudaPackedDocs {
 
   int dim() const { return dim_; }
   int num_docs() const { return num_docs_; }
+  std::int64_t num_tokens() const { return num_tokens_; }
   std::size_t packed_size() const { return packed_size_; }
   bool has_scale_vector() const { return has_scale_vector_; }
   std::size_t scale_vector_size() const { return has_scale_vector_ ? static_cast<std::size_t>(num_docs_) : 0; }
   bool has_token_scale_vector() const { return has_token_scale_vector_; }
   std::size_t token_scale_vector_size() const { return has_token_scale_vector_ ? static_cast<std::size_t>(num_tokens_) : 0; }
+  std::size_t resident_bytes() const {
+    return packed_size_ * sizeof(std::uint8_t) +
+        offsets_size_ * sizeof(std::int64_t) + scale_capacity_ + token_scales_capacity_;
+  }
+  std::size_t workspace_bytes() const {
+    return query_capacity_ + query_words_capacity_ + query_scales_capacity_ +
+        query_sums_capacity_ + centroid_weights_capacity_ + query_lut_capacity_ +
+        scores_capacity_ + reducer_weights_capacity_ + reducer_scales_capacity_ +
+        candidates_capacity_ + top_scores_capacity_ + top_indices_capacity_ +
+        top_locks_capacity_;
+  }
   const char* maxsim_kernel_variant() const {
     if (dim_ == 128 && packed_size_ >= g_dim128_qtile_min_packed_bytes) {
       return "dim128_qtile";
@@ -2243,6 +2683,7 @@ class CudaInt4PackedDocs {
       float scale)
       : dim_(dim),
         num_docs_(static_cast<int>(offsets.shape(0) - 1)),
+        num_tokens_(static_cast<std::int64_t>(packed.shape(0))),
         scale_(scale),
         packed_size_(static_cast<std::size_t>(packed.size())),
         offsets_size_(static_cast<std::size_t>(offsets.size())) {
@@ -2261,16 +2702,21 @@ class CudaInt4PackedDocs {
     if (offsets.shape(0) < 2) {
       throw std::invalid_argument("offsets must contain at least [0, num_doc_tokens]");
     }
-    if (scale <= 0.0F) {
-      throw std::invalid_argument("scale must be > 0");
+    if (!(scale > 0.0F) || !std::isfinite(scale)) {
+      throw std::invalid_argument("scale must be finite and > 0");
     }
+    validate_offsets_values(offsets, num_tokens_);
 
     const std::size_t packed_bytes = packed_size_ * sizeof(std::uint8_t);
     const std::size_t offsets_bytes = offsets_size_ * sizeof(std::int64_t);
-    check_cuda(cudaMalloc(&d_packed_, packed_bytes), "cudaMalloc int4 packed docs");
-    check_cuda(cudaMalloc(&d_offsets_, offsets_bytes), "cudaMalloc int4 offsets");
     try {
-      check_cuda(cudaMemcpy(d_packed_, packed.data(), packed_bytes, cudaMemcpyHostToDevice), "copy int4 packed docs to device");
+      if (packed_bytes > 0) {
+        check_cuda(cudaMalloc(&d_packed_, packed_bytes), "cudaMalloc int4 packed docs");
+      }
+      check_cuda(cudaMalloc(&d_offsets_, offsets_bytes), "cudaMalloc int4 offsets");
+      if (packed_bytes > 0) {
+        check_cuda(cudaMemcpy(d_packed_, packed.data(), packed_bytes, cudaMemcpyHostToDevice), "copy int4 packed docs to device");
+      }
       check_cuda(cudaMemcpy(d_offsets_, offsets.data(), offsets_bytes, cudaMemcpyHostToDevice), "copy int4 offsets to device");
     } catch (...) {
       cudaFree(d_packed_);
@@ -2287,6 +2733,9 @@ class CudaInt4PackedDocs {
   ~CudaInt4PackedDocs() {
     cudaFree(d_packed_);
     cudaFree(d_offsets_);
+    cudaFree(d_token_scales_);
+    cudaFree(d_residual_packed_);
+    cudaFree(d_residual_token_scales_);
     cudaFree(d_query_);
     cudaFree(d_query_words_);
     cudaFree(d_query_scales_);
@@ -2296,6 +2745,92 @@ class CudaInt4PackedDocs {
     cudaFree(d_top_scores_);
     cudaFree(d_top_indices_);
   }
+
+  void set_token_scale_vector(
+      py::array_t<float, py::array::c_style | py::array::forcecast> token_scales) {
+    if (token_scales.ndim() != 1 || token_scales.shape(0) != num_tokens_) {
+      throw std::invalid_argument("token scale vector must have shape [num_doc_tokens]");
+    }
+    for (std::int64_t idx = 0; idx < num_tokens_; ++idx) {
+      const float value = token_scales.data()[idx];
+      if (!(value > 0.0F) || !std::isfinite(value)) {
+        throw std::invalid_argument("token scales must be finite and > 0");
+      }
+    }
+
+    const std::size_t bytes = static_cast<std::size_t>(num_tokens_) * sizeof(float);
+    ensure_device_capacity(
+        &d_token_scales_,
+        &token_scales_capacity_,
+        bytes,
+        "cudaMalloc resident int4 token scale vector");
+    if (bytes > 0) {
+      check_cuda(
+          cudaMemcpy(d_token_scales_, token_scales.data(), bytes, cudaMemcpyHostToDevice),
+          "copy int4 token scale vector to device");
+    }
+    has_token_scale_vector_ = true;
+  }
+
+  void clear_token_scale_vector() { has_token_scale_vector_ = false; }
+
+  void set_residual_int4(
+      py::array_t<std::uint8_t, py::array::c_style | py::array::forcecast> packed,
+      float scale,
+      py::array_t<float, py::array::c_style | py::array::forcecast> token_scales) {
+    if (packed.ndim() != 2 || packed.shape(0) != num_tokens_ ||
+        packed.shape(1) != dim_ / 2) {
+      throw std::invalid_argument(
+          "residual packed data must have shape [num_doc_tokens, dim / 2]");
+    }
+    if (!(scale > 0.0F) || !std::isfinite(scale)) {
+      throw std::invalid_argument("residual scale must be finite and > 0");
+    }
+    if (token_scales.ndim() != 1 || token_scales.shape(0) != num_tokens_) {
+      throw std::invalid_argument(
+          "residual token scale vector must have shape [num_doc_tokens]");
+    }
+    for (std::int64_t idx = 0; idx < num_tokens_; ++idx) {
+      const float value = token_scales.data()[idx];
+      if (!(value > 0.0F) || !std::isfinite(value)) {
+        throw std::invalid_argument(
+            "residual token scales must be finite and > 0");
+      }
+    }
+
+    const std::size_t packed_bytes =
+        static_cast<std::size_t>(packed.size()) * sizeof(std::uint8_t);
+    const std::size_t scale_bytes =
+        static_cast<std::size_t>(num_tokens_) * sizeof(float);
+    ensure_device_capacity(
+        &d_residual_packed_,
+        &residual_packed_capacity_,
+        packed_bytes,
+        "cudaMalloc resident int4 residual data");
+    ensure_device_capacity(
+        &d_residual_token_scales_,
+        &residual_token_scales_capacity_,
+        scale_bytes,
+        "cudaMalloc resident int4 residual token scales");
+    if (packed_bytes > 0) {
+      check_cuda(
+          cudaMemcpy(
+              d_residual_packed_, packed.data(), packed_bytes,
+              cudaMemcpyHostToDevice),
+          "copy int4 residual data to device");
+    }
+    if (scale_bytes > 0) {
+      check_cuda(
+          cudaMemcpy(
+              d_residual_token_scales_, token_scales.data(), scale_bytes,
+              cudaMemcpyHostToDevice),
+          "copy int4 residual token scales to device");
+    }
+    residual_scale_ = scale;
+    has_residual_int4_ = true;
+  }
+
+  void clear_residual_int4() { has_residual_int4_ = false; }
 
   py::array_t<float> maxsim_batch(py::array_t<float, py::array::c_style | py::array::forcecast> query) {
     if (query.ndim() != 3) {
@@ -2330,6 +2865,21 @@ class CudaInt4PackedDocs {
     return score_impl(query, reducer, query_weights, temperature, nullptr, num_docs_);
   }
 
+  py::array_t<float> score_residual_batch(
+      py::array_t<float, py::array::c_style | py::array::forcecast> query,
+      const std::string& reducer,
+      py::object query_weights,
+      float temperature) {
+    return score_impl(
+        query,
+        reducer,
+        query_weights,
+        temperature,
+        nullptr,
+        num_docs_,
+        true);
+  }
+
   py::array_t<float> score_candidates_batch(
       py::array_t<float, py::array::c_style | py::array::forcecast> query,
       py::array_t<std::int64_t, py::array::c_style | py::array::forcecast> candidate_indices,
@@ -2356,6 +2906,52 @@ class CudaInt4PackedDocs {
     ensure_device_capacity(&d_candidates_, &candidates_capacity_, candidate_bytes, "cudaMalloc int4 reducer candidate cache");
     check_cuda(cudaMemcpy(d_candidates_, candidate_indices.data(), candidate_bytes, cudaMemcpyHostToDevice), "copy int4 reducer candidates to device");
     return score_impl(query, reducer, query_weights, temperature, d_candidates_, num_candidates);
+  }
+
+  py::array_t<float> score_residual_candidates_batch(
+      py::array_t<float, py::array::c_style | py::array::forcecast> query,
+      py::array_t<std::int64_t, py::array::c_style | py::array::forcecast>
+          candidate_indices,
+      const std::string& reducer,
+      py::object query_weights,
+      float temperature) {
+    validate_score_query(query);
+    if (candidate_indices.ndim() != 1) {
+      throw std::invalid_argument("candidate_indices must be a 1-D array");
+    }
+    const int num_candidates = static_cast<int>(candidate_indices.shape(0));
+    for (int idx = 0; idx < num_candidates; ++idx) {
+      const std::int64_t doc_idx = candidate_indices.data()[idx];
+      if (doc_idx < 0 || doc_idx >= num_docs_) {
+        throw std::invalid_argument(
+            "candidate_indices entries must be between 0 and num_docs - 1");
+      }
+    }
+    if (num_candidates == 0) {
+      const std::array<py::ssize_t, 2> shape{query.shape(0), 0};
+      return py::array_t<float>(shape);
+    }
+
+    const std::size_t candidate_bytes =
+        static_cast<std::size_t>(num_candidates) * sizeof(std::int64_t);
+    ensure_device_capacity(
+        &d_candidates_,
+        &candidates_capacity_,
+        candidate_bytes,
+        "cudaMalloc int4 residual candidate cache");
+    check_cuda(
+        cudaMemcpy(
+            d_candidates_, candidate_indices.data(), candidate_bytes,
+            cudaMemcpyHostToDevice),
+        "copy int4 residual candidates to device");
+    return score_impl(
+        query,
+        reducer,
+        query_weights,
+        temperature,
+        d_candidates_,
+        num_candidates,
+        true);
   }
 
   py::tuple topk_batch(py::array_t<float, py::array::c_style | py::array::forcecast> query, int k) {
@@ -2438,8 +3034,24 @@ class CudaInt4PackedDocs {
 
   int dim() const { return dim_; }
   int num_docs() const { return num_docs_; }
+  std::int64_t num_tokens() const { return num_tokens_; }
   float scale() const { return scale_; }
   std::size_t packed_size() const { return packed_size_; }
+  bool has_token_scale_vector() const { return has_token_scale_vector_; }
+  std::size_t token_scale_vector_size() const {
+    return has_token_scale_vector_ ? static_cast<std::size_t>(num_tokens_) : 0;
+  }
+  std::size_t resident_bytes() const {
+    return packed_size_ * sizeof(std::uint8_t) +
+        offsets_size_ * sizeof(std::int64_t) + token_scales_capacity_ +
+        residual_packed_capacity_ + residual_token_scales_capacity_;
+  }
+  std::size_t workspace_bytes() const {
+    return query_capacity_ + query_words_capacity_ + query_scales_capacity_ +
+        scores_capacity_ + reducer_weights_capacity_ + candidates_capacity_ +
+        top_scores_capacity_ + top_indices_capacity_;
+  }
+  bool has_residual_int4() const { return has_residual_int4_; }
 
  private:
   template <typename T>
@@ -2515,7 +3127,8 @@ class CudaInt4PackedDocs {
       py::object query_weights,
       float temperature,
       const std::int64_t* d_candidates,
-      int num_targets) {
+      int num_targets,
+      bool use_residual = false) {
     const auto shape = validate_score_query(query);
     const int batch = shape.first;
     const int query_tokens = shape.second;
@@ -2542,23 +3155,49 @@ class CudaInt4PackedDocs {
     ensure_device_capacity(&d_scores_, &scores_capacity_, output_bytes, "cudaMalloc int4 reducer score cache");
     check_cuda(cudaMemcpy(d_query_, query.data(), query_bytes, cudaMemcpyHostToDevice), "copy int4 reducer query to device");
 
-    launch_compressed_score<Int4PackedLoader>(
-        reducer,
-        d_query_,
-        d_packed_,
-        d_offsets_,
-        d_candidates,
-        d_scores_,
-        batch,
-        query_tokens,
-        dim_,
-        num_targets,
-        scale_,
-        nullptr,
-        nullptr,
-        d_weights,
-        weights_batched,
-        temperature);
+    if (use_residual) {
+      if (!has_residual_int4_) {
+        throw std::invalid_argument(
+            "residual int4 data was requested but is not loaded on this CUDA handle");
+      }
+      launch_residual_int4_score(
+          reducer,
+          d_query_,
+          d_packed_,
+          d_residual_packed_,
+          d_offsets_,
+          d_candidates,
+          d_scores_,
+          batch,
+          query_tokens,
+          dim_,
+          num_targets,
+          scale_,
+          has_token_scale_vector_ ? d_token_scales_ : nullptr,
+          residual_scale_,
+          d_residual_token_scales_,
+          d_weights,
+          weights_batched,
+          temperature);
+    } else {
+      launch_compressed_score<Int4PackedLoader>(
+          reducer,
+          d_query_,
+          d_packed_,
+          d_offsets_,
+          d_candidates,
+          d_scores_,
+          batch,
+          query_tokens,
+          dim_,
+          num_targets,
+          scale_,
+          nullptr,
+          has_token_scale_vector_ ? d_token_scales_ : nullptr,
+          d_weights,
+          weights_batched,
+          temperature);
+    }
     check_cuda(cudaGetLastError(), "launch shared int4 reducer kernel");
 
     py::array_t<float> output({batch, num_targets});
@@ -2568,7 +3207,17 @@ class CudaInt4PackedDocs {
 
   void launch_maxsim(float* d_query, float* d_output, int batch, int query_tokens, const char* label) {
     dim3 grid(num_docs_, batch);
-    maxsim_int4_batched_kernel<<<grid, kBlockThreads>>>(d_query, d_packed_, d_offsets_, d_output, batch, query_tokens, dim_, num_docs_, scale_);
+    maxsim_int4_batched_kernel<<<grid, kBlockThreads>>>(
+        d_query,
+        d_packed_,
+        d_offsets_,
+        d_output,
+        batch,
+        query_tokens,
+        dim_,
+        num_docs_,
+        scale_,
+        has_token_scale_vector_ ? d_token_scales_ : nullptr);
     check_cuda(cudaGetLastError(), (std::string("launch ") + label + " kernel").c_str());
   }
 
@@ -2602,13 +3251,30 @@ class CudaInt4PackedDocs {
     check_cuda(cudaGetLastError(), "launch int8 query quantize kernel");
 
     dim3 grid(num_docs_, batch);
-    maxsim_int4_int8q_dim128_kernel<<<grid, kBlockThreads>>>(
-        d_query_words_, d_query_scales_, d_packed_, d_offsets_, d_scores_, batch, query_tokens, num_docs_, scale_);
+    if (has_token_scale_vector_) {
+      maxsim_int4_int8q_token_scale_dim128_kernel<<<grid, kBlockThreads>>>(
+          d_query_words_,
+          d_query_scales_,
+          d_packed_,
+          d_offsets_,
+          d_token_scales_,
+          d_scores_,
+          batch,
+          query_tokens,
+          num_docs_,
+          scale_);
+    } else {
+      maxsim_int4_int8q_dim128_kernel<<<grid, kBlockThreads>>>(
+          d_query_words_, d_query_scales_, d_packed_, d_offsets_, d_scores_, batch, query_tokens, num_docs_, scale_);
+    }
     check_cuda(cudaGetLastError(), (std::string("launch ") + label + " kernel").c_str());
   }
 
   std::uint8_t* d_packed_ = nullptr;
   std::int64_t* d_offsets_ = nullptr;
+  float* d_token_scales_ = nullptr;
+  std::uint8_t* d_residual_packed_ = nullptr;
+  float* d_residual_token_scales_ = nullptr;
   float* d_query_ = nullptr;
   std::int32_t* d_query_words_ = nullptr;
   float* d_query_scales_ = nullptr;
@@ -2619,9 +3285,14 @@ class CudaInt4PackedDocs {
   std::int64_t* d_top_indices_ = nullptr;
   int dim_ = 0;
   int num_docs_ = 0;
+  std::int64_t num_tokens_ = 0;
   float scale_ = 1.0F;
+  float residual_scale_ = 1.0F;
   std::size_t packed_size_ = 0;
   std::size_t offsets_size_ = 0;
+  std::size_t token_scales_capacity_ = 0;
+  std::size_t residual_packed_capacity_ = 0;
+  std::size_t residual_token_scales_capacity_ = 0;
   std::size_t query_capacity_ = 0;
   std::size_t query_words_capacity_ = 0;
   std::size_t query_scales_capacity_ = 0;
@@ -2630,6 +3301,8 @@ class CudaInt4PackedDocs {
   std::size_t candidates_capacity_ = 0;
   std::size_t top_scores_capacity_ = 0;
   std::size_t top_indices_capacity_ = 0;
+  bool has_token_scale_vector_ = false;
+  bool has_residual_int4_ = false;
 };
 
 py::array_t<float> maxsim_cuda(
@@ -2762,11 +3435,14 @@ PYBIND11_MODULE(_maxsim_cuda, m) {
       .def("streaming_topk_batch", &CudaPackedDocs::streaming_topk_batch, py::arg("query"), py::arg("k"), py::arg("scale") = 1.0F, py::arg("use_scale_vector") = false)
       .def_property_readonly("dim", &CudaPackedDocs::dim)
       .def_property_readonly("num_docs", &CudaPackedDocs::num_docs)
+      .def_property_readonly("num_tokens", &CudaPackedDocs::num_tokens)
       .def_property_readonly("packed_size", &CudaPackedDocs::packed_size)
       .def_property_readonly("has_scale_vector", &CudaPackedDocs::has_scale_vector)
       .def_property_readonly("scale_vector_size", &CudaPackedDocs::scale_vector_size)
       .def_property_readonly("has_token_scale_vector", &CudaPackedDocs::has_token_scale_vector)
       .def_property_readonly("token_scale_vector_size", &CudaPackedDocs::token_scale_vector_size)
+      .def_property_readonly("resident_bytes", &CudaPackedDocs::resident_bytes)
+      .def_property_readonly("workspace_bytes", &CudaPackedDocs::workspace_bytes)
       .def_property_readonly("maxsim_kernel_variant", &CudaPackedDocs::maxsim_kernel_variant);
   py::class_<CudaInt4PackedDocs>(m, "CudaInt4PackedDocs")
       .def(py::init<
@@ -2774,16 +3450,33 @@ PYBIND11_MODULE(_maxsim_cuda, m) {
 	           py::array_t<std::int64_t, py::array::c_style | py::array::forcecast>,
 	           int,
 	           float>())
+      .def("set_token_scale_vector", &CudaInt4PackedDocs::set_token_scale_vector, py::arg("token_scales"))
+      .def("clear_token_scale_vector", &CudaInt4PackedDocs::clear_token_scale_vector)
+      .def(
+          "set_residual_int4",
+          &CudaInt4PackedDocs::set_residual_int4,
+          py::arg("packed"),
+          py::arg("scale"),
+          py::arg("token_scales"))
+      .def("clear_residual_int4", &CudaInt4PackedDocs::clear_residual_int4)
       .def("maxsim_batch", &CudaInt4PackedDocs::maxsim_batch, py::arg("query"))
       .def("score_batch", &CudaInt4PackedDocs::score_batch, py::arg("query"), py::arg("reducer") = "maxsim", py::arg("query_weights") = py::none(), py::arg("temperature") = 1.0F)
       .def("score_candidates_batch", &CudaInt4PackedDocs::score_candidates_batch, py::arg("query"), py::arg("candidate_indices"), py::arg("reducer") = "maxsim", py::arg("query_weights") = py::none(), py::arg("temperature") = 1.0F)
+      .def("score_residual_batch", &CudaInt4PackedDocs::score_residual_batch, py::arg("query"), py::arg("reducer") = "maxsim", py::arg("query_weights") = py::none(), py::arg("temperature") = 1.0F)
+      .def("score_residual_candidates_batch", &CudaInt4PackedDocs::score_residual_candidates_batch, py::arg("query"), py::arg("candidate_indices"), py::arg("reducer") = "maxsim", py::arg("query_weights") = py::none(), py::arg("temperature") = 1.0F)
       .def("topk_batch", &CudaInt4PackedDocs::topk_batch, py::arg("query"), py::arg("k"))
       .def("maxsim_batch_int8q", &CudaInt4PackedDocs::maxsim_batch_int8q, py::arg("query"))
       .def("topk_batch_int8q", &CudaInt4PackedDocs::topk_batch_int8q, py::arg("query"), py::arg("k"))
       .def_property_readonly("dim", &CudaInt4PackedDocs::dim)
       .def_property_readonly("num_docs", &CudaInt4PackedDocs::num_docs)
+      .def_property_readonly("num_tokens", &CudaInt4PackedDocs::num_tokens)
       .def_property_readonly("scale", &CudaInt4PackedDocs::scale)
-      .def_property_readonly("packed_size", &CudaInt4PackedDocs::packed_size);
+      .def_property_readonly("packed_size", &CudaInt4PackedDocs::packed_size)
+      .def_property_readonly("has_token_scale_vector", &CudaInt4PackedDocs::has_token_scale_vector)
+      .def_property_readonly("token_scale_vector_size", &CudaInt4PackedDocs::token_scale_vector_size)
+      .def_property_readonly("has_residual_int4", &CudaInt4PackedDocs::has_residual_int4)
+      .def_property_readonly("resident_bytes", &CudaInt4PackedDocs::resident_bytes)
+      .def_property_readonly("workspace_bytes", &CudaInt4PackedDocs::workspace_bytes);
   m.def("maxsim_cuda", &maxsim_cuda, py::arg("query"), py::arg("packed"), py::arg("offsets"), py::arg("dim"), py::arg("scale") = 1.0F);
   m.def("maxsim_cuda_batch", &maxsim_cuda_batch, py::arg("query"), py::arg("packed"), py::arg("offsets"), py::arg("dim"), py::arg("scale") = 1.0F);
   m.def("set_dim128_unrolled_min_avg_tokens", [](int value) { g_dim128_unrolled_min_avg_tokens = value; }, py::arg("value"));
@@ -2797,4 +3490,25 @@ PYBIND11_MODULE(_maxsim_cuda, m) {
     g_shared_reducer_warps = value;
   }, py::arg("value"));
   m.def("get_shared_reducer_warps", []() { return g_shared_reducer_warps; });
+  m.def("set_residual_reducer_warps", [](int value) {
+    if (value != 0 && value != 4 && value != 8) {
+      throw std::invalid_argument("residual reducer warps must be one of 0, 4, or 8");
+    }
+    g_residual_reducer_warps = value;
+  }, py::arg("value"));
+  m.def("get_residual_reducer_warps", []() { return g_residual_reducer_warps; });
+  m.def("set_residual_reducer_force_warps", [](int value) {
+    if (value != -1 && value != 0 && value != 4 && value != 8) {
+      throw std::invalid_argument(
+          "residual reducer force warps must be one of -1, 0, 4, or 8");
+    }
+    g_residual_reducer_force_warps = value;
+  }, py::arg("value"));
+  m.def("get_residual_reducer_force_warps", []() {
+    return g_residual_reducer_force_warps;
+  });
+  m.def(
+      "get_effective_residual_reducer_warps",
+      &effective_residual_reducer_warps,
+      py::arg("query_tokens"));
 }
