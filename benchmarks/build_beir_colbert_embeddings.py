@@ -8,16 +8,88 @@ Example:
     python -m benchmarks.build_beir_colbert_embeddings \
         --dataset scifact --model lightonai/GTE-ModernColBERT-v1 \
         --output caches/beir-scifact-gte-moderncolbert.npz
+
+    python -m benchmarks.build_beir_colbert_embeddings \
+        --dataset scifact --model jinaai/jina-colbert-v2 \
+        --output caches/beir-scifact-jina-colbert-v2.npz
 """
 
 from __future__ import annotations
 
 import argparse
+import json
+import os
+import tempfile
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
 BEIR_DATASETS = ("scifact", "nfcorpus", "fiqa")
+JINA_COLBERT_V2 = "jinaai/jina-colbert-v2"
+CANONICAL_COLBERT_V2 = "colbert-ir/colbertv2.0"
+
+
+def _model_profile(model_name: str) -> tuple[str, dict[str, Any]]:
+    """Return the PyLate options required by a known checkpoint family."""
+    normalized = model_name.rstrip("/").lower()
+    if normalized == JINA_COLBERT_V2.lower():
+        return (
+            "jina-colbert-v2",
+            {
+                "query_prefix": "[QueryMarker]",
+                "document_prefix": "[DocumentMarker]",
+                "attend_to_expansion_tokens": True,
+                "trust_remote_code": True,
+            },
+        )
+    if normalized == CANONICAL_COLBERT_V2.lower():
+        # PyLate reads the canonical markers and expansion behavior from the
+        # Stanford ColBERT checkpoint metadata.
+        return "canonical-colbert-v2", {}
+    return "generic-pylate-colbert", {}
+
+
+def _load_colbert_model(models, model_name: str, *, device: str | None, fallback_model: str | None):
+    attempts = [model_name]
+    if fallback_model and fallback_model != model_name:
+        attempts.append(fallback_model)
+
+    failures: list[tuple[str, Exception]] = []
+    for candidate in attempts:
+        profile, options = _model_profile(candidate)
+        try:
+            model = models.ColBERT(model_name_or_path=candidate, device=device, **options)
+            return model, candidate, profile, options, failures
+        except Exception as exc:  # model loading can fail in transformers or remote code
+            failures.append((candidate, exc))
+            if candidate != attempts[-1]:
+                print(
+                    f"failed to load {candidate!r} ({type(exc).__name__}: {exc}); "
+                    f"falling back to {attempts[-1]!r}",
+                    flush=True,
+                )
+    candidate, exc = failures[-1]
+    raise RuntimeError(f"failed to load ColBERT model {candidate!r}") from exc
+
+
+def _atomic_savez_compressed(path: Path, **arrays) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            suffix=".npz",
+            prefix=f".{path.name}.",
+            dir=path.parent,
+            delete=False,
+        ) as handle:
+            temp_path = Path(handle.name)
+        np.savez_compressed(temp_path, **arrays)
+        os.replace(temp_path, path)
+    finally:
+        if temp_path is not None and temp_path.exists():
+            temp_path.unlink()
 
 
 def _load_beir(dataset: str):
@@ -66,21 +138,43 @@ def main() -> int:
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--device", default=None)
     parser.add_argument("--limit-docs", type=int, default=0, help="0 = full corpus")
+    parser.add_argument(
+        "--fallback-model",
+        default=None,
+        help=(
+            "Checkpoint to try if the requested model cannot load. "
+            f"{JINA_COLBERT_V2} defaults to {CANONICAL_COLBERT_V2}."
+        ),
+    )
+    parser.add_argument(
+        "--no-model-fallback",
+        action="store_true",
+        help="Fail instead of falling back when the requested model cannot load.",
+    )
+    parser.add_argument(
+        "--graded-qrels",
+        action="store_true",
+        help="Preserve BEIR relevance grades instead of the historical positive/binary cache convention.",
+    )
     args = parser.parse_args()
 
     from pylate import models
 
     corpus, queries, qrels = _load_beir(args.dataset)
 
-    relevant = {}
+    relevant: dict[str, dict[str, float]] = {}
     for row in qrels:
-        if float(row["score"]) > 0:
-            relevant.setdefault(str(row["query-id"]), set()).add(str(row["corpus-id"]))
+        score = float(row["score"])
+        if score > 0:
+            qid = str(row["query-id"])
+            did = str(row["corpus-id"])
+            query_relevance = relevant.setdefault(qid, {})
+            query_relevance[did] = max(score, query_relevance.get(did, 0.0))
 
     doc_ids = [str(r["_id"]) for r in corpus]
     if args.limit_docs:
         # keep every relevant doc, fill the remainder deterministically
-        needed = set().union(*relevant.values()) if relevant else set()
+        needed = set().union(*(set(values) for values in relevant.values())) if relevant else set()
         keep = [d for d in doc_ids if d in needed]
         keep += [d for d in doc_ids if d not in needed][: max(0, args.limit_docs - len(keep))]
         keep_set = set(keep)
@@ -92,7 +186,18 @@ def main() -> int:
     query_ids = [str(r["_id"]) for r in query_rows]
     print(f"{args.dataset}: {len(doc_ids)} docs, {len(query_ids)} test queries")
 
-    model = models.ColBERT(model_name_or_path=args.model, device=args.device)
+    fallback_model = args.fallback_model
+    if fallback_model is None and args.model.rstrip("/").lower() == JINA_COLBERT_V2.lower():
+        fallback_model = CANONICAL_COLBERT_V2
+    if args.no_model_fallback:
+        fallback_model = None
+    model, resolved_model, model_profile, model_options, failures = _load_colbert_model(
+        models,
+        args.model,
+        device=args.device,
+        fallback_model=fallback_model,
+    )
+    print(f"model: {resolved_model} ({model_profile})", flush=True)
 
     doc_texts = [_doc_text(r) for r in corpus]
     worst = _batch_fidelity_check(model, doc_texts, args.batch_size, is_query=False)
@@ -110,14 +215,27 @@ def main() -> int:
 
     qrels_matrix = np.zeros((len(query_ids), len(doc_ids)), dtype=np.float32)
     for qi, qid in enumerate(query_ids):
-        for did in relevant[qid]:
+        for did, score in relevant[qid].items():
             if did in doc_pos:
-                qrels_matrix[qi, doc_pos[did]] = 1.0
+                qrels_matrix[qi, doc_pos[did]] = np.float32(score if args.graded_qrels else 1.0)
 
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(
+    _atomic_savez_compressed(
         args.output,
-        dataset_name=np.array(f"beir-{args.dataset}-{Path(args.model).name}"),
+        builder_schema_version=np.array(2, dtype=np.int64),
+        dataset_name=np.array(f"beir-{args.dataset}-{Path(resolved_model).name}"),
+        dataset_id=np.array(f"BeIR/{args.dataset}"),
+        model_requested=np.array(args.model),
+        model_resolved=np.array(resolved_model),
+        model_profile=np.array(model_profile),
+        model_options_json=np.array(json.dumps(model_options, sort_keys=True)),
+        model_fallback_used=np.array(resolved_model != args.model),
+        qrels_semantics=np.array("graded_original" if args.graded_qrels else "binary_positive"),
+        model_load_failures_json=np.array(
+            json.dumps(
+                [{"model": name, "error_type": type(exc).__name__, "error": str(exc)} for name, exc in failures],
+                sort_keys=True,
+            )
+        ),
         doc_embeddings=doc_flat,
         doc_offsets=doc_offsets,
         query_embeddings=query_flat,

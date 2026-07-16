@@ -18,7 +18,7 @@ pip install --quiet -U nvidia-nccl-cu12
 # transformers 5.13.0 force-downgrades torch; 5.12.1 is the validated combo
 # and must install AFTER torch so the cu126 build is left untouched.
 pip install --quiet "transformers==5.12.1" datasets accelerate pillow
-BITMAX_BUILD_CUDA=1 pip install -e . --no-build-isolation --config-settings build-dir=/root/bitmax-build --quiet 2>&1 | tail -1
+MAXSIM_BUILD_CUDA=1 pip install -e . --no-build-isolation --config-settings build-dir=/root/bitmax-build --quiet 2>&1 | tail -1
 pytest -m cuda -q || { echo SUITE_FAILED_TESTS; exit 1; }
 python -c "import torch, transformers; transformers.ColQwen2ForRetrieval; print('encoder stack ok:', torch.__version__, transformers.__version__)"   || { echo SUITE_FAILED_ENCODER_STACK; exit 1; }
 pip install --quiet faiss-gpu==1.14.3 fast-plaid 2>&1 | tail -1 || echo "oss deps partial (allow-unavailable)"

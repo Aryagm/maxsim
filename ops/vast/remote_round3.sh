@@ -5,7 +5,7 @@ mkdir -p benchmark-results
 pip install --quiet --upgrade pip
 pip install --quiet scikit-build-core pybind11 numpy pytest scipy
 pip install --quiet -U torch --index-url https://download.pytorch.org/whl/cu126
-BITMAX_BUILD_CUDA=1 pip install -e . --no-build-isolation --config-settings build-dir=/root/bitmax-build --quiet 2>&1 | tail -1
+MAXSIM_BUILD_CUDA=1 pip install -e . --no-build-isolation --config-settings build-dir=/root/bitmax-build --quiet 2>&1 | tail -1
 pytest -m cuda -q
 python benchmarks/exp_qtile_sweep.py --output benchmark-results/qtile-sweep-plain.json
 python benchmarks/exp_qtile_sweep.py --output benchmark-results/qtile-sweep-token-scale.json --token-scale

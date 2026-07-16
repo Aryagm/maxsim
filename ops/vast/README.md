@@ -30,7 +30,7 @@ and appends them to `.vast/bitmax-instances.jsonl`.
 
 ```bash
 python -m ops.vast.vast_workflow remote-command <instance_id> \
-  'cd bitmax && BITMAX_BUILD_CUDA=1 python -m pip install -e ".[dev]" && pytest -m cuda'
+  'cd bitmax && MAXSIM_BUILD_CUDA=1 python -m pip install -e ".[dev]" && pytest -m cuda'
 ```
 
 ## Cleanup
@@ -46,4 +46,3 @@ Only execute after reviewing the printed `vastai destroy instance <id>` commands
 ```bash
 python -m ops.vast.vast_workflow destroy-owned --live-json live-instances.json --execute
 ```
-

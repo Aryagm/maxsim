@@ -8,9 +8,9 @@ nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader
 
 pip install --quiet --upgrade pip
 pip install --quiet scikit-build-core pybind11 numpy pytest
-BITMAX_BUILD_CUDA=1 pip install -e . --no-build-isolation --config-settings build-dir=/root/bitmax-build -v 2>&1 | tail -5
+MAXSIM_BUILD_CUDA=1 pip install -e . --no-build-isolation --config-settings build-dir=/root/bitmax-build -v 2>&1 | tail -5
 
-python -c "from bitmax import _bitmax_cuda; print('cuda ext OK:', _bitmax_cuda.__doc__)"
+python -c "from maxsim import _maxsim_cuda; print('cuda ext OK:', _maxsim_cuda.__doc__)"
 pytest -m cuda -q
 
 pip install --quiet transformers datasets accelerate pillow

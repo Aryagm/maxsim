@@ -7,8 +7,8 @@ mkdir -p caches benchmark-results
 pip install --quiet --upgrade pip
 pip install --quiet scikit-build-core pybind11 numpy pytest scipy
 pip install --quiet -U torch --index-url https://download.pytorch.org/whl/cu126
-BITMAX_BUILD_CUDA=1 pip install -e . --no-build-isolation --config-settings build-dir=/root/bitmax-build --quiet 2>&1 | tail -1
-python -c "from bitmax import _bitmax_cuda; print('ext ok, gate', _bitmax_cuda.get_dim128_unrolled_min_avg_tokens())"
+MAXSIM_BUILD_CUDA=1 pip install -e . --no-build-isolation --config-settings build-dir=/root/bitmax-build --quiet 2>&1 | tail -1
+python -c "from maxsim import _maxsim_cuda; print('ext ok, gate', _maxsim_cuda.get_dim128_unrolled_min_avg_tokens())"
 pytest -m cuda -q
 
 pip install --quiet transformers datasets accelerate pillow
