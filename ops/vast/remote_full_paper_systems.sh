@@ -8,6 +8,8 @@ RUN="${RUN:-/workspace/paper-systems-20260715}"
 PY="${PY:-/opt/conda/bin/python}"
 PLAID_PY="${PLAID_PY:-/workspace/plaid-env/bin/python}"
 SOURCE_COMMIT="${SOURCE_COMMIT:-unknown}"
+INPUT_MANIFEST="${INPUT_MANIFEST:-/workspace/paper-inputs.sha256}"
+CACHE_WAIT_SECONDS="${CACHE_WAIT_SECONDS:-21600}"
 
 export PYTHONUNBUFFERED=1
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
@@ -179,6 +181,39 @@ run_plaid() {
     --nbits 4 --n-full-scores 4096 --n-ivf-probe 4 --seed 42 --no-use-triton
 }
 
+wait_for_verified_inputs() {
+  test -s "$INPUT_MANIFEST"
+  local deadline=$((SECONDS + CACHE_WAIT_SECONDS))
+  local missing
+
+  while true; do
+    missing="$($PY - "$INPUT_MANIFEST" <<'PY'
+import sys
+from pathlib import Path
+
+manifest = Path(sys.argv[1])
+for line in manifest.read_text().splitlines():
+    if not line.strip():
+        continue
+    path = line.split(maxsplit=1)[1].lstrip(" *")
+    if not Path(path).is_file():
+        print(path)
+PY
+)"
+    if [[ -z "$missing" ]]; then
+      break
+    fi
+    if (( SECONDS >= deadline )); then
+      printf 'Timed out waiting for required caches:\n%s\n' "$missing" >&2
+      return 1
+    fi
+    printf 'Waiting for required caches:\n%s\n' "$missing"
+    sleep 30
+  done
+
+  sha256sum --check --strict "$INPUT_MANIFEST"
+}
+
 "$PY" - "$RUN/environment.json" "$SOURCE_COMMIT" "$PLAID_PY" <<'PY'
 import json
 import platform
@@ -217,6 +252,7 @@ run_case reducers_n4096 "$PY" -m benchmarks.run_cuda_reducers \
   --output "$RUN/results/reducers-n4096.json" --repeat 100 --warmup 20 \
   --batch 1 --query-tokens 32 --docs 4096 --min-doc-tokens 64 --max-doc-tokens 256 \
   --candidates 512 --dim 128 --seed 20260715
+run_case verify_input_caches wait_for_verified_inputs
 
 run_case quality_gte_scifact quality_matrix \
   caches-full/beir/beir-scifact-gte-moderncolbert.npz \
