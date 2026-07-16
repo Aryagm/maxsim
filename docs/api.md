@@ -34,8 +34,9 @@ Modes:
 - `binary`: fastest, 32x fp32 document compression on large corpora.
 - `binary_q40`: experimental 32x-ish q40 centroid calibration.
 - `int4`: tensor-scale int4 control, 8x fp32 document compression.
-- `int4_per_token`: quality-first int4 with a float32 scale per document token;
-  7.53x fp32 compression at dim 128. This is what `auto` and `max_quality` use.
+- `int4_per_token`: int4 with a float32 scale per document token; 7.53x fp32
+  compression at dim 128. This is what `auto` and `max_quality` use, but those
+  presets are convenience aliases rather than label-aware selectors.
 - `int4_residual`: two per-token int4 streams. With `rescore_candidates`,
   search scans the prefix and candidate reranking fuses prefix plus residual
   before reduction. Without a candidate budget, search scores the full fused

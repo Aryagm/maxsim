@@ -13,21 +13,31 @@
 \usepackage{xcolor}
 \usepackage{newtxtext,newtxmath}
 \usepackage{caption}
-\captionsetup{font=small,labelfont=bf,width=.92\linewidth}
 \usepackage[hidelinks]{hyperref}
+
+\captionsetup{font=small,labelfont=bf,width=.94\linewidth}
+\setlength{\textfloatsep}{10pt plus 2pt minus 2pt}
+\setlength{\floatsep}{8pt plus 2pt minus 2pt}
+\setlength{\intextsep}{8pt plus 2pt minus 2pt}
+
+\definecolor{deepteal}{HTML}{0B6E69}
+\definecolor{inkblue}{HTML}{2F5D8A}
+\definecolor{warmred}{HTML}{B64B3C}
+\definecolor{softgray}{HTML}{5F6872}
 
 \newcommand{\sysname}{\textsc{maxsim}}
 \newcommand{\ndcg}{NDCG@10}
+\newcommand{\recall}{Recall@10}
+\newcommand{\fp}{\textsc{fp}}
 
-\title{\textsc{maxsim}: A Compressed Runtime for Multi-Vector Retrieval\\
-\large A Measured Accuracy--Storage--Latency Frontier\\
-\large on ColPali-Style Visual Document Search}
+\title{\textsc{maxsim}: Model-Aware Compression for Multi-Vector Retrieval}
 
 \author{Arya Manjaramkar\\
-\texttt{arya@e3group.ai}}
+\href{https://github.com/Aryagm/maxsim}{github.com/Aryagm/maxsim}}
 
 \date{July 2026}
 
+\renewcommand{\shorttitle}{\textsc{maxsim}}
 \renewcommand{\headeright}{Preprint}
 \renewcommand{\undertitle}{Preprint}
 
@@ -35,587 +45,580 @@
 \maketitle
 
 \begin{abstract}
-Multi-vector retrieval models such as ColBERT, ColPali, and ColQwen deliver
-state-of-the-art quality by storing hundreds to thousands of token or patch
-vectors per document --- which makes storage and scoring, not the model, the
-main barrier to deployment. We present \sysname{}, a compressed late-interaction
-runtime for fixed-dimensional multi-vector embeddings: parity-tested CUDA
-reducers that are exact over stored compressed similarities, paired with a
-systematically measured primary-index frontier spanning
-$7.5\times$ to $96\times$ versus fp32 storage, so that existing
-late-interaction systems become dramatically smaller and faster without
-changing the model. Full scans add no approximation beyond compression;
-candidate cascades are exact only at a full-corpus budget. We validate the frontier on
-visual document retrieval, the setting where the storage problem is most
-acute. On the full ViDoRe benchmark (10 datasets, complete test splits,
-8{,}443 queries), a symmetric int4 format scored by a dp4a int8-query kernel
-retains dense-fp16 quality within $-0.0018$ \ndcg{} (95\% CI
-$[-0.0030,-0.0006]$) at $8\times$ compression, and 1-bit sign quantization
-retains it within $-0.0052$ at $32\times$. Our central empirical finding is
-that \emph{the tier ranking reorders with corpus scale}: per-token magnitude
-side-information significantly improves quality on small corpora
-($\le$\,500 documents) but significantly \emph{hurts} beyond
-$10^4$ documents, while token-pooled binary representations strengthen with
-scale --- at 10{,}171 and 25{,}000 documents, a $3\times$-pooled binary tier at
-$95.9\times$ compression reaches parity with unpooled binary (the sign of
-the small residual gap depends on the query set) and matches a PLAID-style
-baseline's recall@10 at $28\times$ less storage, answering 256 queries in
-0.46\,s on one RTX~4090. We replicate the tier ordering on a second
-visual embedding model, and a text-ColBERT replication on BEIR shows the
-frontier is additionally \emph{modality-dependent}: under the unit-normalized
-token embeddings conventional in text late interaction, magnitude
-side-information becomes a sparsity statistic that down-weights informative
-tokens, inverting its value. The released library therefore uses per-token
-int4 as its cross-modal quality-first default and leaves the geometry-sensitive
-binary and pooling alternatives explicit. We correct a $27\times$ latency
-inflation in a na\"ive dense baseline before citing speedups, and report a
-catalogue of measured negative results.
-Every kernel supporting a reported latency number is parity-tested, and every
-result derives from JSON artifacts in the release ledger: retrieval evaluations store
-per-query metrics, while production benchmarks store raw timing samples.
+Multi-vector retrieval improves accuracy by retaining a vector for every query
+and document token, but the resulting indexes are expensive to store and
+score. We present \sysname{}, a compression and CUDA runtime for
+fixed-dimensional dot-product late interaction. Its representations span
+$3.76\times$--$95.9\times$ compression relative to fp32, and its shared
+reducers implement MaxSim, weighted MaxSim, TopK2, TopK4, and SmoothSim.
+
+The central empirical result is that aggressive compression is
+\emph{model-dependent}. We evaluate four text and visual encoder families
+across 20 encoder--dataset combinations. Per-token int8 is the conservative
+control: it remains within 0.0063 \ndcg{} of dense in every evaluated cell.
+Per-token int4 is nearly lossless for Jina-ColBERT-v2 and the visual encoders,
+but loses 0.065 mean \ndcg{} on GTE-ModernColBERT. Binary and pooled-binary
+formats retain roughly 98\% of dense quality on the visual suites at
+$32\times$ and approximately $96\times$ compression, yet their losses are
+substantially larger for GTE. Thus none of the evaluated aggressive codecs is
+a defensible universal default across the tested encoders; the default must
+be a small, model-aware calibration procedure over a portfolio.
+
+We validate the systems consequences on 10,171 visual documents and 57,638
+text documents. On the visual corpus, binary and pool3 reduce single-query
+full-scan latency from 85.7\,ms to 3.32\,ms and 2.17\,ms while using 16.0 and
+47.9 times less storage than fp16. Across 24 nested-scale runs, these speedups
+remain consistent as the corpus grows. The five reducers match PyTorch within
+$2.44{\times}10^{-4}$, and candidate-only scoring is $4.5\times$--$5.7\times$
+faster than full scoring at 4,096 documents. We release the library, exact
+result artifacts, checksums, and deterministic paper-generation code.
 \end{abstract}
 
 \section{Introduction}
 
-Late-interaction retrieval~\citep{khattab2020colbert} scores a query against a
-document as a sum of per-query-token maxima over document token vectors
-(MaxSim). The paradigm now spans text (ColBERT) and visual documents
-(ColPali-family models~\citep{faysse2024colpali}), and its cost structure is
-the same everywhere: a document is hundreds to thousands of vectors, so a
-corpus of only $10^4$ visual pages already occupies gigabytes at fp32 ---
-storage, not compute, dominates deployment. \sysname{} addresses this as a
-runtime layer: its representations support fixed-dimensional dot-product late
-interaction, independent of the producing model, and the shipped CUDA reducers
-cover MaxSim, weighted MaxSim, TopK2/TopK4, and SmoothSim. Its \emph{interface}
-is that general; the primary \emph{empirical validation} in this paper uses
-MaxSim on visual document retrieval, the setting where the storage
-problem is most acute, with a text-ColBERT replication
-(Section~\ref{sec:text}) that measures --- rather than assumes --- the
-transfer.
+Late-interaction retrieval~\citep{khattab2020colbert} represents a query and
+document as sets of vectors and aggregates token-level similarities only at
+search time. This design supports strong text retrieval and, through
+ColPali-style encoders~\citep{faysse2025colpali}, direct retrieval over
+document images. It also changes the deployment bottleneck. A single
+document may contain hundreds of token or patch vectors, so even a modest
+corpus can require gigabytes of accelerator memory and a large dot-product
+reduction for every query.
 
-Compression of multi-vector representations is usually studied one technique
-at a time and on a single corpus size. Practitioners face a different
-question: \emph{given a corpus, which compression tier should be the default,
-and what exactly does each step of compression cost?} This paper answers that
-question empirically for visual late-interaction retrieval, with three
-contributions:
+Compression is the natural response, but ``which compression method should be
+the default?'' remains operationally unresolved across encoder families.
+Binary signs, scalar quantization, token pooling, and residual codes make
+different assumptions about embedding geometry. A method that is nearly free
+for one encoder may erase useful structure for another. Evaluations on one
+model or one corpus cannot reveal that failure mode.
+
+This paper studies compression as a \emph{portfolio} rather than a single
+codec. \sysname{} stores the same multi-vector index in several formats,
+scores the stored similarities with parity-tested CUDA kernels, and exposes a
+common reducer interface. We then ask three practical questions:
 
 \begin{enumerate}
-\item \textbf{A measured five-tier frontier} (Figure~\ref{fig:formats}) ---
-binary signs ($32\times$), binary with fp16 or 4-bit-log per-token scales
-($28.4\times$/$31\times$), symmetric int4 ($8\times$), and token-pooled binary
-($63.9\times$/$95.9\times$) --- evaluated jointly on quality, storage, and
-wall-clock latency with parity-tested CUDA kernels that reduce the stored
-compressed similarities exactly, including a dp4a
-int8-query kernel that accelerates int4 scoring $4.2\times$ with bit-identical
-ranking.
-\item \textbf{A scale-dependence finding} (Figure~\ref{fig:scaleflip}):
-per-token magnitude restoration is a \emph{small-corpus} optimization --- a
-significant gain at $\le$\,500 documents that inverts into a significant loss
-at $10^4$+ documents --- while token pooling improves relatively with scale,
-to the point that a $95.9\times$-compressed pooled tier beats uncompressed-bit
-binary at 10k and 25k documents under the 256-query protocol; a full-query
-re-evaluation reverses the small 10k gap. Binary side-information and pooling choices
-should therefore be corpus-size-aware.
-\item \textbf{Measurement hygiene results} that materially change headline
-claims: a vectorized dense baseline (score-identical to the na\"ive
-per-document loop) is $27\times$ faster, deflating ``speedup vs.\ dense''
-claims accordingly; and six attractive-but-ineffective techniques are
-documented with evidence, including two fully implemented CUDA kernels that
-lost to simpler baselines.
+\item Which formats preserve retrieval quality across text and visual
+encoders?
+\item How do the quality, storage, and latency trade-offs behave as the
+benchmark corpus grows?
+\item Does the runtime extend beyond MaxSim without duplicating a custom
+kernel for every late-interaction reducer?
 \end{enumerate}
 
-\section{Related Work}
+The answers are useful precisely because they are not uniform. Per-token int8
+is consistently near dense, but its $3.88\times$ compression versus fp32 is
+modest. Per-token int4 provides a stronger $7.53\times$ point and is
+near-lossless for Jina and both visual families, but not for GTE.
+Binary and pool3 provide the largest latency and storage gains on visual
+documents, while GTE needs a higher-fidelity representation. The result is a
+simple deployment rule: use a conservative control, measure a handful of
+aggressive formats on a held-out query set, and choose the smallest format
+that meets the application's quality budget.
 
-\textbf{Late interaction and PLAID.} ColBERT~\citep{khattab2020colbert} and
-ColBERTv2~\citep{santhanam2022colbertv2} introduced token-level late
-interaction and residual compression; PLAID~\citep{santhanam2022plaid}
-accelerates it with centroid interaction. ColPali~\citep{faysse2024colpali}
-transfers the paradigm to document images. We compare against
-\texttt{fast-plaid}, a modern PLAID-style implementation, and dense fp16
-MaxSim as the quality ceiling.
+Our contributions are:
 
-\textbf{Vector compression.} Binary sign quantization with asymmetric scoring
-(float query $\times$ binary document) is classical~\citep{jacob2018quant}, and
-per-vector scale restoration relates to product-quantization residual ideas
-\citep{jegou2011pq}. Learned rotations (ITQ~\citep{gong2013itq}) reduce
-binarization error for symmetric Hamming retrieval; we find they do not
-transfer robustly to asymmetric MaxSim (Section~\ref{sec:negative}).
+\begin{enumerate}
+\item \textbf{A unified compression runtime.} The released representations
+cover $3.76\times$--$95.9\times$ compression versus fp32. A shared CUDA
+reducer supports five dot-product late-interaction scorers over binary and
+int4 indexes, for both full-corpus and candidate-only scoring.
+\item \textbf{A controlled cross-model map.} Four encoder families and 20
+encoder--dataset evaluations show that compression behavior is
+encoder-dependent, not determined by modality alone. Per-token int8 provides
+a near-lossless control; the best aggressive tier must be calibrated.
+\item \textbf{Systems and scale evidence.} Two end-to-end corpora, 24
+nested-scale runs, matched FastPLAID baselines, and raw latency distributions
+quantify quality, storage, throughput, and index lifecycle costs on one
+RTX~4090.
+\end{enumerate}
 
-\textbf{Token pruning and pooling.} Reducing the number of stored vectors per
-document via clustering has been explored for ColBERT-style
-models~\citep{clavie2024pooling}. We measure hierarchical mean-pooling at
-factors 2--3 jointly with bit-level quantization and find the combination
---- not pooling alone --- defines the extreme end of the frontier.
+\section{Background and System}
 
-\section{Compression Tiers and Kernels}
+\subsection{A common late-interaction interface}
 
-\subsection{Storage formats}
-All tiers store per-document token matrices $X \in \mathbb{R}^{n_d \times 128}$
-under MaxSim scoring $s(q,d)=\sum_i \max_j \langle q_i, x_j\rangle$.
-Figure~\ref{fig:formats} shows the exact byte budget of every format.
+Let a query contain vectors $q_1,\ldots,q_m$ and document $d$ contain vectors
+$x_1,\ldots,x_n$. We write a family of dot-product late-interaction scorers as
+\begin{equation}
+S(q,d)=\sum_{i=1}^{m} w_i\,
+\rho\!\left(\left\{\langle q_i,x_j\rangle\right\}_{j=1}^{n}\right),
+\label{eq:general}
+\end{equation}
+where $\rho$ is a reducer over document tokens. MaxSim uses a maximum and
+$w_i=1$. Weighted MaxSim changes $w_i$; TopK2 and TopK4 aggregate the largest
+two or four similarities; SmoothSim replaces the hard maximum with a
+temperature-controlled smooth reduction.
+
+Compression changes how each dot product is reconstructed, but not the
+reduction structure. This separation is the basis of the shared CUDA
+implementation in Section~\ref{sec:reducers}. End-to-end retrieval quality in
+this paper is evaluated with MaxSim. The other reducers are evaluated for
+numerical parity and runtime, which supports implementation generality but is
+not a claim that their retrieval quality is interchangeable.
+
+\subsection{Representation portfolio}
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=.8\linewidth]{figures/format_layout.pdf}
-\caption{Stored bytes per 128-dimensional token for every released format
-(log scale). $^{\dagger}$Pooled tiers store 16 bytes per \emph{cluster};
-the effective per-original-token budget shown here divides by the pooling
-factor. Compression labels include offsets and scale side-information, using
-the 10k corpus for the original frontier and the Table~\ref{tab:production-cuda}
-shape for per-token and residual int4.}
+\includegraphics[width=.84\linewidth]{figures/format_layout.pdf}
+\caption{Storage per 128-dimensional document token. Pooled-binary storage is
+shown per original token at pooling factor three.}
 \label{fig:formats}
 \end{figure}
 
-\textbf{Binary (32$\times$).} $x_j \mapsto \mathrm{sign}(x_j)$ packed to 16
-bytes per token; scoring is asymmetric (fp32 query against $\pm1$ documents).
+Figure~\ref{fig:formats} summarizes the storage ladder. All compressed
+formats are built post hoc from document embeddings; the encoder is unchanged.
 
-\textbf{Per-token scales (28.4$\times$/31$\times$/30.1$\times$).} Binary signs
-plus one magnitude $\sigma_j = \mathrm{mean}|x_j|$ per token, applied to the
-dot product \emph{before} the per-query-token max. Scales are stored as fp16
-(2 bytes), 16 log-spaced levels (4 bits, \texttt{u4}), or 256 log-spaced
-levels (1 byte, \texttt{u8}). Sixteen levels are statistically
-indistinguishable from fp16 (paired $\Delta = -0.00003$, $p{=}1.0$ over
-8{,}443 queries; Table~\ref{tab:significance}), so \texttt{u4} strictly
-dominates \texttt{u8}.
+\textbf{Binary.} Each document value is replaced by its sign and packed into
+one bit. Queries remain floating point. At dimension 128 this uses 16 bytes
+per token, $16\times$ smaller than fp16 and $32\times$ smaller than fp32.
 
-\textbf{Symmetric int4 (8$\times$/7.53$\times$).} Two signed 4-bit values per
-byte with either one per-tensor scale or one float32 scale per token. The
-released per-token representation occupies 68 bytes per dim-128 token. An
-early 256-document exact-grid simulation rejected that variant ($-0.011$
-\ndcg{}); the larger text, visual, and audio evaluations in
-Section~\ref{sec:text} reverse that conclusion.
+\textbf{Scaled binary.} One 4-bit logarithmic magnitude value is stored per
+token and applied before the reducer. This restores magnitude information at
+little storage cost, but it is only useful when that magnitude correlates
+with retrieval salience.
 
-\textbf{Residual int4 (3.76$\times$).} Two per-token int4 streams encode a
-coarse prefix and its quantized residual. Candidate scoring reconstructs their
-combined similarity before reduction; the cascade uses the prefix for coarse
-selection and reads both streams only for the selected documents. Thus
-$M<N$ may miss documents from the full-residual top-$k$; $M=N$ bypasses coarse
-selection and exactly matches stable full-residual ranking.
+\textbf{Pooled binary.} Document tokens are clustered independently within
+each document, mean-pooled, and then binarized. Pool3 targets one stored vector
+per three original vectors and reaches approximately $48\times$ compression
+versus fp16, or $96\times$ versus fp32.
 
-\textbf{Pooled binary (63.9$\times$/95.9$\times$).} Ward clustering of each
-document's tokens on the unit sphere to $\lceil n_d/f \rceil$ clusters
-($f\in\{2,3\}$), mean-pooled then sign-quantized. Pooling composes poorly with
-per-token scales (Section~\ref{sec:negative}); the pooled tiers are pure
-binary.
+\textbf{Int4.} Two signed 4-bit values are packed per byte. We evaluate a
+single tensor scale and one fp32 scale per token. The latter uses 68 bytes per
+128-dimensional token and reaches $3.76\times$ compression versus fp16
+($7.53\times$ versus fp32).
 
-\subsection{CUDA kernels}
-Documents are GPU-resident (packed bits, offsets, optional scale vectors).
-Three scoring kernels are routed by corpus shape: a generic bit-unpack kernel;
-an unrolled dim-128 kernel, which a tokens-per-document gate (threshold 256,
-determined by a warm-up$+$median microbenchmark sweep;
-Table~\ref{tab:kernels}) extends from its original $\le$128-document
-restriction to all long-document corpora for a $\sim$2$\times$ gain at every
-corpus size tested; and a dp4a kernel for int4 that quantizes queries to int8
-on-device (one positive scale per query token, applied after that token's
-document-token maximum), permutes them to match the nibble interleave, and accumulates with
-\texttt{\_\_dp4a}, yielding $4.2\times$ over fp32-query int4 scoring with
-quality identical to four decimals. Document-token scales are instead applied
-to every similarity \emph{before} MaxSim or another reducer. The two-stream
-residual path fuses prefix and residual similarities in the same reduction and
-uses an independently tuned adaptive launch on SM89: four warps below eight
-query tokens and eight warps from eight upward. All kernels preserve
-exact empty-document semantics and deterministic lower-index tie-breaking,
-verified by parity tests against CPU references.
+\textbf{Int8 control.} One int8 vector and one fp32 token scale use 132 bytes
+per token. This format is less aggressive ($1.94\times$ versus fp16), but it
+tests whether the model can be compressed with negligible quantization loss.
 
-\begin{table}[t]
-\centering
-\small
-\input{tables/production_cuda}
-\caption{Production MaxSim CUDA validation on one RTX 4090: 4,096 documents,
-64--192 tokens/document, query shape $4\times32\times128$, three runs of 20
-calls. Per-token full-scan overhead over tensor-scale int4 is 0.2\%; the
-int8-query top-$k$ path is $3.08\times$ faster than fp32-query top-$k$.
-All correctness and performance gates pass.}
-\label{tab:production-cuda}
-\end{table}
+\textbf{Residual int4.} A second int4 stream represents the residual from the
+first. Full scoring reconstructs both streams before reduction. It provides a
+$1.88\times$ fp16 compression point intended for models that reject more
+aggressive formats.
 
-\section{Experimental Setup}
+\subsection{CUDA runtime}
 
-\textbf{Data.} The ViDoRe benchmark: DocVQA, InfoVQA, ArxivQA, TabFQuAD,
-TAT-DQA, and five SyntheticDocQA domains at full test splits (6{,}729 unique
-pages, 8{,}443 queries); a 10{,}171-document unique mixed corpus assembled
-from fourteen ViDoRe sources (256 held-out queries); and a 25{,}000-document
-stress corpus. Documents and queries are embedded with
-\texttt{vidore/\allowbreak colqwen2-v1.0-hf} (dim 128); a four-dataset replication
-uses \texttt{vidore/\allowbreak colpali-v1.3-hf}. Embeddings are built at batch size~1: we
-found the reference builder is \emph{not batch-faithful} (batch-4 embeddings
-correlate with batch-1 at mean cosine $0.19$), so batch-1 is load-bearing;
-throughput is recovered by running many single-page builder processes
-concurrently on one large-memory GPU, which preserves fidelity exactly.
+Packed document arrays and offsets remain GPU-resident. Binary paths unpack
+signs inside the scoring kernel; int4 paths unpack nibbles and apply tensor or
+token scales before reduction. Dim-128 fast paths use fixed-width vectorized
+loads and measured launch policies. Candidate-only entry points gather only
+the requested document ranges, which is important when \sysname{} is used as
+a reranker behind an approximate or lexical first stage.
 
-\textbf{Measurement.} All retrieval measurements use one RTX~4090. Quality
-runs use repeat-3 batched scoring with per-query \ndcg{} vectors persisted for
-paired analysis; kernel-level latency claims use warm-up$+$median
-microbenchmarks. The dense fp16 reference is computed two ways: the na\"ive
-per-document loop found in many harnesses, and a vectorized implementation
-(one flat fp16 matmul per query plus a segment-max, validated score-identical).
-The loop implementation overstates dense latency $27\times$ (166\,s vs.\
-6.04\,s at 10k documents); \emph{all speedups below are relative to the
-vectorized baseline}. Statistical claims use paired per-query deltas pooled
-over the suite with $10^4$-sample bootstrap CIs and two-sided sign tests.
+The current implementation uses specialized MaxSim entry points for its
+long-established fast path and a shared reducer policy for the general
+interface. The shared path was tuned on SM89, including removal of TopK4
+register spills. Every reported kernel is checked against a PyTorch reference
+with deterministic lower-index tie-breaking.
 
-\section{Results}
+\section{Experimental Design}
 
-\subsection{Quality across the full suite}
+\subsection{Quality matrix}
 
-\begin{table}[t]
-\centering
-\caption{Full ViDoRe suite (10 datasets, complete test splits, 8{,}443
-queries): mean \ndcg{}, paired delta vs.\ dense fp16 with 95\% bootstrap CI,
-and storage compression vs.\ fp32. Latency is the suite-mean batched query-set
-time on an RTX 4090. Exact per-dataset values are in
-Table~\ref{tab:perdataset-full} (Appendix~\ref{app:exact}).}
-\label{tab:suite}
-\small
-\begin{tabular}{lrrrr}
-\toprule
-tier & \ndcg{} & paired $\Delta$ vs.\ dense [CI$_{95}$] & compr. & latency \\
-\midrule
-dense fp16 & 0.4559 & --- & $2\times$ & 6.0\,s$^{\dagger}$ \\
-int4 $+$ dp4a & 0.4545 & $-0.0018$ $[-0.0030,-0.0006]$ & $8\times$ & 0.55\,s \\
-binary & 0.4497 & $-0.0052$ $[-0.0071,-0.0033]$ & $32\times$ & 0.34\,s \\
-pool2 binary & 0.4485 & $-0.0073$ $[-0.0095,-0.0051]$ & $63.9\times$ & 0.22\,s \\
-fp16 token scales & 0.4484 & $-0.0067$ $[-0.0088,-0.0047]$ & $28.4\times$ & 0.34\,s \\
-u4 token scales & 0.4482 & $-0.0067$ $[-0.0088,-0.0047]$ & $31.0\times$ & 0.34\,s \\
-pool3 binary & 0.4473 & $-0.0089$ $[-0.0112,-0.0066]$ & $95.9\times$ & 0.22\,s \\
-\bottomrule
-\multicolumn{5}{l}{\footnotesize $^{\dagger}$vectorized dense at the 10k
-corpus; suite-mean loop-dense is reported in the artifact ledger.}
-\end{tabular}
-\end{table}
-
-\begin{table}[t]
-\centering
-\caption{All pairwise statistical comparisons over the pooled suite (8{,}443
-paired queries): mean per-query $\Delta$\ndcg{}, $10^4$-sample bootstrap 95\%
-CI, win/loss/tie counts, and two-sided sign-test $p$-value. Positive favors
-the first-named method. Figure~\ref{fig:forest} plots the same data.}
-\label{tab:significance}
-\small
-\input{tables/significance}
-\end{table}
-
-Table~\ref{tab:suite} summarizes the suite; Table~\ref{tab:significance} and
-Figure~\ref{fig:forest} give every pairwise comparison with exact effect
-sizes, confidence intervals, win/loss counts, and $p$-values.
-int4$+$dp4a is the strongest compressed tier everywhere: its paired deficit
-versus dense is $-0.0018$ \ndcg{} --- statistically detectable
-($p{=}0.005$) but far below any practical significance threshold --- and it
-\emph{significantly outperforms} binary ($+0.0034$, $p{=}10^{-4}$). The four
-SyntheticDocQA domains score near 0.10 for every method including dense,
-diluting suite means uniformly without affecting comparisons;
-Figure~\ref{fig:perdataset} therefore plots per-dataset \emph{deltas} against
-dense, which are readable at every magnitude, and
-Table~\ref{tab:perdataset-full} records the absolute values.
-
-\begin{figure}[t]
-\centering
-\includegraphics[width=.82\linewidth]{figures/per_dataset.pdf}
-\caption{Per-dataset quality deltas versus dense fp16 (full test splits,
-ColQwen2). Each row is one dataset scored on an identical corpus and query
-set; the dense absolute \ndcg{} is given in the row label. Natural-document
-datasets (top block) separate the tiers; the SyntheticDocQA domains (bottom
-block) are within $\pm 0.004$ of dense for every tier.}
-\label{fig:perdataset}
-\end{figure}
-
-\begin{figure}[t]
-\centering
-\includegraphics[width=.78\linewidth]{figures/forest.pdf}
-\caption{Paired per-query \ndcg{} deltas with 95\% bootstrap confidence
-intervals, pooled over the full suite (8{,}443 queries; two-sided sign tests;
-``n.s.''\ marks $p \ge 0.05$). Positive favors the first-named method.}
-\label{fig:forest}
-\end{figure}
-
-\subsection{The tier ranking reorders with corpus scale}
-
-\begin{figure}[t]
-\centering
-\includegraphics[width=.8\linewidth]{figures/scale_flip.pdf}
-\caption{Quality of each tier relative to plain binary across four corpus
-scales, with terminal values annotated (256-query comparison protocol).
-Vertical bands at the suite point are 95\% bootstrap CIs from
-Table~\ref{tab:significance}. Token-scale tiers win only on the smallest
-corpus; pooled tiers strengthen monotonically with scale, though the sign of
-the small pool3--binary gap at 10k+ is query-set-dependent
-(Section~5.2). Each point compares methods on an identical corpus; corpora
-differ between points.}
-\label{fig:scaleflip}
-\end{figure}
-
-Figure~\ref{fig:scaleflip} is the central result. On a 256-document corpus,
-fp16 token scales recover 86\% of the binary-to-dense gap ($+0.0092$ over
-binary). Pooled over the 0.5--1.7k-document suite, the same tier is already
-\emph{significantly below} plain binary ($-0.0015$, $p{=}0.003$), and at
-10{,}171 documents the deficit grows to $-0.0059$. Pooling shows the opposite
-trend: pool3 costs $-0.0133$ versus binary at 256 documents but reaches
-$+0.0112$ at 10k and $+0.0238$ at 25k on the 256-query comparison protocol.
-A re-evaluation of the same 10k corpus under its full 17{,}763-query set
-reverses the residual gap ($-0.0062$), so we claim the robust form of the
-finding: pooling's \emph{relative} quality improves monotonically with
-corpus scale, from clearly-losing at hundreds of documents to
-query-set-dependent parity at $10^4$+ --- while its storage advantage is
-unconditional. The same large-query evaluation sweeps pooling factors 2--6
-and finds monotone decline ($0.5821/0.5795/0.5760/0.5726/0.5700$ vs.\
-binary $0.5857$): there is no pooling scaling law; factors beyond 3 are
-strictly dominated, and the frontier's extreme end is pool2--pool3.
-We attribute the token-scale reversal
-to magnitude heterogeneity across a mixed corpus --- high-norm tokens from
-foreign documents win per-query-token maxima that sign information alone
-would not grant them --- and pooling's relative strength at scale to its
-denoising of near-duplicate patches, which grow more confusable as the corpus
-grows. Practical consequence: \textbf{binary side-information and pooling
-choices should be evaluated at the target corpus size}, and small-slice
-benchmarks actively mislead tier selection. The released library does not
-infer a format from corpus size: its default \texttt{auto} tier uses per-token
-int4 unconditionally, the most consistent 8$\times$-class format across the broader
-cross-modal evaluation in Section~\ref{sec:text}.
-
-\subsection{The 10k frontier and baselines}
-
-\begin{figure}[t]
-\centering
-\includegraphics[width=.8\linewidth]{figures/pareto_10k.pdf}
-\caption{Quality versus compression on the 10{,}171-document unique corpus
-(256 queries, repeat 3), each point annotated with exact \ndcg{} and
-query-set latency. The step line traces the efficient frontier among measured
-systems; the shaded band marks $0.01$ \ndcg{} below dense. FAISS mean-pooling
-(746$\times$, \ndcg{} 0.036) is omitted for scale.}
-\label{fig:pareto}
-\end{figure}
-
-\begin{figure}[t]
-\centering
-\includegraphics[width=.78\linewidth]{figures/latency_10k.pdf}
-\caption{Query-set latency at 10k documents (log scale) with speedups over
-the vectorized dense baseline. Faded marks are superseded implementations
-retained for reference: the loop-bound dense baseline and the fp32-query int4
-kernel.}
-\label{fig:latency}
-\end{figure}
-
-\begin{table}[t]
-\centering
-\caption{The 10{,}171-document unique mixed corpus (256 queries, repeat~3,
-RTX~4090): \ndcg{}, recall@10, MRR@10, best-of-3 query-set latency, speedup
-vs.\ the vectorized dense baseline, and compression vs.\ fp32.
-$^{\ast}$fast-plaid latency is not cited (n/c): across three runs at identical
-tuned parameters it varied 23.5--820\,s (Section~\ref{sec:limitations}).
-FAISS mean-pooling collapses because single-vector pooling discards the
-late-interaction structure.}
-\label{tab:tenk}
-\small
-\input{tables/tenk}
-\end{table}
-
-Table~\ref{tab:tenk} and Figures~\ref{fig:pareto} and~\ref{fig:latency}
-show the 10k corpus.
-int4$+$dp4a reaches \ndcg{} 0.5008 (dense: 0.5068) in 1.12\,s
-($5.4\times$ dense speed); pool3 reaches 0.4968 at $95.9\times$ compression in
-0.46\,s ($13.1\times$); binary 0.4856 at $32\times$ in 0.68\,s ($8.8\times$).
-Single-vector baselines collapse (FAISS GPU mean-pooling: \ndcg{} 0.036),
-confirming that late interaction is doing the retrieval work.
-\texttt{fast-plaid} matches dense quality (0.5117) at $3.4\times$ compression.
-Notably, pool3 ties fast-plaid's recall@10 (0.6133) at $28\times$ less
-storage.
-
-\subsection{Generality across embedding models}
-Replicating four datasets with ColPali-v1.3 preserves the tier ordering
-(dense 0.8208 mean; int4$+$dp4a 0.8122; binary 0.8069; all tiers within
-0.015 of dense), indicating the frontier is a property of the representation
-family rather than one model. Exact values are in
-Table~\ref{tab:perdataset-colpali}.
-
-\subsection{Text replication: the frontier is modality-dependent}
-\label{sec:text}
-
-\begin{table}[t]
-\centering
-\caption{Text-ColBERT replication (\texttt{GTE-ModernColBERT-v1}, BEIR test
-splits): exact \ndcg{} per tier. Under unit-normalized token embeddings the
-visual-corpus tier ordering does not transfer: token scales collapse,
-per-tensor int4 under-quantizes, and int4 vs.\ binary flips between
-datasets. $^{\ast}$FiQA scored by the exact CPU simulation of each format
-(the na\"ive dense baseline is impractical at 57k documents); other rows are
-repeat-3 GPU measurements.}
-\label{tab:text}
-\footnotesize
-\setlength{\tabcolsep}{3.6pt}
-\input{tables/text_beir}
-\end{table}
-
-Applying the identical ladder to a text ColBERT model
-(Table~\ref{tab:text}) is deliberately adversarial to our own defaults, and
-it falsifies two of them. Text ColBERT models emit \emph{unit-normalized}
-token vectors (measured norm dispersion $<10^{-4}$), and this single
-geometric property reorders the frontier. (i)~\textbf{Token scales become
-harmful at every corpus size}: with unit norms, $\mathrm{mean}|x_j|$ no
-longer measures salience but \emph{anti-sparsity} --- spiky, informative
-rare-term tokens receive the lowest scales --- and quality collapses (SciFact
-0.342 vs.\ 0.678 binary) despite the scale vector spanning only
-$[0.067,0.077]$. The effect is score-exact on CPU and CUDA (max deviation
-$10^{-6}$); it is the data, not the kernels. (ii)~\textbf{Per-tensor int4
-under-quantizes}: unit-norm values concentrate near $|x|\!\approx\!0.09$
-under a $\max|x|=0.39$ range, leaving $\sim$2 effective levels; int4 loses
-$-0.256$ on SciFact yet is the \emph{best} compressed tier on NFCorpus
-($-0.053$) --- the int4/binary ordering flips even within modality.
-(iii)~\textbf{Binary and pooled binary are the robust text tiers}, retaining
-86--89\% of dense \ndcg{} on SciFact at $32\times$--$96\times$, though the
-absolute gap ($-0.08$ to $-0.11$) is an order of magnitude larger than on
-visual corpora --- text late interaction needs text-tuned formats
-(per-channel or per-token int4 scales) before compression is as close to
-free as it is for visual documents. (iv)~The \texttt{binary\_q40} centroid
-calibration, benign on visual corpora, collapses to near-random on text
-(0.006/0.026) --- its threshold placement assumes skewed activations.
-(v)~\textbf{Pooling does not transfer either}: at 57{,}638 FiQA documents,
-pool2/pool3 (0.257/0.236) both lose to plain binary (0.277) --- the
-denoising that makes pooling \emph{gain} with scale on visual corpora relies
-on near-duplicate patch redundancy that text tokens lack --- and the binary
-tier's deficit itself grows with text corpus size ($-0.08$ at 5k, $-0.18$ at
-57k documents), the mirror image of the visual trend.
-
-\textbf{A tuned tier closes most of the text gap.} The int4 failure isolates
-to its \emph{scale granularity}. Re-quantizing with one scale per
-\emph{token} (stored as float32 in the released format; 68 bytes/token and
-$7.53\times$ total at dim 128) in exact-grid simulation:
+The primary matrix contains four encoder families. The text encoders are
+Jina-ColBERT-v2~\citep{jha2024jina} and
+GTE-ModernColBERT~\citep{chaffin2025pylate,chaffin2025gte}; the visual
+encoders are ColPali-v1.3~\citep{faysse2025colpali} and the released
+ColQwen2-v1.0 checkpoint~\citep{vidore2025colqwen2}.
 
 \begin{center}
-\footnotesize
-\begin{tabular}{l r r r r r}
+\small
+\begin{tabular}{llll}
 \toprule
- & binary ($32\times$) & int4/tensor & int4/token & int4/channel & dense \\
+encoder & modality & evaluation & datasets \\
 \midrule
-SciFact & 0.678 & 0.505 & 0.698 & \textbf{0.700} & 0.761 \\
-NFCorpus & 0.267 & 0.323 & \textbf{0.360} & 0.359 & 0.377 \\
-FiQA 57k & 0.277 & 0.209 & \textbf{0.339} & 0.286 & 0.456 \\
-visual 10k$^{\dagger}$ & 0.597 & 0.605 & \textbf{0.607} & 0.606 & --- \\
+Jina-ColBERT-v2 & text & BEIR full test & FiQA, NFCorpus, SciFact \\
+GTE-ModernColBERT & text & BEIR full test & FiQA, NFCorpus, SciFact \\
+ColPali-v1.3 & visual & ViDoRe full test & 4 document QA sets \\
+ColQwen2-v1.0 & visual & ViDoRe full test & 10 document QA sets \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-Per-token int4 beats binary on \emph{every} text dataset ($+0.02$ to
-$+0.09$; NFCorpus reaches $-0.017$ from dense) and is also the best
-measured variant on the visual corpus ($^{\dagger}$2{,}000 sampled queries).
-It wins three of these four datasets; per-channel int4 leads SciFact by
-0.0022, making per-token the most consistent default rather than a universal
-winner. Notably, we had rejected per-token int4 scales earlier on a
-256-document slice ($-0.011$, Section~\ref{sec:negative}); at realistic
-scale and across modalities the sign flips --- our own negative result was a
-small-slice artifact, which is precisely this paper's thesis applied to
-itself.
+The matrix contains 20 encoder--dataset cells. For Jina, GTE, and ColPali,
+every format is evaluated on the same embeddings, query IDs, corpus, and
+relevance judgments, with per-query \ndcg{} and \recall{} retained. ColQwen2
+combines a historical dense/binary/pool sweep with later int4/int8 controls
+joined by dataset metadata; because the historical files lack query
+identifiers, per-query recall, and cache hashes, those cross-format deltas are
+supporting rather than paired evidence.
 
-\textbf{Audio replication.} Embedding the Clotho evaluation split (1{,}045
-audio clips, caption-to-clip retrieval) with the audio-capable
-late-interaction model \texttt{ColQwen-Omni-v0.1}: dense 0.3129, per-token
-int4 0.3130, tensor-scale int4 0.3133, per-channel int4 0.3134, binary 0.2904,
-and pool2/pool3 0.2761/0.2760. Audio-token embeddings are not unit-normalized;
-all three int4 variants tie dense within 0.0005 while pooling is costly.
+For BEIR, all positive relevance labels are binarized to preserve
+comparability with the historical GTE caches; the reported \ndcg{} therefore
+uses binary relevance.
 
-Across the evaluated text, visual, and audio families, the released
-\texttt{auto} tier therefore selects per-token int4 unconditionally; it does
-not inspect token-norm dispersion or corpus size. Binary magnitude
-restoration and pooling remain geometry- and scale-dependent explicit modes.
-That distinction is the strongest form of this paper's thesis: format choices
-beyond the cross-modal default must be measured, not assumed.
+\subsection{End-to-end corpora and scale protocol}
 
-\section{Negative Results}
-\label{sec:negative}
+The text end-to-end corpus is the full FiQA index encoded with
+GTE-ModernColBERT: 57,638 documents and 648 queries. The visual corpus
+contains 10,171 unique pages from public ViDoRe sources encoded with
+ColQwen2; 2,000 selected queries are used. All formats report encoded bytes,
+quality, latency, and throughput; compressed formats additionally report
+serialized bytes and index construction/loading. These are production-path
+benchmarks, not measurements of live serving traffic.
 
-Six techniques were implemented, measured, and rejected; a seventh early
-negative reversed at realistic scale. We report all seven because each looks
-attractive on paper. (i)~\emph{dp4a for the binary path}:
-quality-clean but 5--17\% slower --- the unrolled fp32 kernel is
-bandwidth-bound, so ALU savings cannot pay for the quantization pass.
-(ii)~\emph{One-pass query-tiled scoring}: $\sim$9$\times$ slower from 12\,MB
-to 300\,MB corpora; per-block document rows are already L1-resident across
-query tokens, and tiling moves query operands from registers to shared
-memory. (iii)~\emph{ITQ rotations}: pooled-tier deltas of
-$+0.006/+0.003/-0.005/-0.007$ across four 256-query slices --- per-corpus sign
-flips; large small-slice gains (up to $+0.047$) did not replicate.
-(iv)~\emph{Scale refinements} (tempering $\sigma^\alpha$, quantile clipping,
-centroid combinations, salience-aware and similarity-threshold pooling):
-all neutral-to-worse; plain mean-absolute scales are a local optimum.
-(v)~\emph{Cluster-mass-weighted pooled scales}: catastrophic (\ndcg{}
-0.29--0.80) --- under MaxSim, large background clusters must not amplify their
-match scores. (vi)~\emph{An initial per-token int4 trial}: $-0.011$ \ndcg{}
-on a 256-document slice, a negative result reversed by the larger evaluation
-in Section~\ref{sec:text}. (vii)~\emph{Inverted and spikiness scales on
-unit-norm text}: the anti-sparsity mechanism of Section~\ref{sec:text}
-suggests \emph{inverting} the scale should recover salience; measured on
-both BEIR datasets, inversion indeed beats mean-abs (0.371/0.186 vs.\
-0.343/0.159) --- confirming the mechanism's direction --- but every
-reweighting still loses to plain binary (0.678/0.266), and
-max-abs/spikiness weights collapse to $\approx$\,0. On unit-normalized
-embeddings, no per-token magnitude statistic we tested carries exploitable
-salience; flat binary is locally optimal.
+Nested-scale experiments use a fixed 256-query protocol and three corpus
+seeds. Visual runs use 1k, 5k, and 10k documents; FiQA runs use 1k, 5k, 10k,
+25k, and 57,638 documents. Every relevant document is retained as distractors
+are added, so each method sees the same query set at every size within a seed.
+There are 24 completed scale cases in total.
+
+\subsection{Baselines and measurement}
+
+Dense fp16 is vectorized as flat matrix multiplications over large
+document-token chunks followed by segmented maxima. This avoids the severe
+latency inflation of a Python document-by-document loop.
+FastPLAID~\citep{santhanam2022plaid} is configured with 4-bit codes, four IVF
+probes, and 4,096 full scores. It is an approximate index, whereas the
+\sysname{} rows are full scans over their stored representations, so the
+comparison is informative but not algorithmically identical.
+
+All GPU measurements use one RTX~4090 (SM89). End-to-end latency uses three
+warm-up calls and three measurements per query. Scale points use three timing
+repeats. Small positive quality differences from dense in the visual
+end-to-end table should not be read as improvements: the dense path stores
+fp16 queries while some compressed paths receive fp32 queries, which can
+change ties at the fourth decimal.
+
+\section{Results}
+
+\subsection{Compression is model-dependent}
+\label{sec:quality}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=.93\linewidth]{figures/model_format_heatmap.pdf}
+\caption{Macro \ndcg{} retention relative to dense for four encoder families.
+The same codec can be near-lossless for one encoder and unsafe for another.}
+\label{fig:heatmap}
+\end{figure}
+
+\begin{table}[t]
+\centering
+\caption{Macro \ndcg{} across each model suite. Parenthesized values are
+retention relative to dense. Compression ratios are relative to fp32.}
+\label{tab:model-matrix}
+\footnotesize
+\resizebox{\linewidth}{!}{\input{tables/model_matrix}}
+\end{table}
+
+Figure~\ref{fig:heatmap} and Table~\ref{tab:model-matrix} contain the paper's
+main finding. The formats fall into three qualitatively different groups.
+
+\textbf{Per-token int8 is a robust control.} It retains 99.60--100.01\% of
+macro dense \ndcg{} across the four model suites. Across the 10 directly
+paired Jina, GTE, and ColPali cells, it stays within 0.0043 \ndcg{} of dense;
+the largest joined ColQwen2 cell gap is 0.0063. This indicates that all four
+embedding families tolerate a meaningful reduction in precision. The
+trade-off is storage: int8 plus a token scale is only $3.88\times$ smaller
+than fp32, and the release does not yet include a dedicated int8 CUDA latency
+path.
+
+\textbf{Per-token int4 is strong, but not universal.} It retains 99.75\% for
+Jina, 99.58\% for ColPali, and 99.96\% for ColQwen2 at $7.53\times$
+compression versus fp32. On GTE, however, retention falls to 87.75\% and the
+macro deficit is 0.0651. A modality-only rule would miss this: both Jina and
+GTE are text late-interaction encoders, yet they require different formats.
+Tensor-scale int4 is less reliable still, retaining only 65.1\% on GTE.
+
+\textbf{Binary and pooling are compelling on visual encoders.} Binary retains
+98.33\% on ColPali and 98.65\% on ColQwen2 at $32\times$ compression. Pool3
+retains 98.00\% and 98.11\% at approximately $96\times$. These averages hide
+dataset variation: DocVQA is the most compression-sensitive ColPali dataset,
+where pool3 loses 0.0319 \ndcg{}. The same modes are much weaker for GTE
+(76.72\% and 70.94\% macro retention).
+
+\textbf{Magnitude restoration is not automatically helpful.} Scaled binary
+is close to binary for the visual encoders and Jina, but collapses on GTE:
+FiQA falls from 0.4555 dense to 0.0710. The scale value's benefit is
+encoder-dependent, so token magnitude cannot be treated as generic side
+information.
+
+The practical conclusion is stronger than selecting a new fixed default.
+Compression should be calibrated \emph{per encoder}. A conservative int8
+control determines whether quantization is viable, after which int4, binary,
+and pooled-binary modes can be evaluated against an explicit quality budget.
+
+\subsection{End-to-end deployment frontier}
+\label{sec:production}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=.97\linewidth]{figures/production_frontier.pdf}
+\caption{End-to-end quality, storage, and single-query latency on the visual
+10k and FiQA 57k corpora. Points closer to the upper-left are preferable.}
+\label{fig:production}
+\end{figure}
+
+\begin{table}[t]
+\centering
+\caption{End-to-end benchmark results on one RTX~4090. Speedup and
+compression are relative to dense fp16 within each corpus.}
+\label{tab:production}
+\footnotesize
+\resizebox{\linewidth}{!}{\input{tables/production_end_to_end}}
+\end{table}
+
+The visual corpus exposes a wide useful frontier. Dense fp16 reaches 0.5869
+\ndcg{} at 85.7\,ms p50 and 1.94\,GB. Binary reaches 0.5782 at 3.32\,ms using
+121\,MB: $25.8\times$ lower latency and $16.0\times$ less storage. Pool3
+reaches 0.5736 at 2.17\,ms and 40.5\,MB: $39.6\times$ lower latency and
+$47.9\times$ less storage. Tensor and token int4 remain at dense quality
+(within the precision caveat above) with p50 latencies of 22.3 and 24.8\,ms.
+The result gives applications multiple meaningful operating points rather
+than one fragile optimum.
+
+FiQA with GTE is intentionally harder. Dense reaches 0.4551 at 24.3\,ms.
+Binary and pool3 are fast (5.11 and 2.86\,ms) but retain only 60.8\% and
+51.8\% of dense quality. Token int4 improves to 0.3391, but is not a
+quality-preserving default. Residual int4 recovers 99.66\% of dense quality
+at $1.88\times$ fp16 compression, though its 33.7\,ms p50 is slower than
+dense. Compression remains useful here, but the relevant objective is
+footprint rather than speed.
+
+These two corpora demonstrate why a portfolio matters. On ColQwen2, binary
+and pooling unlock both memory and latency; on GTE, a high-fidelity residual
+format is the only latency-benchmarked compressed tier near dense quality.
+Token int8 is near dense in the quality matrix but has no dedicated latency
+path.
+
+\subsection{Scaling is consistent, not universal}
+\label{sec:scale}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=.97\linewidth]{figures/scale_consistency.pdf}
+\caption{Nested scale results over three corpus seeds. Lines show means and
+bands show the seed range for the fixed 256-query protocol.}
+\label{fig:scale}
+\end{figure}
+
+The controlled scale sweep replaces an earlier, query-set-dependent
+observation that pooling overtook binary at large visual corpus sizes.
+Figure~\ref{fig:scale} shows the reproducible result. On visual data, binary
+and pool3 remain close to dense as the corpus grows, but binary consistently
+has higher quality: at 10k documents dense, binary, and pool3 reach
+0.5879, 0.5865, and 0.5774 mean \ndcg{}. Their speedups increase to
+$11.5\times$ and $17.7\times$ for the 256-query workload.
+
+On FiQA, speed also scales predictably: at 57,638 documents binary and pool3
+are $2.33\times$ and $4.22\times$ faster than dense in the batched protocol.
+Their quality deficits persist, and the scaled-binary failure remains severe.
+Residual int4 follows dense quality closely at every size but is slower.
+
+The system behavior is therefore stable enough to plan capacity, while the
+quality behavior remains model-specific. Corpus size does not rescue a codec
+that is poorly matched to the encoder.
+
+\subsection{One runtime supports five reducers}
+\label{sec:reducers}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=.90\linewidth]{figures/reducer_generality.pdf}
+\caption{Shared-reducer latency and candidate-only speedup at 4,096 documents.
+All five reducers pass the PyTorch parity gate for binary and int4.}
+\label{fig:reducers}
+\end{figure}
+
+The shared path covers MaxSim, weighted MaxSim, TopK2, TopK4, and SmoothSim.
+At 4,096 documents and 512 candidates, candidate-only scoring is
+$4.53\times$--$5.14\times$ faster than full scoring for binary and
+$5.08\times$--$5.69\times$ for int4. At 512 documents, where launch overhead
+is a larger fraction, the corresponding ranges are $1.30\times$--$1.53\times$
+and $2.09\times$--$2.30\times$.
+
+The shared MaxSim implementation is also faster than the legacy path at 4,096
+documents: $1.12\times$ for binary and $1.04\times$ for int4. At 512
+documents the binary gain is larger ($1.29\times$), while shared int4 is
+effectively at parity ($1.01\times$). Across shared-reducer rows, maximum
+deviation from PyTorch is $2.44{\times}10^{-4}$; including legacy comparison
+rows, the maximum is $3.67{\times}10^{-4}$. This result supports a general
+runtime claim for dot-product reducers without pretending that MaxSim
+retrieval experiments establish the task quality of every reducer.
+
+\subsection{Relation to PLAID}
+\label{sec:plaid}
+
+\begin{table}[t]
+\centering
+\caption{Matched FastPLAID measurements. PLAID is approximate; \sysname{}
+rows are full scans over compressed representations, so index size and
+latency are not strictly apples-to-apples.}
+\label{tab:plaid}
+\footnotesize
+\resizebox{\linewidth}{!}{\input{tables/plaid_comparison}}
+\end{table}
+
+FastPLAID reaches near-dense quality on both corpora: 0.5871 \ndcg{} at
+15.79\,ms p50 on visual 10k, and 0.4524 at 3.76\,ms on FiQA 57k. Its indexes
+occupy 1.126 and 1.166\,GB. On visual data, \sysname{} tensor/token int4
+provide comparable quality in roughly 0.49--0.52\,GB, while binary and pool3
+trade a small quality loss for much lower latency and footprint. Pool3 is
+approximately $27.8\times$ smaller than the PLAID index.
+
+On FiQA, FastPLAID provides the best measured high-quality latency/quality
+operating point: aggressive \sysname{} modes lose too much quality, and
+residual int4 is slower. This is not a contradiction. PLAID prunes the corpus
+using a learned index structure; \sysname{} is a model-agnostic compression
+and scoring primitive. It can serve as a transparent full-scan index at
+moderate scale or as the candidate reranker behind PLAID, BM25, or another
+first stage.
+
+\subsection{A practical selection policy}
+
+\begin{table}[t]
+\centering
+\caption{Recommended deployment policy. ``Validate'' means evaluating the
+mode on held-out queries from the target encoder and corpus.}
+\label{tab:policy}
+\small
+\begin{tabular}{p{.20\linewidth}p{.25\linewidth}p{.47\linewidth}}
+\toprule
+goal & first mode & decision rule \\
+\midrule
+Near-lossless & token int8 & Use as the near-lossless control;
+fall back to fp16 if the quality budget is unusually tight. \\
+Quality and footprint & token int4 & Keep if validated; for visual encoders,
+also test tensor int4. On FiQA/GTE, residual int4 was near dense; validate it
+independently on other GTE corpora. \\
+Lowest latency & binary & Keep only if the measured quality loss is
+acceptable. Visual encoders are the strongest observed case. \\
+Smallest index & pool3 binary & Validate per dataset; do not infer safety
+from modality or corpus size. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+This policy is deliberately small. It does not require a search over every
+quantizer parameter. Token int8 establishes a safe reference, and three
+aggressive candidates cover the main quality--storage--latency regimes. The
+library exposes the production formats through one API, so calibration
+changes index construction rather than the surrounding retrieval system.
+Token int8 is currently an offline calibration control without a dedicated
+runtime path. The SDK's current \texttt{auto} alias resolves to token int4 and
+should be treated as a convenience candidate, not as the model-aware selector
+proposed here.
+
+\section{Related Work}
+
+\textbf{Late interaction.} ColBERT introduced token-level MaxSim for text
+retrieval~\citep{khattab2020colbert}; ColBERTv2 combined late interaction with
+residual compression~\citep{santhanam2022colbertv2}. PLAID accelerates
+retrieval through centroid-based pruning~\citep{santhanam2022plaid}. ColPali
+extends late interaction to visual document retrieval by embedding page
+patches directly~\citep{faysse2025colpali}. \sysname{} is complementary: it
+compresses already-produced document vectors and provides exact reductions
+over the stored compressed representation.
+
+\textbf{Quantization.} Scalar and integer quantization reduce model and vector
+storage by mapping floating-point values to small discrete alphabets
+\citep{jacob2018quant}. Product quantization compresses vectors using learned
+subspace codebooks~\citep{jegou2011pq}; binary hashing and rotations such as
+ITQ target compact similarity search~\citep{gong2013itq}. Our focus is
+asymmetric dot-product late interaction, where the maximum over document
+tokens makes errors and scale choices interact with ranking.
+
+\textbf{Token reduction.} Token pruning and clustering reduce the number of
+vectors stored per document. Prior work has shown that pooling can reduce the
+multi-vector footprint with limited average impact
+\citep{clavie2024pooling}. Recent visual-document work studies patch pruning
+and merging for ColPali/ColQwen2 and develops
+Light-ColPali/ColQwen2~\citep{ma2025storage}. Our work instead evaluates
+post-hoc bit-level compression jointly with pooling and a CUDA scoring
+runtime.
+
+\textbf{Evaluation.} BEIR provides heterogeneous text retrieval tasks
+\citep{thakur2021beir}; ViDoRe is used through the ColPali evaluation stack
+\citep{faysse2025colpali}. Our contribution is not a new embedding model or
+benchmark, but a controlled map of compression behavior across existing
+families and deployment shapes.
 
 \section{Limitations}
-\label{sec:limitations}
-All latency measurements use one GPU model (RTX 4090); kernel-level findings
-(memory-boundedness of the binary path, dp4a gains) may shift on other
-architectures. Per-query significance data covers the suite but not the 10k
-comparison (256 queries there). fast-plaid latency proved
-environment-unstable in our measurements --- 23.5\,s, 171\,s, and 820\,s
-across three runs, two of which used identical tuned parameters
-(\texttt{nbits}=4, 4{,}096 full scores, 4 IVF probes) --- with index-build
-time co-varying (14.2\,s/29.8\,s/107.8\,s), while its quality stayed within
-0.5103--0.5119. We therefore cite its quality only; the instability deserves
-its own investigation before any comparative latency claim. The text
-replication (Section~\ref{sec:text}) covers three BEIR datasets (two through
-the full kernel harness and FiQA through exact CPU simulation) and one text
-model; its per-dataset heterogeneity (the int4/binary flip) means text tier
-recommendations rest on thinner evidence than the visual ones, and
-broader text-model coverage and additional text-specific formats remain future
-work. The production per-token and residual CUDA paths are runtime-validated
-at the synthetic production shape in Table~\ref{tab:production-cuda}, but have
-not yet been run through the paper's full end-to-end multimodal latency and
-corpus-scale sweeps; their quality numbers here come from the stated exact-grid
-evaluations. The scale-dependence mechanism is supported but not proven by our
-attribution analysis.
+
+The study covers four encoder families, text and visual retrieval, and
+corpora up to 57,638 documents. This is enough to show that none of the
+evaluated aggressive formats is universally safe across the tested encoders,
+but not enough to prove the selection policy optimal for all future encoders
+or million-document deployments.
+
+All evaluated encoders emit 128-dimensional vectors. The API supports fixed
+dimensions divisible by eight, but the performance claims in this paper are
+for dimension 128.
+
+End-to-end retrieval quality is measured with MaxSim. The five-reducer result
+establishes numerical correctness and runtime generality for dot-product
+late-interaction scorers; it does not establish task quality for weighted,
+top-$k$, or smooth reducers. Per-token int8 is a quality control without a
+dedicated CUDA latency kernel in this release. A label-aware automatic
+selector is not yet implemented; deployment currently uses explicit modes.
+
+All latency data comes from one RTX~4090. Absolute performance and kernel
+ordering may change on other architectures. The dense and compressed visual
+end-to-end paths differ slightly in query precision, so fourth-decimal gains
+over dense are treated as ties.
+
+FastPLAID and \sysname{} implement different search algorithms. PLAID uses
+approximate pruning and a learned index; \sysname{} reports exact full scans
+over a compressed representation. We report both because practitioners need
+the comparison, but do not present their latency as a controlled kernel
+ablation.
+
+The paper bundle contains the complete new model and systems runs, including
+result JSONs, logs, checksums, and source-cache hashes. Historical ColQwen2
+dense/binary/pool rows remain in the repository ledger and are treated as
+supporting evidence. Eight newly generated raw embedding caches were excluded
+because of size, so reproducing those runs requires re-encoding.
 
 \section*{Reproducibility Statement}
-Every reported number derives from a JSON artifact under
-\texttt{docs/\allowbreak benchmark\_results/\allowbreak raw/} in the
-\sysname{} repository. Retrieval artifacts include per-query metric vectors
-for all suite rows; the production CUDA artifact includes every timing sample,
-gate, and environment field used in Table~\ref{tab:production-cuda}. The exact
-benchmark runtime-source archive, routing sweep, and sanitizer/resource validation manifest are
-stored alongside it. Paper figures and generated exact-value tables
-regenerate deterministically from
-those artifacts (\texttt{paper/\allowbreak make\_figures.py},
-\texttt{paper/\allowbreak make\_tables.py}); the statistical analysis is
-\texttt{benchmarks/\allowbreak significance.py} with a fixed seed. Embedding caches
-rebuild via \texttt{benchmarks/\allowbreak reproduce.py} recipes at batch size~1; kernel
-correctness is enforced by the \texttt{pytest -m cuda} parity suite. Total
-compute for all experiments in this paper was approximately 30 RTX-4090-hours
-and 1 H100-hour of rented capacity.
+
+The authoritative bundle is
+\path{benchmark-results/paper-20260715}. Its SHA-256 manifest covers the
+archived model and systems results. Model-quality runs identify source commit
+\texttt{88fff9e}. The archive README identifies systems source
+\texttt{e213917e}; the systems environment field contains the malformed hash
+documented in the Appendix. Every generated table and figure in this
+manuscript is produced by \texttt{paper/make\_paper\_artifacts.py}, which
+validates completion status, required result fields, expected dataset counts,
+and the explicit ColQwen2 legacy/new join before writing paper artifacts.
+
+End-to-end JSONs retain raw per-query timing samples, rankings, quality
+vectors, storage reports, and run signatures. Scale runs retain all three
+seeds at every size. Reducer artifacts retain the exact shapes, implementations,
+latencies, and PyTorch errors. The archived experiment workers each report 80
+passing CUDA-selected tests. The release-validation artifact records 80 CUDA
+tests, 223 non-CUDA tests, and zero errors across Compute Sanitizer memcheck,
+initcheck, racecheck, and synccheck.
 
 \section{Conclusion}
-Compressed late-interaction retrieval is not a single trade-off but a family
-of them, and choices beyond the cross-modal quality-first default move with
-corpus size. A practitioner can hold
-dense quality to within $0.002$ mean \ndcg{} over the evaluated suite at
-$8\times$ compression (int4$+$dp4a), or accept $\sim$$0.01$ at $96\times$
-(pool3). On the measured 10k-document MaxSim benchmark these tiers run
-5--13$\times$ faster than an honestly implemented dense baseline on the same GPU. All
-kernels, benchmarks, artifacts, and negative results are released with the
-library.
 
-\bibliographystyle{plainnat}
-\begin{thebibliography}{9}
+Multi-vector retrieval does not need a single universal codec to become
+practical. It needs a small, well-measured portfolio. Across four encoder
+families, per-token int8 is consistently near dense, per-token int4 is an
+excellent aggressive format for Jina and visual encoders, binary and pooling
+produce large visual speedups, and GTE requires higher fidelity. The same
+runtime supports five reducers and efficient candidate reranking.
+
+The resulting default is a procedure, not a constant: establish a
+near-lossless control, validate a few aggressive modes on the target encoder,
+and choose the smallest representation that satisfies the application's
+quality budget. \sysname{} supports deploying the selected production format
+through one index API, with parity-tested CUDA kernels and reproducible
+evidence.
+
+\begin{thebibliography}{15}
 
 \bibitem[Khattab and Zaharia(2020)]{khattab2020colbert}
 O.~Khattab and M.~Zaharia.
 \newblock ColBERT: Efficient and effective passage search via contextualized
-  late interaction over BERT.
+late interaction over BERT.
 \newblock In \emph{SIGIR}, 2020.
 
 \bibitem[Santhanam et~al.(2022a)]{santhanam2022colbertv2}
 K.~Santhanam, O.~Khattab, J.~Saad-Falcon, C.~Potts, and M.~Zaharia.
 \newblock ColBERTv2: Effective and efficient retrieval via lightweight late
-  interaction.
+interaction.
 \newblock In \emph{NAACL}, 2022.
 
 \bibitem[Santhanam et~al.(2022b)]{santhanam2022plaid}
@@ -623,10 +626,41 @@ K.~Santhanam, O.~Khattab, C.~Potts, and M.~Zaharia.
 \newblock PLAID: An efficient engine for late interaction retrieval.
 \newblock In \emph{CIKM}, 2022.
 
-\bibitem[Faysse et~al.(2024)]{faysse2024colpali}
+\bibitem[Faysse et~al.(2025)]{faysse2025colpali}
 M.~Faysse, H.~Sibille, T.~Wu, B.~Omrani, G.~Viaud, C.~Hudelot, and P.~Colombo.
 \newblock ColPali: Efficient document retrieval with vision language models.
-\newblock \emph{arXiv:2407.01449}, 2024.
+\newblock In \emph{International Conference on Learning Representations},
+2025.
+
+\bibitem[Jha et~al.(2024)]{jha2024jina}
+R.~Jha, B.~Wang, M.~G\"unther, G.~Mastrapas, S.~Sturua, I.~Mohr,
+A.~Koukounas, M.~K. Akram, N.~Wang, and H.~Xiao.
+\newblock Jina-ColBERT-v2: A general-purpose multilingual late interaction
+retriever.
+\newblock In \emph{MRL}, pages 159--166, 2024.
+
+\bibitem[Chaffin and Sourty(2025)]{chaffin2025pylate}
+A.~Chaffin and R.~Sourty.
+\newblock PyLate: Flexible training and retrieval for late interaction
+models.
+\newblock In \emph{CIKM}, pages 6334--6339, 2025.
+
+\bibitem[Chaffin(2025)]{chaffin2025gte}
+A.~Chaffin.
+\newblock GTE-ModernColBERT-v1 model card.
+\newblock \url{https://huggingface.co/lightonai/GTE-ModernColBERT-v1}, 2025.
+
+\bibitem[ViDoRe(2025)]{vidore2025colqwen2}
+ViDoRe.
+\newblock ColQwen2-v1.0-HF model repository, revision
+\texttt{b8a106812c8682bab08935cf5d1b4566c82562de}.
+\newblock \url{https://huggingface.co/vidore/colqwen2-v1.0-hf}, 2025.
+
+\bibitem[Thakur et~al.(2021)]{thakur2021beir}
+N.~Thakur, N.~Reimers, A.~R\"uckl\'e, A.~Srivastava, and I.~Gurevych.
+\newblock BEIR: A heterogeneous benchmark for zero-shot evaluation of
+information retrieval models.
+\newblock In \emph{NeurIPS Datasets and Benchmarks}, 2021.
 
 \bibitem[J{\'e}gou et~al.(2011)]{jegou2011pq}
 H.~J{\'e}gou, M.~Douze, and C.~Schmid.
@@ -636,62 +670,79 @@ H.~J{\'e}gou, M.~Douze, and C.~Schmid.
 \bibitem[Gong et~al.(2013)]{gong2013itq}
 Y.~Gong, S.~Lazebnik, A.~Gordo, and F.~Perronnin.
 \newblock Iterative quantization: A Procrustean approach to learning binary
-  codes for large-scale image retrieval.
+codes for large-scale image retrieval.
 \newblock \emph{IEEE TPAMI}, 35(12), 2013.
 
 \bibitem[Jacob et~al.(2018)]{jacob2018quant}
 B.~Jacob, S.~Kligys, B.~Chen, M.~Zhu, M.~Tang, A.~Howard, H.~Adam, and
-  D.~Kalenichenko.
+D.~Kalenichenko.
 \newblock Quantization and training of neural networks for efficient
-  integer-arithmetic-only inference.
+integer-arithmetic-only inference.
 \newblock In \emph{CVPR}, 2018.
 
 \bibitem[Clavi{\'e} et~al.(2024)]{clavie2024pooling}
 B.~Clavi{\'e}, A.~Chaffin, and G.~Adams.
 \newblock Reducing the footprint of multi-vector retrieval with minimal
-  performance impact via token pooling.
+performance impact via token pooling.
 \newblock \emph{arXiv:2409.14683}, 2024.
+
+\bibitem[Ma et~al.(2025)]{ma2025storage}
+Y.~Ma, J.~Li, Y.~Zang, X.~Wu, X.~Dong, P.~Zhang, Y.~Cao, H.~Duan,
+J.~Wang, Y.~Cao, and A.~Sun.
+\newblock Towards storage-efficient visual document retrieval: An empirical
+study on reducing patch-level embeddings.
+\newblock In \emph{Findings of ACL}, pages 19568--19580, 2025.
 
 \end{thebibliography}
 
+\clearpage
 \appendix
 
-\section{Exact Per-Dataset Values}
-\label{app:exact}
+\section{Exact Per-Dataset Quality}
+\label{app:quality}
 
-\begin{table}[h]
-\centering
-\caption{Exact \ndcg{} for every tier on every ViDoRe dataset, ColQwen2
-embeddings, full test splits, repeat-3. Generated from the artifact
-ledger by \texttt{paper/make\_tables.py}.}
-\label{tab:perdataset-full}
+\begin{center}
+\captionof{table}{Text \ndcg{} by dataset for Jina-ColBERT-v2 and
+GTE-ModernColBERT.}
+\label{tab:text-exact}
 \footnotesize
-\setlength{\tabcolsep}{3.6pt}
-\input{tables/per_dataset_colqwen2}
-\end{table}
+\resizebox{\linewidth}{!}{\input{tables/per_dataset_text}}
+\end{center}
 
-\begin{table}[h]
-\centering
-\caption{ColPali-v1.3 replication (four datasets, full test splits,
-repeat-3): the tier ordering of the main experiments is preserved on a second
-embedding model.}
-\label{tab:perdataset-colpali}
+\begin{center}
+\captionof{table}{Visual \ndcg{} by dataset for ColPali-v1.3 and ColQwen2-v1.0.
+ColQwen2 controls joined from the later run are marked in the generated
+table.}
+\label{tab:visual-exact}
 \footnotesize
-\setlength{\tabcolsep}{3.6pt}
-\input{tables/per_dataset_colpali}
-\end{table}
+\resizebox{\linewidth}{!}{\input{tables/per_dataset_visual}}
+\end{center}
 
-\section{Kernel Microbenchmarks}
-\label{app:kernels}
+\section{Scale and Reducer Details}
 
-\begin{table}[h]
-\centering
-\caption{Generic vs.\ unrolled dim-128 binary kernel across corpus shapes
-(RTX 4090, warm-up$+$median). The unrolled kernel wins at every shape with
-$\ge$\,256 tokens per document, which sets the routing gate's threshold.}
-\label{tab:kernels}
-\small
-\input{tables/kernels}
-\end{table}
+\begin{center}
+\captionof{table}{Mean nested-scale results across three seeds. Latency speedup is
+relative to dense fp16 at the same corpus size.}
+\label{tab:scale-exact}
+\footnotesize
+\resizebox{\linewidth}{!}{\input{tables/scale_summary}}
+\end{center}
+
+\begin{center}
+\captionof{table}{Shared-reducer parity and latency at 512 and 4,096 documents.}
+\label{tab:reducers-exact}
+\footnotesize
+\resizebox{\linewidth}{!}{\input{tables/reducers_generalization}}
+\end{center}
+
+\section{Cascade Decision}
+
+Residual cascades were evaluated on FiQA with candidate budgets 100, 200, and
+400. They recovered 94.6--99.4\% of the quality gap between the prefix and
+full residual representation, but achieved only $1.01\times$--$1.02\times$
+speedup relative to full residual scoring and added 78--81\% latency over the
+prefix. Because the FiQA gate failed, the planned visual cascade replication
+was skipped. Cascading is therefore implemented as an optional composition,
+but it is not part of the paper's recommended core portfolio.
 
 \end{document}

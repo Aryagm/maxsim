@@ -774,11 +774,14 @@ The July 5 conclusions are now implemented rather than simulation-only:
   residual similarities before the requested reducer. A full-corpus candidate
   budget bypasses the coarse pass.
 - The geometry-dependent binary and pooling findings remain available through
-  explicit presets; they no longer drive `auto`.
+  explicit presets; they no longer drive `auto`. Later cross-model results
+  also show that per-token int4 is not universally safe, so `auto` should be
+  treated as a convenience alias until label-aware calibration is implemented.
 
 CPU reference and CUDA parity tests are in-tree. PR CI now compiles and links a
-fixed-SM CUDA wheel. The production paths are runtime-validated below; only the
-end-to-end multimodal and corpus-scale production sweeps remain.
+fixed-SM CUDA wheel. The production paths are runtime-validated below; the
+completed cross-model, end-to-end, and corpus-scale sweeps are archived in
+`benchmark-results/paper-20260715/`.
 
 ## 2026-07-14 - Production CUDA Validation And Residual Tuning
 

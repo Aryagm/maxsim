@@ -54,7 +54,7 @@ MODE_PRESETS = {
 }
 
 def resolve_auto_mode(num_docs: int, embeddings: np.ndarray | None = None) -> str:
-    """Return the measured cross-modal quality-first default."""
+    """Return the per-token int4 convenience preset."""
     del num_docs, embeddings
     return "int4_per_token"
 

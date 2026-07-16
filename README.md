@@ -3,16 +3,18 @@
 [![ci](https://github.com/Aryagm/maxsim/actions/workflows/ci.yml/badge.svg)](https://github.com/Aryagm/maxsim/actions/workflows/ci.yml)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**Compress ColPali/ColBERT-style indexes by 7.5–96×, with optional residual reranking.**
+**Compress ColPali/ColBERT-style indexes by 3.8–95.9×, with model-aware format selection.**
 
 `maxsim` is the compression and scoring layer for multi-vector retrieval: it
 compresses token/patch embeddings and scores the stored compressed similarities
 with exact CUDA reductions for MaxSim, weighted MaxSim, TopK2/TopK4, and
 SmoothSim. Full scans add no approximation beyond the chosen compression;
 residual cascades with fewer candidates than documents additionally approximate
-selection. The measured MaxSim suite mean is within 0.002–0.010 NDCG@10 of
-full dense scoring, and the measured 10k-document benchmark runs 5–13× faster
-than a vectorized dense fp16 baseline on the same GPU.
+selection. Across Jina-ColBERT-v2, GTE-ModernColBERT, ColPali-v1.3, and
+ColQwen2-v1.0, the conservative per-token int8 control stays within 0.0063
+NDCG@10 of dense. More aggressive formats are encoder-dependent: per-token
+int4 is nearly lossless for Jina and the visual encoders, while GTE needs
+higher fidelity.
 
 ```python
 import maxsim
@@ -28,8 +30,8 @@ results = reranker.search(query_embeddings, k=10)
 It works with **fixed-dimensional multi-vector embedding models using
 dot-product late interaction** (dim divisible by 8; the fastest kernel paths
 are tuned for dim 128, the ColBERT/ColPali standard). Validated end-to-end on
-ColQwen2 and ColPali-v1.3 visual-document embeddings; designed to support
-ColBERT/ColPali/ColQwen-style late-interaction systems generally.
+Jina-ColBERT-v2 and GTE-ModernColBERT text embeddings plus ColPali-v1.3 and
+ColQwen2-v1.0 visual-document embeddings.
 
 This is not a vector database, RAG framework, or embedding model — it is the
 compressed scoring and reranking primitive those systems can call.
@@ -37,10 +39,10 @@ compressed scoring and reranking primitive those systems can call.
 ## Choosing a tier
 
 ```text
-auto      (default) uses per-token int4, the cross-modal quality-first tier
+auto      (default) uses per-token int4 as a convenience starting point
 int4      tensor-scale int4 control, 8× smaller, dp4a-accelerated
-binary    strong all-rounder, 32× smaller — the robust tier for text models
-pool3     extreme compression, 96× smaller — quality is query-set dependent
+binary    32× smaller — strongest measured latency tier on visual encoders
+pool3     95.9× smaller — validate quality per encoder and dataset
 ```
 
 `Index.from_embeddings(..., mode=...)` accepts these directly or the full
@@ -48,25 +50,26 @@ preset/mode names:
 
 | preset | recipe | pick when |
 | --- | --- | --- |
-| `auto` *(default)* | per-token int4 (64 B codes + 4 B scale per dim-128 token; 7.53× vs fp32) | you want the cross-modal quality-first default |
-| `max_quality` | per-token int4 with fp32 queries | the most consistent quality-first tier across the evaluated families |
+| `auto` *(default)* | per-token int4 (64 B codes + 4 B scale per dim-128 token; 7.53× vs fp32) | you want a convenient first candidate and will validate it |
+| `max_quality` | per-token int4 with fp32 queries | an aggressive candidate for Jina and visual encoders; not a universal maximum-quality mode |
 | `balanced` | binary + fp16 per-token scales | small corpora (≲500 docs), where magnitude restoration measurably helps |
 | `compact` | binary + 4-bit log per-token scales | as `balanced`, 9% smaller index, statistically identical quality |
 | `max_speed` | binary signs | large corpora when storage is tight and latency is king |
 | `max_compression` | pool3 binary by default (override with `pool_factor=2`; needs `pip install -e ".[pooling]"`) | 10k+ docs where size dominates |
 
-Binary side-information and pooling remain corpus-size- and geometry-dependent.
-Per-token int4 is different: among the int4 variants it is the most consistent
-cross-modal default, winning three of five evaluated datasets/families and
-remaining within 0.0023 NDCG@10 of the best variant on the other two. `auto`
-therefore no longer relies on an unvalidated geometry heuristic. Direct `int4`
-remains the tensor-scale control.
+All aggressive modes require calibration on held-out queries from the target
+encoder and corpus. Per-token int4 is near lossless for Jina-ColBERT-v2,
+ColPali-v1.3, and ColQwen2-v1.0, but loses 0.0651 mean NDCG@10 on
+GTE-ModernColBERT. `auto` resolves unconditionally to per-token int4 and is a
+convenience alias, not the model-aware selector proposed in the paper. The
+near-lossless token-int8 control is currently benchmark-only and has no
+dedicated CUDA latency path.
 On CUDA dim-128 indexes, `int4_query="int8"` optionally selects the dp4a path
 for full-corpus MaxSim search only. Candidate-only reranking, residual
 rescoring, and non-MaxSim reducers keep the fp32-query path.
 
 <p align="center">
-  <img src="docs/figures/scale_flip.png" width="620" alt="Each tier's NDCG delta versus plain binary across four corpus scales: token scales invert from gain to loss, pooling strengthens monotonically">
+  <img src="docs/figures/model_format_heatmap.png" width="720" alt="NDCG retention by encoder family and compressed format, showing that the best aggressive format depends on the encoder">
 </p>
 
 ## Measured results
@@ -138,10 +141,12 @@ Byte budgets for every released format, including the 68 B/token per-token and
   <img src="docs/figures/format_layout.png" width="620" alt="Stored bytes per 128-dim token for each released format, including residual and per-token int4">
 </p>
 
-All numbers derive from JSON artifacts in the release ledger. Retrieval evaluations retain
-per-query metrics; production benchmarks retain raw timing samples and gates.
-See `paper/` for the full write-up and `docs/gpu_optimization.md` for the
-complete measurement history, including negative results.
+The paper's authoritative result bundle is
+`benchmark-results/paper-20260715/`. Retrieval evaluations retain per-query
+metrics; end-to-end benchmarks retain raw timing samples, storage reports, and
+run signatures. See `paper/` for the full write-up and
+`docs/gpu_optimization.md` for the measurement history, including negative
+results.
 
 ## Install
 
@@ -190,7 +195,7 @@ CUDA index allocations, CUDA workspace, and serialized file bytes separately.
   int8-query × int4-doc kernel with scale-before-max semantics; fused residual
   candidate rescoring; fused top-k with deterministic tie-breaking. CUDA parity
   tests are included under `pytest -m cuda`; per-token and residual paths are
-  production-shape validated and still need the end-to-end sweeps listed below.
+  validated in the archived end-to-end production sweeps.
 - **Kept but unrouted, with evidence**: streaming top-k, dp4a-for-binary, and
   a one-pass q-tiled kernel — each measured slower than what ships, each
   documented in `docs/gpu_optimization.md` so nobody rebuilds them on a hunch.
@@ -204,19 +209,18 @@ CUDA index allocations, CUDA workspace, and serialized file bytes separately.
   through the public SDK.
 - `benchmarks/significance.py` — paired bootstrap CIs + sign tests from the
   stored per-query vectors.
-- `paper/make_figures.py` / `paper/make_tables.py` — regenerate every figure
-  (PDF + README PNG) and the generated exact-value LaTeX tables from the
-  artifact ledger (`docs/benchmark_results/raw/`).
+- `paper/make_paper_artifacts.py` — validate the archived result bundle and
+  regenerate the paper's figures (PDF + README PNG) and exact-value LaTeX
+  tables.
 - `python -m benchmarks.reproduce --suite ...` — canonical cache-building and
   comparison recipes. Embedding caches must be built at `--batch-size 1`
   (the builder is not batch-faithful; see docs). For fast rebuilds, run many
   batch-1 builder processes concurrently on one large-memory GPU.
 
 Two honesty notes baked into the methodology: speedups are cited against the
-**vectorized** dense baseline (the naïve per-document loop overstates dense
-cost 27×), and fast-plaid latency is not cited because it varied 23.5–820 s
-across three runs — two at identical tuned parameters — while its quality
-stayed at parity (0.5103–0.5119).
+**vectorized** dense baseline rather than a naïve per-document loop, and
+FastPLAID is reported as an approximate learned index rather than a controlled
+kernel ablation against exact compressed full scans.
 
 Note on provenance: the historical benchmark artifacts predate the project's
 rename and use implementation keys prefixed `bitmax_` (the former name); the
@@ -224,29 +228,29 @@ keys are preserved verbatim so every historical artifact stays reproducible.
 
 ## Paper
 
-`paper/main.tex` — *maxsim: A Compressed Runtime for Multi-Vector Retrieval*
-— typeset on the arXiv preprint template, with all figures and exact-value
-tables generated from the artifact ledger by `paper/make_figures.py` and
-`paper/make_tables.py`. Compiles with `tectonic main.tex` from `paper/`.
+`paper/main.tex` — *maxsim: Model-Aware Compression for Multi-Vector
+Retrieval* — typeset on the arXiv preprint template, with all figures and
+exact-value tables generated by `paper/make_paper_artifacts.py` from
+`benchmark-results/paper-20260715/`. The compiled manuscript is
+[`output/pdf/maxsim-model-aware-compression.pdf`](output/pdf/maxsim-model-aware-compression.pdf).
 
 ## Status & limitations
 
-- Published latency for the previously benchmarked binary and tensor-scale
-  int4 paths and the production per-token/residual validation was measured on
-  RTX 4090 (kernel findings may shift on other architectures). End-to-end
-  multimodal latency sweeps remain to be run with the production kernels.
-  Dim-128 embeddings are the tested path (dim must be divisible by 8; several
-  fast paths are dim-128-specific).
-- Text ColBERT is measured (GTE-ModernColBERT on BEIR); its absolute compressed
-  quality gap remains larger than on the visual suites. Per-token int4 improves
-  the 8×-class tier across the evaluated text sets, but broader model and
-  dataset coverage is still required before calling the result universal.
+- Quality is measured across four encoder families and 20 encoder-dataset
+  cells. The largest evaluated corpora contain 10,171 visual documents and
+  57,638 FiQA documents. These results establish a model-aware portfolio, not
+  a universal aggressive codec.
+- All latency and kernel measurements use one RTX 4090. Dim-128 embeddings are
+  the tested performance path (the API requires dimensions divisible by 8).
+- End-to-end task quality is measured with MaxSim. Weighted MaxSim, TopK2,
+  TopK4, and SmoothSim are validated for numerical parity and runtime, not
+  retrieval-task quality. Token int8 remains an offline calibration control.
 - No prebuilt CUDA wheels yet; build from source.
 
 ## Roadmap
 
-1. Run end-to-end multimodal and corpus-scale sweeps through the now-validated
-   production per-token and residual kernels.
+1. Add a label-aware calibration helper that evaluates the small format
+   portfolio and writes the selected mode into index metadata.
 2. Prebuilt CUDA wheels (`pip install maxsim` with no toolkit required).
 3. Adapters for PyLate/Byaldi/Qdrant-style workflows.
 4. Batched-query serving kernels and a hosted demo.
@@ -255,7 +259,7 @@ tables generated from the artifact ledger by `paper/make_figures.py` and
 
 If you use maxsim, please cite the paper (see `CITATION.cff`):
 
-> Manjaramkar, A. *maxsim: A Compressed Runtime for Multi-Vector Retrieval.*
+> Manjaramkar, A. *maxsim: Model-Aware Compression for Multi-Vector Retrieval.*
 > 2026.
 
 ## License

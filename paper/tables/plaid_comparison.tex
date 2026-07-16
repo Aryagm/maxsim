@@ -1,0 +1,20 @@
+\begin{tabular}{llrrrr}
+\toprule
+corpus & system & \ndcg{} & \recall{} & p50 ms & index GB \\
+\midrule
+Visual 10k & FastPLAID & 0.5871 & 0.6445 & 15.79 & 1.126 \\
+Visual 10k & \sysname{} Dense & 0.5869 & 0.6465 & 85.73 & 1.943 \\
+Visual 10k & \sysname{} Binary & 0.5782 & 0.6440 & 3.32 & 0.121 \\
+Visual 10k & \sysname{} Pool3 & 0.5736 & 0.6395 & 2.17 & 0.041 \\
+Visual 10k & \sysname{} I4/tensor & 0.5872 & 0.6505 & 22.26 & 0.486 \\
+Visual 10k & \sysname{} I4/token & 0.5875 & 0.6470 & 24.85 & 0.516 \\
+Visual 10k & \sysname{} Residual & 0.5866 & 0.6465 & 49.26 & 1.032 \\
+FiQA 57k & FastPLAID & 0.4524 & 0.5200 & 3.76 & 1.166 \\
+FiQA 57k & \sysname{} Dense & 0.4551 & 0.5214 & 24.31 & 1.970 \\
+FiQA 57k & \sysname{} Binary & 0.2769 & 0.3351 & 5.11 & 0.123 \\
+FiQA 57k & \sysname{} Pool3 & 0.2359 & 0.2758 & 2.86 & 0.041 \\
+FiQA 57k & \sysname{} I4/tensor & 0.2091 & 0.2752 & 15.44 & 0.492 \\
+FiQA 57k & \sysname{} I4/token & 0.3391 & 0.3885 & 18.48 & 0.523 \\
+FiQA 57k & \sysname{} Residual & 0.4536 & 0.5192 & 33.72 & 1.047 \\
+\bottomrule
+\end{tabular}

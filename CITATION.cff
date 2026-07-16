@@ -1,6 +1,6 @@
 cff-version: 1.2.0
 message: "If you use maxsim, please cite it as below."
-title: "maxsim: A Compressed Runtime for Multi-Vector Retrieval"
+title: "maxsim: Model-Aware Compression for Multi-Vector Retrieval"
 authors:
   - family-names: Manjaramkar
     given-names: Arya
@@ -9,7 +9,7 @@ date-released: 2026-07-04
 repository-code: "https://github.com/Aryagm/maxsim"
 preferred-citation:
   type: article
-  title: "maxsim: A Compressed Runtime for Multi-Vector Retrieval"
+  title: "maxsim: Model-Aware Compression for Multi-Vector Retrieval"
   authors:
     - family-names: Manjaramkar
       given-names: Arya
